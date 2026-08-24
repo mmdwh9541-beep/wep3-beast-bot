@@ -9,7 +9,6 @@ const { derivePath } = require('ed25519-hd-key');
 const app = express();
 const port = process.env.PORT || 10000; 
 
-// حماية شاملة من الانهيار المفاجئ
 process.on('uncaughtException', (err) => {
     console.error('🔥 Uncaught Exception:', err.message);
 });
@@ -81,8 +80,14 @@ try {
           ctx.reply("🦈 Sniper Radar is ON!\nTracking Raydium pools & Whale activity...");
       });
 
-      bot.launch();
-      console.log("✅ Telegram Bot launched successfully!");
+      // مسح أي ويبهوك قديم وتشغيل البوت فوراً
+      bot.telegram.deleteWebhook().then(() => {
+          bot.launch();
+          console.log("✅ Telegram Bot launched successfully & Webhook cleared!");
+      }).catch(() => {
+          bot.launch();
+          console.log("✅ Telegram Bot launched successfully!");
+      });
   }
 
   app.listen(port, () => console.log(`✅ Beast Sniper running on port ${port}...`));
