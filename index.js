@@ -1,11 +1,19 @@
-require('dotenv').config(); // تم تعديل حرف R إلى r
+// 1. اصطياد أي أخطاء مخفية ومنع التطبيق من الإغلاق الصامت
+process.on('uncaughtException', (err) => {
+    console.error('🔥 خطأ فادح مخفي:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('⚠️ خطأ في الوعود (Promise):', reason);
+});
+
+require('dotenv').config();
 const express = require('express');
 const { Telegraf } = require('telegraf');
 const mongoose = require('mongoose');
-const { Connection, Keypair, PublicKey } = require('@solana/web3.js');
+const { Connection, Keypair } = require('@solana/web3.js');
 const bip39 = require('bip39');
 const { derivePath } = require('ed25519-hd-key');
-const bs58 = require('bs58'); // أضفنا هذه المكتبة لدعم Base58
+const bs58 = require('bs58'); 
 
 const app = express();
 app.use(express.json());
@@ -17,13 +25,10 @@ const RPC_URL = process.env.RPC_URL || 'https://api.mainnet-beta.solana.com';
 const PORT = process.env.PORT || 10000;
 
 console.log('🚀 بدء تشغيل البوت...');
-console.log('📊 التحقق من الإعدادات:');
-console.log('✅ تليجرام:', TELEGRAM_TOKEN ? 'موجود' : 'مفقود!');
-console.log('✅ الكلمات السرية:', BOT_PRIVATE_KEY ? 'موجودة' : 'مفقودة!');
-console.log('✅ قاعدة البيانات:', MONGODB_URI ? 'موجودة' : 'مفقودة!');
 
 async function connectToDatabase() {
     try {
+        if (!MONGODB_URI) throw new Error('رابط قاعدة البيانات غير موجود');
         await mongoose.connect(MONGODB_URI);
         console.log('✅ تم الاتصال بقاعدة البيانات!');
     } catch (error) {
@@ -34,79 +39,67 @@ async function connectToDatabase() {
 let wallet = null;
 async function loadWallet() {
     try {
+        if (!BOT_PRIVATE_KEY) throw new Error('المفتاح الخاص غير موجود');
         const trimmedKey = BOT_PRIVATE_KEY.trim();
         
         if (trimmedKey.includes(' ')) {
-            console.log('📝 تم اكتشاف 24 كلمة سرية...');
             const seed = bip39.mnemonicToSeedSync(trimmedKey);
             const derivedSeed = derivePath("m/44'/501'/0'/0'", seed.toString('hex')).key;
             wallet = Keypair.fromSeed(derivedSeed);
         } else if (trimmedKey.startsWith('[')) {
-            console.log('🔢 تم اكتشاف مصفوفة أرقام...');
             const secretKey = JSON.parse(trimmedKey);
             wallet = Keypair.fromSecretKey(Buffer.from(secretKey));
         } else {
-            console.log('🔤 تم اكتشاف مفتاح Base58...');
-            // تم تصحيح طريقة فك تشفير Base58 هنا
             wallet = Keypair.fromSecretKey(bs58.decode(trimmedKey));
         }
-        
         console.log('✅ تم تحميل المحفظة:', wallet.publicKey.toString());
     } catch (error) {
         console.log('❌ خطأ في تحميل المحفظة:', error.message);
     }
 }
 
-const bot = new Telegraf(TELEGRAM_TOKEN);
-
-bot.start((ctx) => {
-    ctx.reply(
-        '🤖 **مرحباً بك في بوت التداول!**\n\n' +
-        '📊 الأوامر المتاحة:\n' +
-        '/status - حالة البوت\n' +
-        '/balance - رصيد المحفظة\n' +
-        '/help - المساعدة'
-    );
-});
-
-bot.command('status', (ctx) => {
-    ctx.reply(
-        '📊 **حالة البوت**\n\n' +
-        '✅ البوت يعمل\n' +
-        '🔗 الشبكة: Solana Mainnet\n' +
-        '💾 قاعدة البيانات: متصلة'
-    );
-});
-
-bot.command('balance', async (ctx) => {
-    if (!wallet) {
-        return ctx.reply('❌ المحفظة غير مهيأة');
-    }
+let bot;
+try {
+    bot = new Telegraf(TELEGRAM_TOKEN);
     
-    try {
-        const connection = new Connection(RPC_URL);
-        const balance = await connection.getBalance(wallet.publicKey);
-        const solBalance = balance / 1e9;
-        
-        ctx.reply(
-            `💰 **رصيد المحفظة**\n\n` +
-            `💎 الرصيد: ${solBalance.toFixed(4)} SOL\n` +
-            `📮 العنوان: ${wallet.publicKey.toString().slice(0, 20)}...`
-        );
-    } catch (error) {
-        ctx.reply('❌ خطأ في جلب الرصيد');
-    }
-});
+    bot.start((ctx) => ctx.reply('🤖 **مرحباً بك في بوت التداول!**'));
+    bot.command('status', (ctx) => ctx.reply('✅ البوت يعمل'));
+    bot.command('balance', async (ctx) => {
+        if (!wallet) return ctx.reply('❌ المحفظة غير مهيأة');
+        try {
+            const connection = new Connection(RPC_URL);
+            const balance = await connection.getBalance(wallet.publicKey);
+            ctx.reply(`💰 الرصيد: ${(balance / 1e9).toFixed(4)} SOL`);
+        } catch (error) {
+            ctx.reply('❌ خطأ في جلب الرصيد');
+        }
+    });
+} catch (error) {
+    console.error('❌ خطأ في إعداد التليجرام:', error.message);
+}
 
-bot.command('help', (ctx) => {
-    ctx.reply(
-        '📚 **المساعدة**\n\n' +
-        '/start - بدء البوت\n' +
-        '/status - حالة البوت\n' +
-        '/balance - رصيد المحفظة\n' +
-        '/help - المساعدة'
-    );
-});
-
+// === التغيير الجذري هنا ===
 async function main() {
-    a
+    // 1. فتح المنفذ فوراً لكي لا تغلق منصة Render التطبيق
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🌐 السيرفر يعمل على المنفذ ${PORT} - Render راضٍ الآن!`);
+    });
+
+    app.get('/', (req, res) => res.send('✅ البوت يعمل بنجاح!'));
+    
+    // 2. الاتصال بباقي الخدمات بعد فتح المنفذ
+    await connectToDatabase();
+    await loadWallet();
+    
+    if (bot) {
+        bot.launch().then(() => {
+            console.log('✅ تم تشغيل بوت التليجرام بنجاح!');
+        }).catch(err => {
+            console.error('❌ فشل تشغيل بوت التليجرام:', err.message);
+        });
+    }
+}
+
+main().catch(error => {
+    console.error('❌ خطأ قاتل في التشغيل:', error);
+});
