@@ -1,10 +1,11 @@
-require('dotenv').config();
+require('dotenv').config(); // تم تعديل حرف R إلى r
 const express = require('express');
 const { Telegraf } = require('telegraf');
 const mongoose = require('mongoose');
 const { Connection, Keypair, PublicKey } = require('@solana/web3.js');
 const bip39 = require('bip39');
 const { derivePath } = require('ed25519-hd-key');
+const bs58 = require('bs58'); // أضفنا هذه المكتبة لدعم Base58
 
 const app = express();
 app.use(express.json());
@@ -33,30 +34,26 @@ async function connectToDatabase() {
 let wallet = null;
 async function loadWallet() {
     try {
-        // التحقق من نوع المفتاح
         const trimmedKey = BOT_PRIVATE_KEY.trim();
         
         if (trimmedKey.includes(' ')) {
-            // المفتاح عبارة عن 24 كلمة (Mnemonic)
             console.log('📝 تم اكتشاف 24 كلمة سرية...');
             const seed = bip39.mnemonicToSeedSync(trimmedKey);
             const derivedSeed = derivePath("m/44'/501'/0'/0'", seed.toString('hex')).key;
             wallet = Keypair.fromSeed(derivedSeed);
         } else if (trimmedKey.startsWith('[')) {
-            // المفتاح عبارة عن مصفوفة أرقام
             console.log('🔢 تم اكتشاف مصفوفة أرقام...');
             const secretKey = JSON.parse(trimmedKey);
             wallet = Keypair.fromSecretKey(Buffer.from(secretKey));
         } else {
-            // محاولة تحويل من Base58
             console.log('🔤 تم اكتشاف مفتاح Base58...');
-            wallet = Keypair.fromSecretKey(Buffer.from(trimmedKey, 'base58'));
+            // تم تصحيح طريقة فك تشفير Base58 هنا
+            wallet = Keypair.fromSecretKey(bs58.decode(trimmedKey));
         }
         
         console.log('✅ تم تحميل المحفظة:', wallet.publicKey.toString());
     } catch (error) {
         console.log('❌ خطأ في تحميل المحفظة:', error.message);
-        console.log('💡 تأكد من صحة الكلمات السرية أو المفتاح الخاص');
     }
 }
 
@@ -105,3 +102,11 @@ bot.command('help', (ctx) => {
     ctx.reply(
         '📚 **المساعدة**\n\n' +
         '/start - بدء البوت\n' +
+        '/status - حالة البوت\n' +
+        '/balance - رصيد المحفظة\n' +
+        '/help - المساعدة'
+    );
+});
+
+async function main() {
+    a
