@@ -1,7 +1,6 @@
 {
   "name": "wep3-beast-bot",
   "version": "1.0.0",
-  "description": "Solana Sniper Bot",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"
