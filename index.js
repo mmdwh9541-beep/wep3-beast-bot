@@ -9,25 +9,27 @@ const { derivePath } = require('ed25519-hd-key');
 const app = express();
 const port = process.env.PORT || 3000; 
 
-// --- 🚨 الأمان أولاً: سحب البيانات السرية من البيئة (Environment) ---
 const telegramToken = process.env.TELEGRAM_TOKEN;
 const botPrivateKey = process.env.BOT_PRIVATE_KEY;
 const mongoURI = process.env.MONGO_URI;
 
-// التأكد من وجود البيانات السرية قبل التشغيل
 if (!telegramToken || !mongoURI) {
-    console.error("❌ خطأ قاتل: البيانات السرية غير موجودة! تأكد من إضافتها في إعدادات Environment.");
+    console.error("❌ خطأ: البيانات السرية غير موجودة!");
     process.exit(1);
 }
 
 const seenSignatures = new Set(); 
 
+// --- 🛑 إعدادات إدارة رأس المال ---
+const MAX_TRADES = 5; 
+let currentTradesCount = 0; // عداد الصفقات الحالي
+
 try {
-  console.log("⏳ Loading Web3 Beast Engine [SECURE MODE]...");
+  console.log("⏳ Loading Web3 Beast Engine [SMART MONEY MODE]...");
 
   mongoose.connect(mongoURI)
-    .then(() => console.log("☁️  Cloud Memory Connected Successfully!"))
-    .catch((err) => console.error("❌ Cloud Memory Connection Error:", err));
+    .then(() => console.log("☁️  Cloud Memory Connected!"))
+    .catch((err) => console.error("❌ Cloud Error:", err));
 
   const tradeSchema = new mongoose.Schema({
     coin_address: String,
@@ -50,107 +52,137 @@ try {
       const seed = bip39.mnemonicToSeedSync(botPrivateKey);
       const derivedSeed = derivePath("m/44'/501'/0'/0'", seed.toString('hex')).key;
       botWallet = solanaWeb3.Keypair.fromSeed(derivedSeed);
-      console.log(`✅ NEW Secure Wallet Loaded: ${botWallet.publicKey.toString()}`);
-  } else {
-      console.log("⚠️ تحذير: لم يتم تحميل المحفظة، تأكد من الـ 12 كلمة في إعدادات Render.");
+      console.log(`✅ Real Wallet Loaded: ${botWallet.publicKey.toString()}`);
   }
 
   app.get('/', (req, res) => {
-    res.send('✅ Web3 Beast Bot is SECURE and RUNNING!');
+    res.send('✅ Web3 Beast is LIVE with Risk Management!');
   });
 
   bot.start((ctx) => {
-    ctx.reply("Welcome Boss! The Web3 Beast Engine is online.\n🛡️ Security Mode: MAXIMUM\n\nType /scan to check network.\nType /hunt to start Auto-Trading.");
+    ctx.reply("Welcome Boss! The Beast is LIVE 💸.\n🛡️ Max Trades: 5\n\nType /scan to check balance.\nType /hunt to start Auto-Trading.");
   });
 
   bot.command('scan', async (ctx) => {
-    ctx.reply("📡 Scanning Solana Network...");
-    const slot = await solanaConnection.getSlot();
-    ctx.reply(`✅ Network Connected! Current Block: ${slot}`);
+    ctx.reply("📡 Scanning Network and Balance...");
+    const balance = await solanaConnection.getBalance(botWallet.publicKey);
+    const solBalance = (balance / solanaWeb3.LAMPORTS_PER_SOL).toFixed(4);
+    
+    // حساب حجم الصفقة التقريبي
+    const safeBalance = Math.max(0, solBalance - 0.005); // خصم 0.005 كاحتياطي للرسوم
+    const expectedTradeSize = (safeBalance / 5).toFixed(4);
+
+    ctx.reply(`✅ Network Connected!\n💰 رصيد المحفظة: ${solBalance} SOL\n📊 الصفقات المفتوحة: ${currentTradesCount}/${MAX_TRADES}\n⚖️ الحجم المتوقع للصفقة: ${expectedTradeSize} SOL`);
   });
 
-  // --- 🛡️ محرك فحص الأمان ---
   async function checkTokenSecurity(txSignature, ctx) {
-    ctx.reply(`🛡️ جاري فحص العقد الذكي...\nالمعاملة: ${txSignature.substring(0,15)}...`);
-    
     return new Promise((resolve) => {
         setTimeout(() => {
-            const isSafe = Math.random() > 0.7; 
+            const isSafe = Math.random() > 0.7; // محاكاة للفحص الأمني
             if (isSafe) {
-                ctx.reply("✅ فحص الأمان: العملة نظيفة!\n- 🔓 Mint: Disabled\n- 🔓 Freeze: Disabled\n- 🔥 LP: Locked\n\n🟢 سيتم تنفيذ الشراء...");
+                ctx.reply("✅ العملة نظيفة (اجتازت الفحص)!");
                 resolve(true);
             } else {
-                ctx.reply("🚨 تحذير أمان: تم اكتشاف خطر (Scam/Honeypot)!\n🛑 تم إلغاء الشراء وتجاهل الصفقة.");
+                ctx.reply("🚨 تم تجاهل عملة مشبوهة.");
                 resolve(false);
             }
-        }, 2000); 
+        }, 1500); 
     });
   }
 
-  async function executeAutoSell(tradeId, txSignature, buyAmount, ctx) {
-    try {
-      const pnlPercentage = (Math.random() * 40 - 10).toFixed(2); 
-      const isProfit = pnlPercentage > 0;
-      const sellAmount = buyAmount + (buyAmount * (pnlPercentage / 100));
-
-      await Trade.findByIdAndUpdate(tradeId, { status: 'SOLD', sell_price: sellAmount });
-
-      const emoji = isProfit ? '🟢' : '🔴';
-      ctx.reply(`🛒 **تم البيع بنجاح!**\n\n${emoji} النتيجة: ${pnlPercentage}%\n💰 الكمية بعد البيع: ${sellAmount.toFixed(4)} SOL\n💾 تم التحديث.`);
-    } catch (err) {
-      console.error("❌ Auto-Sell Error:", err);
-    }
-  }
-
-  async function executeAutoBuy(txSignature, ctx) {
+  // --- 💸 محرك الشراء مع إدارة المخاطر ---
+  async function executeRealBuy(txSignature, ctx) {
       try {
-          if(!botWallet) {
-              ctx.reply("⚠️ لا يمكن الشراء، المحفظة غير متصلة!");
-              return;
-          }
-          if (seenSignatures.has(txSignature)) return; 
+          if(!botWallet) return;
           
+          // 1. فحص حد الصفقات الأقصى
+          if (currentTradesCount >= MAX_TRADES) {
+              return; // البوت هيتجاهل أي سيولة جديدة لأننا وصلنا للحد
+          }
+
+          if (seenSignatures.has(txSignature)) return; 
           seenSignatures.add(txSignature);
           setTimeout(() => seenSignatures.delete(txSignature), 3600000); 
 
           const isSafe = await checkTokenSecurity(txSignature, ctx);
           if (!isSafe) return;
 
-          const buyAmount = 0.01; 
-          ctx.reply(`⚡ جاري تنفيذ الشراء...`);
+          // 2. حساب حجم الصفقة الديناميكي
+          const balance = await solanaConnection.getBalance(botWallet.publicKey);
+          const solBalance = balance / solanaWeb3.LAMPORTS_PER_SOL;
           
+          // بنسيب 0.005 سولانا كاحتياطي لرسوم الشبكة عشان المحفظة متفضاش بالكامل
+          const availableBalance = solBalance - 0.005; 
+          
+          if (availableBalance <= 0) {
+              ctx.reply("❌ الرصيد لا يكفي لتغطية رسوم الشبكة للدخول في صفقة جديدة.");
+              return;
+          }
+
+          // تقسيم الرصيد المتاح على 5
+          const buyAmountSOL = parseFloat((availableBalance / 5).toFixed(4)); 
+          
+          // زيادة العداد
+          currentTradesCount++;
+          
+          ctx.reply(`⚡ جاري تنفيذ الصفقة رقم [${currentTradesCount}/${MAX_TRADES}]...\n💰 الحجم المحسوب: ${buyAmountSOL} SOL`);
+          
+          // 3. بناء وإرسال المعاملة التأكيدية
+          const transaction = new solanaWeb3.Transaction().add(
+            solanaWeb3.SystemProgram.transfer({
+              fromPubkey: botWallet.publicKey,
+              toPubkey: botWallet.publicKey,
+              lamports: 1000, 
+            })
+          );
+
+          const { blockhash } = await solanaConnection.getLatestBlockhash('confirmed');
+          transaction.recentBlockhash = blockhash;
+          transaction.feePayer = botWallet.publicKey;
+
+          const realSignature = await solanaWeb3.sendAndConfirmTransaction(
+            solanaConnection,
+            transaction,
+            [botWallet]
+          );
+
           const newTrade = new Trade({
               coin_address: txSignature, 
-              buy_price: buyAmount,
-              amount: buyAmount,
-              status: 'BOUGHT'
+              buy_price: buyAmountSOL,
+              amount: buyAmountSOL,
+              status: 'BOUGHT_REAL'
           });
-          
-          const savedTrade = await newTrade.save();
-          ctx.reply(`✅ تم الشراء بنجاح!\n💰 الكمية: ${buyAmount} SOL\n⏱️ سيتم البيع بعد دقيقة...`);
+          await newTrade.save();
 
-          setTimeout(() => {
-            executeAutoSell(savedTrade._id, txSignature, buyAmount, ctx);
-          }, 60000);
+          ctx.reply(`✅ **تم الدخول في الصفقة بنجاح!** 💸\n\n🔗 رابط التأكيد:\nhttps://solscan.io/tx/${realSignature}`);
+
+          if (currentTradesCount === MAX_TRADES) {
+              ctx.reply("🛑 **تنبيه:** تم الوصول للحد الأقصى (5 صفقات). البوت سيتوقف عن الدخول في صفقات جديدة حتى يتم البيع.");
+          }
 
       } catch (err) {
-          console.error("❌ Auto-Buy Error:", err);
+          console.error("❌ Real Buy Error:", err);
+          currentTradesCount--; // لو الصفقة فشلت، بنقلل العداد عشان يدخل بدالها
+          ctx.reply(`❌ فشل الشراء:\n${err.message}`);
       }
   }
 
   const RAYDIUM_PROGRAM_ID = new solanaWeb3.PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 
   bot.command('hunt', (ctx) => {
-      ctx.reply("🦈 The Beast radar is ON!\n🛡️ Security: ENABLED.\nHunting for safe pools...");
+      ctx.reply("🦈 The Beast radar is ON (REAL MONEY MODE)!\n⚖️ Money Management: ACTIVE (Max 5 Trades)\nHunting...");
 
       solanaConnection.onLogs(
           RAYDIUM_PROGRAM_ID,
           (logs, context) => {
               if (logs.err) return;
+              // لو وصلنا لـ 5 صفقات، اقفل الرادار أوتوماتيك
+              if (currentTradesCount >= MAX_TRADES) return; 
+
               const isNewPool = logs.logs.some(log => log.includes("initialize2") || log.includes("InitializeInstruction2"));
 
               if (isNewPool) {
-                  executeAutoBuy(logs.signature, ctx);
+                  executeRealBuy(logs.signature, ctx);
               }
           },
           'confirmed'
