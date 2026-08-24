@@ -9,20 +9,25 @@ const { derivePath } = require('ed25519-hd-key');
 const app = express();
 const port = process.env.PORT || 3000; 
 
+// --- 🔍 فحص المتغيرات في الـ Logs ---
+console.log("--- 🔍 فحص حالة المتغيرات السرية على Render ---");
+console.log("TELEGRAM_TOKEN:", process.env.TELEGRAM_TOKEN ? "✅ موجود وقاري" : "❌ مفقود/مش قاري");
+console.log("MONGO_URI:", process.env.MONGO_URI ? "✅ موجود وقاري" : "❌ مفقود/مش قاري");
+console.log("BOT_PRIVATE_KEY:", process.env.BOT_PRIVATE_KEY ? "✅ موجود وقاري" : "❌ مفقود/مش قاري");
+console.log("-----------------------------------------------");
+
 const telegramToken = process.env.TELEGRAM_TOKEN;
 const botPrivateKey = process.env.BOT_PRIVATE_KEY;
 const mongoURI = process.env.MONGO_URI;
 
 if (!telegramToken || !mongoURI) {
-    console.error("❌ خطأ: البيانات السرية غير موجودة!");
+    console.error("❌ خطأ: المتغيرات ناقصة، السيرفر سيتم إيقافه لحين ضبطها في Render.");
     process.exit(1);
 }
 
 const seenSignatures = new Set(); 
-
-// --- 🛑 إعدادات إدارة رأس المال ---
 const MAX_TRADES = 5; 
-let currentTradesCount = 0; // عداد الصفقات الحالي
+let currentTradesCount = 0; 
 
 try {
   console.log("⏳ Loading Web3 Beast Engine [SMART MONEY MODE]...");
@@ -67,9 +72,7 @@ try {
     ctx.reply("📡 Scanning Network and Balance...");
     const balance = await solanaConnection.getBalance(botWallet.publicKey);
     const solBalance = (balance / solanaWeb3.LAMPORTS_PER_SOL).toFixed(4);
-    
-    // حساب حجم الصفقة التقريبي
-    const safeBalance = Math.max(0, solBalance - 0.005); // خصم 0.005 كاحتياطي للرسوم
+    const safeBalance = Math.max(0, solBalance - 0.005); 
     const expectedTradeSize = (safeBalance / 5).toFixed(4);
 
     ctx.reply(`✅ Network Connected!\n💰 رصيد المحفظة: ${solBalance} SOL\n📊 الصفقات المفتوحة: ${currentTradesCount}/${MAX_TRADES}\n⚖️ الحجم المتوقع للصفقة: ${expectedTradeSize} SOL`);
@@ -78,7 +81,7 @@ try {
   async function checkTokenSecurity(txSignature, ctx) {
     return new Promise((resolve) => {
         setTimeout(() => {
-            const isSafe = Math.random() > 0.7; // محاكاة للفحص الأمني
+            const isSafe = Math.random() > 0.7; 
             if (isSafe) {
                 ctx.reply("✅ العملة نظيفة (اجتازت الفحص)!");
                 resolve(true);
@@ -90,15 +93,10 @@ try {
     });
   }
 
-  // --- 💸 محرك الشراء مع إدارة المخاطر ---
   async function executeRealBuy(txSignature, ctx) {
       try {
           if(!botWallet) return;
-          
-          // 1. فحص حد الصفقات الأقصى
-          if (currentTradesCount >= MAX_TRADES) {
-              return; // البوت هيتجاهل أي سيولة جديدة لأننا وصلنا للحد
-          }
+          if (currentTradesCount >= MAX_TRADES) return;
 
           if (seenSignatures.has(txSignature)) return; 
           seenSignatures.add(txSignature);
@@ -107,29 +105,22 @@ try {
           const isSafe = await checkTokenSecurity(txSignature, ctx);
           if (!isSafe) return;
 
-          // 2. حساب حجم الصفقة الديناميكي
           const balance = await solanaConnection.getBalance(botWallet.publicKey);
           const solBalance = balance / solanaWeb3.LAMPORTS_PER_SOL;
-          
-          // بنسيب 0.005 سولانا كاحتياطي لرسوم الشبكة عشان المحفظة متفضاش بالكامل
           const availableBalance = solBalance - 0.005; 
           
           if (availableBalance <= 0) {
-              ctx.reply("❌ الرصيد لا يكفي لتغطية رسوم الشبكة للدخول في صفقة جديدة.");
+              ctx.reply("❌ الرصيد لا يكفي لرسوم الغاز.");
               return;
           }
 
-          // تقسيم الرصيد المتاح على 5
           const buyAmountSOL = parseFloat((availableBalance / 5).toFixed(4)); 
-          
-          // زيادة العداد
           currentTradesCount++;
           
           ctx.reply(`⚡ جاري تنفيذ الصفقة رقم [${currentTradesCount}/${MAX_TRADES}]...\n💰 الحجم المحسوب: ${buyAmountSOL} SOL`);
           
-          // 3. بناء وإرسال المعاملة التأكيدية
           const transaction = new solanaWeb3.Transaction().add(
-            solanaWeb3.SystemProgram.transfer({
+            solanaSystemProgramTransferSafe = solanaWeb3.SystemProgram.transfer({
               fromPubkey: botWallet.publicKey,
               toPubkey: botWallet.publicKey,
               lamports: 1000, 
@@ -150,19 +141,19 @@ try {
               coin_address: txSignature, 
               buy_price: buyAmountSOL,
               amount: buyAmountSOL,
-              status: 'BOUGHT_REAL'
+              status: `BOUGHT_REAL`
           });
           await newTrade.save();
 
           ctx.reply(`✅ **تم الدخول في الصفقة بنجاح!** 💸\n\n🔗 رابط التأكيد:\nhttps://solscan.io/tx/${realSignature}`);
 
           if (currentTradesCount === MAX_TRADES) {
-              ctx.reply("🛑 **تنبيه:** تم الوصول للحد الأقصى (5 صفقات). البوت سيتوقف عن الدخول في صفقات جديدة حتى يتم البيع.");
+              ctx.reply("🛑 **تنبيه:** تم الوصول للحد الأقصى (5 صفقات).");
           }
 
       } catch (err) {
           console.error("❌ Real Buy Error:", err);
-          currentTradesCount--; // لو الصفقة فشلت، بنقلل العداد عشان يدخل بدالها
+          currentTradesCount--; 
           ctx.reply(`❌ فشل الشراء:\n${err.message}`);
       }
   }
@@ -176,11 +167,9 @@ try {
           RAYDIUM_PROGRAM_ID,
           (logs, context) => {
               if (logs.err) return;
-              // لو وصلنا لـ 5 صفقات، اقفل الرادار أوتوماتيك
               if (currentTradesCount >= MAX_TRADES) return; 
 
               const isNewPool = logs.logs.some(log => log.includes("initialize2") || log.includes("InitializeInstruction2"));
-
               if (isNewPool) {
                   executeRealBuy(logs.signature, ctx);
               }
