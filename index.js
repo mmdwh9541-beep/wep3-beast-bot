@@ -11,7 +11,6 @@ const port = process.env.PORT || 10000;
 
 app.use(express.json());
 
-// حماية شاملة تمنع انهيار السيرفر نهائياً تحت أي ظرف
 process.on('uncaughtException', (err) => {
     console.error('🔥 Uncaught Exception:', err.message);
 });
@@ -28,7 +27,6 @@ const MAX_TRADES = 5;
 app.get('/', (req, res) => res.send('✅ Web3 Beast Execution Engine is LIVE & Secure!'));
 
 try {
-  // 1. الاتصال بقاعدة البيانات بأمان
   if (mongoURI) {
       mongoose.connect(mongoURI)
         .then(() => console.log("☁️ Cloud Memory Connected Safely!"))
@@ -44,10 +42,10 @@ try {
   });
   const Trade = mongoose.models.Trade || mongoose.model('Trade', tradeSchema);
 
-  // 2. إعداد اتصال سولانا الحقيقي
-  const solanaConnection = new solanaWeb3.Connection(solanaWeb3.clusterApiUrl('mainnet-beta'), 'confirmed');
+  // استخدام سيرفر RPC بديل وسريع ومستقر جداً على رندر لتجنب الحظر
+  const customRpcUrl = process.env.RPC_URL || 'https://rpc.ankr.com/solana';
+  const solanaConnection = new solanaWeb3.Connection(customRpcUrl, 'confirmed');
 
-  // 3. تحميل محفظة البوت المشفرة بدقة
   let botWallet = null;
   try {
       if(botPrivateKey) {
@@ -56,7 +54,6 @@ try {
               const derivedSeed = derivePath("m/44'/501'/0'/0'", seed.toString('hex')).key;
               botWallet = solanaWeb3.Keypair.fromSeed(derivedSeed);
           } else {
-              // لو مفتاح خاص مباشر (Private Key Array أو Base58)
               const decodedKey = solanaWeb3.Keypair.fromSecretKey(Buffer.from(JSON.parse(botPrivateKey)));
               botWallet = decodedKey;
           }
@@ -66,13 +63,11 @@ try {
       console.log("⚠️ Wallet load note: Ensure BOT_PRIVATE_KEY format is valid.");
   }
 
-  // 4. إعداد بوت التليجرام وأوامر التشغيل الآمن
   if (telegramToken) {
       const bot = new Telegraf(telegramToken);
 
       bot.start((ctx) => ctx.reply("Welcome Boss! 🛡️\n🎯 SECURE SNIPER & Real Trading Engine Active.\nCommands:\n/scan - فحص الرصيد والأمان\n/trades - الصفقات النشطة"));
 
-      // أمر فحص الرصيد والأمان
       bot.command('scan', async (ctx) => {
           if (!botWallet) return ctx.reply("❌ المحفظة غير محملة، تأكد من المفتاح في Render.");
           try {
@@ -83,13 +78,13 @@ try {
               
               const openTradesCount = await Trade.countDocuments({ status: 'OPEN' });
 
-              ctx.reply(`🛡️ **System Security Status: OPTIMAL**\n\n💰 رصيد المحفظة الآمن: ${solBalance} SOL\n📊 الصفقات المفتوحة: ${openTradesCount}/${MAX_TRADES}\n⚖️ حجم الصفقة الآمن: ${expectedTradeSize} SOL\n🟢 الحالة: جاهز للتنفيذ الآمن`);
+              ctx.reply(`🛡️ **System Security Status: OPTIMAL**\n\n💰 رصيد المحفظة الآمن: ${solBalance} SOL\n📊 الصفقات المفتوحة: ${openTradesCount}/${MAX_TRADES}\n⚖️ حجم الصفقة الآمن: ${expectedTradeSize} SOL\n🟢 الحالة: متصل بالشبكة بنجاح`);
           } catch(err) {
-              ctx.reply("❌ خطأ مؤقت أثناء الاتصال بشبكة سولانا.");
+              console.error("Solana RPC Error:", err.message);
+              ctx.reply("❌ عذراً، حدث ضغط مؤقت في شبكة سولانا، جرب مرة أخرى خلال ثواني.");
           }
       });
 
-      // عرض الصفقات المفتوحة حالياً
       bot.command('trades', async (ctx) => {
           try {
               const openTrades = await Trade.find({ status: 'OPEN' });
@@ -118,7 +113,6 @@ try {
       });
   }
 
-  // 5. استقبال إشارات التداول الآمنة (Webhook)
   app.post('/webhook/signal', async (req, res) => {
       try {
           const { token_address, action } = req.body;
@@ -129,9 +123,7 @@ try {
               return res.status(400).json({ status: "REJECTED", reason: "Max trades limit reached." });
           }
 
-          // هنا يتم تنفيذ الشراء الآمن بحجم محسوب بدقة
           console.log(`🚨 Signal received for token: ${token_address}, Action: ${action}`);
-          
           res.json({ status: "SUCCESS", message: "Signal processed securely." });
       } catch (err) {
           res.status(500).json({ error: err.message });
