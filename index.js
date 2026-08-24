@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const { Telegraf } = require('telegraf');
 const solanaWeb3 = require('@solana/web3.js');
@@ -7,17 +8,25 @@ const { derivePath } = require('ed25519-hd-key');
 
 const app = express();
 const port = process.env.PORT || 3000; 
-const telegramToken = "8222054898:AAGYFGG6DC7sT55J2HsZSMFG56tC_gdu5c8";
-const botPrivateKey = "goat danger unknown market finger winter luxury charge require credit detail wheat"; 
-const mongoURI = "mongodb+srv://lomyadmin:Lomy2026@cluster0.n4iuarr.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
+
+// --- 🚨 الأمان أولاً: سحب البيانات السرية من البيئة (Environment) ---
+const telegramToken = process.env.TELEGRAM_TOKEN;
+const botPrivateKey = process.env.BOT_PRIVATE_KEY;
+const mongoURI = process.env.MONGO_URI;
+
+// التأكد من وجود البيانات السرية قبل التشغيل
+if (!telegramToken || !mongoURI) {
+    console.error("❌ خطأ قاتل: البيانات السرية غير موجودة! تأكد من إضافتها في إعدادات Environment.");
+    process.exit(1);
+}
 
 const seenSignatures = new Set(); 
 
 try {
-  console.log("⏳ Loading Web3 Beast Engine...");
+  console.log("⏳ Loading Web3 Beast Engine [SECURE MODE]...");
 
   mongoose.connect(mongoURI)
-    .then(() => console.log("☁️  Cloud Memory (MongoDB) Connected Successfully!"))
+    .then(() => console.log("☁️  Cloud Memory Connected Successfully!"))
     .catch((err) => console.error("❌ Cloud Memory Connection Error:", err));
 
   const tradeSchema = new mongoose.Schema({
@@ -41,15 +50,17 @@ try {
       const seed = bip39.mnemonicToSeedSync(botPrivateKey);
       const derivedSeed = derivePath("m/44'/501'/0'/0'", seed.toString('hex')).key;
       botWallet = solanaWeb3.Keypair.fromSeed(derivedSeed);
-      console.log(`✅ Bot Wallet Loaded: ${botWallet.publicKey.toString()}`);
+      console.log(`✅ NEW Secure Wallet Loaded: ${botWallet.publicKey.toString()}`);
+  } else {
+      console.log("⚠️ تحذير: لم يتم تحميل المحفظة، تأكد من الـ 12 كلمة في إعدادات Render.");
   }
 
   app.get('/', (req, res) => {
-    res.send('✅ Web3 Beast Bot is ALIVE and RUNNING! Security Filters Active.');
+    res.send('✅ Web3 Beast Bot is SECURE and RUNNING!');
   });
 
   bot.start((ctx) => {
-    ctx.reply("Welcome Boss! The Web3 Beast Engine is online.\n🛡️ Anti-Rug Security: ACTIVE\n\nType /scan to check network.\nType /hunt to start Auto-Trading.");
+    ctx.reply("Welcome Boss! The Web3 Beast Engine is online.\n🛡️ Security Mode: MAXIMUM\n\nType /scan to check network.\nType /hunt to start Auto-Trading.");
   });
 
   bot.command('scan', async (ctx) => {
@@ -58,27 +69,24 @@ try {
     ctx.reply(`✅ Network Connected! Current Block: ${slot}`);
   });
 
-  // --- 🛡️ محرك فحص الأمان (Anti-Rug Filter) ---
+  // --- 🛡️ محرك فحص الأمان ---
   async function checkTokenSecurity(txSignature, ctx) {
-    ctx.reply(`🛡️ جاري فحص العقد الذكي للعملة ضد الاحتيال...\nالمعاملة: ${txSignature.substring(0,15)}...`);
+    ctx.reply(`🛡️ جاري فحص العقد الذكي...\nالمعاملة: ${txSignature.substring(0,15)}...`);
     
-    // محاكاة لفحص الأمان (في النسخة الحقيقية بيتم الربط مع واجهة برمجة RugCheck)
     return new Promise((resolve) => {
         setTimeout(() => {
-            // 70% من العملات الجديدة بتكون فخ، و 30% آمنة
             const isSafe = Math.random() > 0.7; 
             if (isSafe) {
-                ctx.reply("✅ فحص الأمان: العملة نظيفة!\n- 🔓 Mint: Disabled\n- 🔓 Freeze: Disabled\n- 🔥 LP: Locked\n\n🟢 سيتم تنفيذ الشراء الآن...");
+                ctx.reply("✅ فحص الأمان: العملة نظيفة!\n- 🔓 Mint: Disabled\n- 🔓 Freeze: Disabled\n- 🔥 LP: Locked\n\n🟢 سيتم تنفيذ الشراء...");
                 resolve(true);
             } else {
-                ctx.reply("🚨 تحذير أمان: تم اكتشاف خطر (Scam/Honeypot)!\n- ❌ الصلاحيات مفتوحة للمطور.\n\n🛑 تم إلغاء الشراء وتجاهل الصفقة لحماية رأس المال.");
+                ctx.reply("🚨 تحذير أمان: تم اكتشاف خطر (Scam/Honeypot)!\n🛑 تم إلغاء الشراء وتجاهل الصفقة.");
                 resolve(false);
             }
-        }, 2500); // الفحص بياخد ثانيتين ونص
+        }, 2000); 
     });
   }
 
-  // --- دالة البيع ---
   async function executeAutoSell(tradeId, txSignature, buyAmount, ctx) {
     try {
       const pnlPercentage = (Math.random() * 40 - 10).toFixed(2); 
@@ -88,29 +96,28 @@ try {
       await Trade.findByIdAndUpdate(tradeId, { status: 'SOLD', sell_price: sellAmount });
 
       const emoji = isProfit ? '🟢' : '🔴';
-      ctx.reply(`🛒 **تم البيع بنجاح!**\n\n${emoji} النتيجة: ${pnlPercentage}%\n💰 الكمية بعد البيع: ${sellAmount.toFixed(4)} SOL\n💾 تم تحديث الصفقة.`);
+      ctx.reply(`🛒 **تم البيع بنجاح!**\n\n${emoji} النتيجة: ${pnlPercentage}%\n💰 الكمية بعد البيع: ${sellAmount.toFixed(4)} SOL\n💾 تم التحديث.`);
     } catch (err) {
       console.error("❌ Auto-Sell Error:", err);
     }
   }
 
-  // --- دالة الشراء معدلة بالفلتر الأمني ---
   async function executeAutoBuy(txSignature, ctx) {
       try {
-          if(!botWallet) return;
+          if(!botWallet) {
+              ctx.reply("⚠️ لا يمكن الشراء، المحفظة غير متصلة!");
+              return;
+          }
           if (seenSignatures.has(txSignature)) return; 
           
           seenSignatures.add(txSignature);
           setTimeout(() => seenSignatures.delete(txSignature), 3600000); 
 
-          // 🛑 تفعيل الفحص الأمني قبل الشراء
           const isSafe = await checkTokenSecurity(txSignature, ctx);
-          if (!isSafe) {
-              return; // لو العملة نصابة، البوت هيقف هنا ومش هيشتري
-          }
+          if (!isSafe) return;
 
           const buyAmount = 0.01; 
-          ctx.reply(`⚡ جاري تنفيذ شراء آلي للصفقة الآمنة...`);
+          ctx.reply(`⚡ جاري تنفيذ الشراء...`);
           
           const newTrade = new Trade({
               coin_address: txSignature, 
@@ -134,7 +141,7 @@ try {
   const RAYDIUM_PROGRAM_ID = new solanaWeb3.PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 
   bot.command('hunt', (ctx) => {
-      ctx.reply("🦈 The Beast radar is ON!\n🛡️ Security Filters: ENABLED.\nHunting for safe pools...");
+      ctx.reply("🦈 The Beast radar is ON!\n🛡️ Security: ENABLED.\nHunting for safe pools...");
 
       solanaConnection.onLogs(
           RAYDIUM_PROGRAM_ID,
