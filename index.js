@@ -41,7 +41,19 @@ const MODE = "PAPER";
 const LIVE_TRADING = false;
 
 // ======================================================
-// TELEGRAM IPV4 AGENT
+// V4.5 SMART SCORE SETTINGS
+// ======================================================
+
+const SCORE_WEIGHTS = {
+  security: 0.45,
+  dex: 0.35,
+  whale: 0.20
+};
+
+const SMART_APPROVAL_SCORE = 75;
+
+// ======================================================
+// TELEGRAM IPV4
 // ======================================================
 
 const telegramAgent = new https.Agent({
@@ -117,8 +129,10 @@ const state = {
   dexNetworkErrors: 0,
 
   whaleRetries: 0,
-
   telegramRetries: 0,
+
+  approved: 0,
+  blockedWhale: 0,
 
   errors: 0,
   lastMint: null
@@ -174,16 +188,78 @@ function is429(err) {
 }
 
 function jitter(ms) {
-  const extra =
+  return (
+    ms +
     Math.floor(
       Math.random() * 300
-    );
-
-  return ms + extra;
+    )
+  );
 }
 
 // ======================================================
-// RPC SMART PRIORITY QUEUE
+// SMART FINAL SCORE
+// ======================================================
+
+function calculateSmartScore(
+  securityScore,
+  dexScore,
+  whaleScore
+) {
+
+  const score =
+    num(securityScore) *
+      SCORE_WEIGHTS.security +
+
+    num(dexScore) *
+      SCORE_WEIGHTS.dex +
+
+    num(whaleScore) *
+      SCORE_WEIGHTS.whale;
+
+  return Math.max(
+    0,
+    Math.min(
+      100,
+      Math.round(score)
+    )
+  );
+}
+
+function smartDecision(
+  smartScore,
+  whaleDecision
+) {
+
+  // Whale DANGER = hard block.
+  // حتى لو Security وDEX ممتازين.
+
+  if (
+    whaleDecision === "DANGER"
+  ) {
+    return "BLOCKED_WHALE";
+  }
+
+  // CAUTION لا يسمح بالموافقة النهائية.
+
+  if (
+    whaleDecision === "CAUTION"
+  ) {
+    return "WATCH_WHALE";
+  }
+
+  if (
+    whaleDecision === "SAFE" &&
+    smartScore >=
+      SMART_APPROVAL_SCORE
+  ) {
+    return "APPROVED_CANDIDATE";
+  }
+
+  return "WATCH_SCORE";
+}
+
+// ======================================================
+// RPC SMART QUEUE
 // ======================================================
 
 const rpcQueue = [];
@@ -202,6 +278,7 @@ function rpcCall(
   priority = 1,
   label = "RPC"
 ) {
+
   return new Promise(
     (resolve, reject) => {
 
@@ -210,6 +287,7 @@ function rpcCall(
         rpcQueue.length >=
           RPC_SOFT_LIMIT
       ) {
+
         state.rpcDropped++;
 
         return reject(
@@ -219,17 +297,14 @@ function rpcCall(
         );
       }
 
-      const job = {
+      rpcQueue.push({
         fn,
         resolve,
         reject,
         priority,
         label,
-        createdAt:
-          Date.now()
-      };
-
-      rpcQueue.push(job);
+        createdAt: Date.now()
+      });
 
       rpcQueue.sort(
         (a, b) =>
@@ -238,11 +313,12 @@ function rpcCall(
       );
 
       runRpcQueue()
-        .catch(err =>
-          errLog(
-            "RPC Worker",
-            err
-          )
+        .catch(
+          err =>
+            errLog(
+              "RPC Worker",
+              err
+            )
         );
     }
   );
@@ -256,7 +332,9 @@ async function runRpcQueue() {
 
   try {
 
-    while (rpcQueue.length) {
+    while (
+      rpcQueue.length
+    ) {
 
       const job =
         rpcQueue.shift();
@@ -290,7 +368,9 @@ async function runRpcQueue() {
 
           lastError = err;
 
-          if (!is429(err)) {
+          if (
+            !is429(err)
+          ) {
             break;
           }
 
@@ -311,19 +391,24 @@ async function runRpcQueue() {
           );
 
           await sleep(
-            jitter(rpcDelay)
+            jitter(
+              rpcDelay
+            )
           );
         }
       }
 
       if (!done) {
-        job.reject(lastError);
+        job.reject(
+          lastError
+        );
       }
 
       if (
         rpcQueue.length >=
         RPC_HARD_LIMIT
       ) {
+
         rpcDelay =
           Math.max(
             rpcDelay,
@@ -332,7 +417,9 @@ async function runRpcQueue() {
       }
 
       await sleep(
-        jitter(rpcDelay)
+        jitter(
+          rpcDelay
+        )
       );
     }
 
@@ -363,6 +450,8 @@ const tokenSchema =
         default: Date.now
       },
 
+      // SECURITY
+
       securityChecked: {
         type: Boolean,
         default: false
@@ -389,6 +478,8 @@ const tokenSchema =
       decimals: Number,
       supply: String,
       token2022: Boolean,
+
+      // DEX
 
       dexChecked: {
         type: Boolean,
@@ -422,12 +513,22 @@ const tokenSchema =
         default: "PENDING"
       },
 
+      // BEFORE WHALE
+
+      preWhaleScore: Number,
+
+      // SMART FINAL
+
+      smartScore: Number,
+
       finalScore: Number,
 
       finalDecision: {
         type: String,
         default: "PENDING"
       },
+
+      // WHALE
 
       whaleStatus: {
         type: String,
@@ -506,7 +607,7 @@ app.get(
   (req, res) => {
 
     res.send(
-      "✅ LOMY V4.4.3 TELEGRAM FIX | PAPER MODE"
+      "✅ LOMY V4.5 SMART FINAL SCORE | PAPER MODE"
     );
   }
 );
@@ -529,9 +630,7 @@ app.get(
       whaleQueue:
         whaleQueue.length,
 
-      mode:
-        MODE,
-
+      mode: MODE,
       liveTrading:
         LIVE_TRADING,
 
@@ -558,7 +657,8 @@ function startServer() {
               "online";
 
             log(
-              `✅ Render Server Online : ${PORT}`
+              "✅ Render Server Online",
+              PORT
             );
 
             resolve();
@@ -581,7 +681,10 @@ async function connectDatabase() {
 
   try {
 
-    if (!MONGODB_URI) {
+    if (
+      !MONGODB_URI
+    ) {
+
       throw new Error(
         "MONGODB_URI missing"
       );
@@ -643,7 +746,9 @@ async function loadWallet() {
 
   try {
 
-    if (!BOT_PRIVATE_KEY) {
+    if (
+      !BOT_PRIVATE_KEY
+    ) {
 
       throw new Error(
         "BOT_PRIVATE_KEY missing"
@@ -651,7 +756,8 @@ async function loadWallet() {
     }
 
     const key =
-      BOT_PRIVATE_KEY.trim();
+      BOT_PRIVATE_KEY
+        .trim();
 
     if (
       key.includes(" ") &&
@@ -668,7 +774,9 @@ async function loadWallet() {
       const derived =
         derivePath(
           "m/44'/501'/0'/0'",
-          seed.toString("hex")
+          seed.toString(
+            "hex"
+          )
         ).key;
 
       wallet =
@@ -683,7 +791,9 @@ async function loadWallet() {
       wallet =
         Keypair.fromSecretKey(
           Uint8Array.from(
-            JSON.parse(key)
+            JSON.parse(
+              key
+            )
           )
         );
 
@@ -691,7 +801,9 @@ async function loadWallet() {
 
       wallet =
         Keypair.fromSecretKey(
-          bs58.decode(key)
+          bs58.decode(
+            key
+          )
         );
     }
 
@@ -700,7 +812,8 @@ async function loadWallet() {
 
     log(
       "✅ Wallet",
-      wallet.publicKey.toString()
+      wallet.publicKey
+        .toString()
     );
 
   } catch (err) {
@@ -728,9 +841,10 @@ async function testSolana() {
     const balance =
       await rpcCall(
         () =>
-          connection.getBalance(
-            wallet.publicKey
-          ),
+          connection
+            .getBalance(
+              wallet.publicKey
+            ),
         0,
         "BALANCE"
       );
@@ -781,8 +895,7 @@ async function securityScan(
 
     const attempts =
       num(
-        old
-          ?.securityAttempts
+        old?.securityAttempts
       ) + 1;
 
     let account = null;
@@ -817,7 +930,7 @@ async function securityScan(
       }
 
       await sleep(
-        1000 * i
+        i * 1000
       );
     }
 
@@ -825,21 +938,21 @@ async function securityScan(
       !account?.value
     ) {
 
-      await FreshToken.updateOne(
-        {
-          mint
-        },
-        {
-          $set: {
+      await FreshToken
+        .updateOne(
+          {
+            mint
+          },
+          {
+            $set: {
+              securityAttempts:
+                attempts,
 
-            securityAttempts:
-              attempts,
-
-            securityDecision:
-              "RETRY_LATER"
+              securityDecision:
+                "RETRY_LATER"
+            }
           }
-        }
-      );
+        );
 
       return;
     }
@@ -856,7 +969,8 @@ async function securityScan(
 
     if (
       !parsed ||
-      parsed.type !== "mint"
+      parsed.type !==
+        "mint"
     ) {
 
       throw new Error(
@@ -947,37 +1061,38 @@ async function securityScan(
         "REVIEW";
     }
 
-    await FreshToken.updateOne(
-      {
-        mint
-      },
-      {
-        $set: {
+    await FreshToken
+      .updateOne(
+        {
+          mint
+        },
+        {
+          $set: {
 
-          securityChecked:
-            true,
+            securityChecked:
+              true,
 
-          securityAttempts:
-            attempts,
+            securityAttempts:
+              attempts,
 
-          securityScore:
-            score,
+            securityScore:
+              score,
 
-          securityDecision:
-            decision,
+            securityDecision:
+              decision,
 
-          mintAuthorityRevoked:
-            mintRevoked,
+            mintAuthorityRevoked:
+              mintRevoked,
 
-          freezeAuthorityRevoked:
-            freezeRevoked,
+            freezeAuthorityRevoked:
+              freezeRevoked,
 
-          decimals,
-          supply,
-          token2022
+            decimals,
+            supply,
+            token2022
+          }
         }
-      }
-    );
+      );
 
     state.securityScanned++;
 
@@ -1023,9 +1138,7 @@ function httpsJson(url) {
           url,
           {
             family: 4,
-
-            timeout:
-              10000,
+            timeout: 10000,
 
             headers: {
 
@@ -1033,7 +1146,7 @@ function httpsJson(url) {
                 "application/json",
 
               "User-Agent":
-                "LOMY-Solana-Hunter/4.4.3",
+                "LOMY-Solana-Hunter/4.5",
 
               Connection:
                 "close"
@@ -1043,9 +1156,10 @@ function httpsJson(url) {
 
             let body = "";
 
-            response.setEncoding(
-              "utf8"
-            );
+            response
+              .setEncoding(
+                "utf8"
+              );
 
             response.on(
               "data",
@@ -1125,8 +1239,7 @@ async function fetchPairs(
       mint
     );
 
-  let lastError =
-    null;
+  let lastError = null;
 
   for (
     let attempt = 1;
@@ -1206,7 +1319,9 @@ function scheduleDexRecheck(
     dexRecheck.has(
       mint
     )
-  ) return;
+  ) {
+    return;
+  }
 
   const timer =
     setTimeout(
@@ -1277,30 +1392,31 @@ async function dexScan(
 
     if (!pair) {
 
-      await FreshToken.updateOne(
-        {
-          mint
-        },
-        {
-          $set: {
+      await FreshToken
+        .updateOne(
+          {
+            mint
+          },
+          {
+            $set: {
 
-            dexChecked:
-              false,
+              dexChecked:
+                false,
 
-            dexListed:
-              false,
+              dexListed:
+                false,
 
-            dexAttempts:
-              attempts,
+              dexAttempts:
+                attempts,
 
-            dexDecision:
-              "NO_POOL",
+              dexDecision:
+                "NO_POOL",
 
-            finalDecision:
-              "WAITING_DEX"
+              finalDecision:
+                "WAITING_DEX"
+            }
           }
-        }
-      );
+        );
 
       if (
         attempts < 5
@@ -1316,46 +1432,43 @@ async function dexScan(
 
     const liquidity =
       num(
-        pair?.liquidity
-          ?.usd
+        pair?.liquidity?.usd
       );
 
     const volumeM5 =
       num(
-        pair?.volume
-          ?.m5
+        pair?.volume?.m5
       );
 
     const volumeH1 =
       num(
-        pair?.volume
-          ?.h1
+        pair?.volume?.h1
       );
 
     const buys =
       num(
-        pair?.txns
-          ?.m5
+        pair?.txns?.m5
           ?.buys
       );
 
     const sells =
       num(
-        pair?.txns
-          ?.m5
+        pair?.txns?.m5
           ?.sells
       );
 
     let dexScore = 0;
 
     if (
-      liquidity >= 10000
+      liquidity >=
+      10000
     ) {
 
       dexScore += 40;
 
     } else if (
-      liquidity >= 3000
+      liquidity >=
+      3000
     ) {
 
       dexScore += 25;
@@ -1364,21 +1477,18 @@ async function dexScan(
     if (
       volumeM5 >= 250
     ) {
-
       dexScore += 20;
     }
 
     if (
       volumeH1 > 0
     ) {
-
       dexScore += 10;
     }
 
     if (
       buys + sells >= 5
     ) {
-
       dexScore += 15;
     }
 
@@ -1386,7 +1496,6 @@ async function dexScan(
       buys > 0 &&
       sells > 0
     ) {
-
       dexScore += 15;
     }
 
@@ -1414,7 +1523,8 @@ async function dexScan(
         token.securityScore
       );
 
-    const finalScore =
+    // Score القديم قبل الحيتان.
+    const preWhaleScore =
       Math.round(
         securityScore *
           0.60 +
@@ -1430,64 +1540,73 @@ async function dexScan(
         "PASS" &&
       dexDecision ===
         "PASS" &&
-      finalScore >= 70
+      preWhaleScore >= 70
     ) {
 
+      // لم تعد Candidate نهائية.
+      // لازم الحيتان توافق الأول.
+
       finalDecision =
-        "CANDIDATE";
+        "CANDIDATE_PENDING_WHALE";
     }
 
-    await FreshToken.updateOne(
-      {
-        mint
-      },
-      {
-        $set: {
+    await FreshToken
+      .updateOne(
+        {
+          mint
+        },
+        {
+          $set: {
 
-          dexChecked:
-            true,
+            dexChecked:
+              true,
 
-          dexListed:
-            true,
+            dexListed:
+              true,
 
-          dexAttempts:
-            attempts,
+            dexAttempts:
+              attempts,
 
-          dexId:
-            pair.dexId ||
-            null,
+            dexId:
+              pair.dexId ||
+              null,
 
-          pairAddress:
-            pair.pairAddress ||
-            null,
+            pairAddress:
+              pair.pairAddress ||
+              null,
 
-          liquidityUsd:
-            liquidity,
+            liquidityUsd:
+              liquidity,
 
-          volumeM5,
-          volumeH1,
+            volumeM5,
+            volumeH1,
 
-          buysM5:
-            buys,
+            buysM5:
+              buys,
 
-          sellsM5:
-            sells,
+            sellsM5:
+              sells,
 
-          dexScore,
-          dexDecision,
-          finalScore,
-          finalDecision
+            dexScore,
+            dexDecision,
+
+            preWhaleScore,
+
+            finalScore:
+              preWhaleScore,
+
+            finalDecision
+          }
         }
-      }
-    );
+      );
 
     log(
-      `💧 ${mint} FINAL ${finalScore} ${finalDecision}`
+      `💧 ${mint} | PreWhale ${preWhaleScore}/100 | ${finalDecision}`
     );
 
     if (
       finalDecision ===
-      "CANDIDATE"
+      "CANDIDATE_PENDING_WHALE"
     ) {
 
       queueWhale(
@@ -1502,26 +1621,28 @@ async function dexScan(
       err
     );
 
-    await FreshToken.updateOne(
-      {
-        mint
-      },
-      {
-        $set: {
+    await FreshToken
+      .updateOne(
+        {
+          mint
+        },
+        {
+          $set: {
 
-          dexChecked:
-            false,
+            dexChecked:
+              false,
 
-          dexDecision:
-            "RETRY_LATER",
+            dexDecision:
+              "RETRY_LATER",
 
-          finalDecision:
-            "WAITING_DEX"
+            finalDecision:
+              "WAITING_DEX"
+          }
         }
-      }
-    ).catch(
-      () => {}
-    );
+      )
+      .catch(
+        () => {}
+      );
 
     scheduleDexRecheck(
       mint
@@ -1539,6 +1660,7 @@ async function dexScan(
 // ======================================================
 
 const whaleQueue = [];
+
 const whaleQueuedMints =
   new Set();
 
@@ -1565,19 +1687,21 @@ function queueWhale(
     mint
   );
 
-  FreshToken.updateOne(
-    {
-      mint
-    },
-    {
-      $set: {
-        whaleStatus:
-          "QUEUED"
+  FreshToken
+    .updateOne(
+      {
+        mint
+      },
+      {
+        $set: {
+          whaleStatus:
+            "QUEUED"
+        }
       }
-    }
-  ).catch(
-    () => {}
-  );
+    )
+    .catch(
+      () => {}
+    );
 
   runWhaleWorker()
     .catch(
@@ -1593,7 +1717,9 @@ async function runWhaleWorker() {
 
   if (
     whaleWorkerBusy
-  ) return;
+  ) {
+    return;
+  }
 
   whaleWorkerBusy =
     true;
@@ -1607,9 +1733,10 @@ async function runWhaleWorker() {
       const mint =
         whaleQueue.shift();
 
-      whaleQueuedMints.delete(
-        mint
-      );
+      whaleQueuedMints
+        .delete(
+          mint
+        );
 
       state.whales =
         "scanning";
@@ -1641,31 +1768,32 @@ async function runWhaleWorker() {
 
         const attempts =
           num(
-            token
-              ?.whaleAttempts
+            token?.whaleAttempts
           );
 
-        await FreshToken.updateOne(
-          {
-            mint
-          },
-          {
-            $set: {
+        await FreshToken
+          .updateOne(
+            {
+              mint
+            },
+            {
+              $set: {
 
-              whaleStatus:
-                "RETRY",
+                whaleStatus:
+                  "RETRY",
 
-              whaleDecision:
-                "RETRY",
+                whaleDecision:
+                  "RETRY",
 
-              whaleLastError:
-                err?.message ||
-                String(err)
+                whaleLastError:
+                  err?.message ||
+                  String(err)
+              }
             }
-          }
-        ).catch(
-          () => {}
-        );
+          )
+          .catch(
+            () => {}
+          );
 
         if (
           attempts < 5
@@ -1710,7 +1838,8 @@ function holderPercentage(
 
     const s =
       BigInt(
-        totalSupply || "0"
+        totalSupply ||
+        "0"
       );
 
     if (
@@ -1873,7 +2002,7 @@ function calculateWhaleScore(
 }
 
 // ======================================================
-// WHALE ENGINE
+// WHALE ENGINE + SMART FINAL DECISION
 // ======================================================
 
 async function whaleScan(
@@ -1891,28 +2020,28 @@ async function whaleScan(
 
   const attempts =
     num(
-      token
-        .whaleAttempts
+      token.whaleAttempts
     ) + 1;
 
-  await FreshToken.updateOne(
-    {
-      mint
-    },
-    {
-      $set: {
+  await FreshToken
+    .updateOne(
+      {
+        mint
+      },
+      {
+        $set: {
 
-        whaleStatus:
-          "SCANNING",
+          whaleStatus:
+            "SCANNING",
 
-        whaleAttempts:
-          attempts,
+          whaleAttempts:
+            attempts,
 
-        whaleLastError:
-          null
+          whaleLastError:
+            null
+        }
       }
-    }
-  );
+    );
 
   log(
     `🐋 Whale scanning ${mint} attempt ${attempts}`
@@ -1942,8 +2071,7 @@ async function whaleScan(
     );
 
   if (
-    totalSupply ===
-    "0"
+    totalSupply === "0"
   ) {
 
     throw new Error(
@@ -1968,8 +2096,7 @@ async function whaleScan(
   const accounts =
     (
       largestResponse
-        ?.value ||
-      []
+        ?.value || []
     ).slice(
       0,
       10
@@ -2005,6 +2132,7 @@ async function whaleScan(
     );
 
   const holders = [];
+
   const owners =
     new Set();
 
@@ -2018,9 +2146,7 @@ async function whaleScan(
       accounts[i];
 
     const account =
-      parsed
-        ?.value
-        ?.[i];
+      parsed?.value?.[i];
 
     const owner =
       account
@@ -2084,10 +2210,10 @@ async function whaleScan(
       )
       .reduce(
         (
-          total,
+          sum,
           h
         ) =>
-          total +
+          sum +
           num(
             h.percent
           ),
@@ -2098,10 +2224,10 @@ async function whaleScan(
     holders
       .reduce(
         (
-          total,
+          sum,
           h
         ) =>
-          total +
+          sum +
           num(
             h.percent
           ),
@@ -2154,70 +2280,113 @@ async function whaleScan(
       change
     });
 
-  await FreshToken.updateOne(
-    {
-      mint
-    },
-    {
-      $set: {
+  // ==================================================
+  // V4.5 SMART SCORE
+  // ==================================================
 
-        whaleStatus:
-          "DONE",
+  const smartScore =
+    calculateSmartScore(
+      token.securityScore,
+      token.dexScore,
+      result.score
+    );
 
-        whaleChecked:
-          true,
+  const finalDecision =
+    smartDecision(
+      smartScore,
+      result.decision
+    );
 
-        whaleCheckedAt:
-          new Date(),
+  await FreshToken
+    .updateOne(
+      {
+        mint
+      },
+      {
+        $set: {
 
-        whaleScore:
-          result.score,
+          whaleStatus:
+            "DONE",
 
-        whaleDecision:
-          result.decision,
+          whaleChecked:
+            true,
 
-        largestHolderPct:
-          Number(
-            largest.toFixed(2)
-          ),
+          whaleCheckedAt:
+            new Date(),
 
-        top5Pct:
-          Number(
-            top5.toFixed(2)
-          ),
+          whaleScore:
+            result.score,
 
-        previousTop10Pct:
-          token.whaleChecked
-            ? previous
-            : null,
+          whaleDecision:
+            result.decision,
 
-        top10Pct:
-          Number(
-            top10.toFixed(2)
-          ),
+          largestHolderPct:
+            Number(
+              largest.toFixed(2)
+            ),
 
-        top10ChangePct:
-          change,
+          top5Pct:
+            Number(
+              top5.toFixed(2)
+            ),
 
-        whaleTrend:
-          trend,
+          previousTop10Pct:
+            token.whaleChecked
+              ? previous
+              : null,
 
-        whaleUniqueOwners:
-          owners.size,
+          top10Pct:
+            Number(
+              top10.toFixed(2)
+            ),
 
-        whaleHolders:
-          holders,
+          top10ChangePct:
+            change,
 
-        whaleFlags:
-          result.flags,
+          whaleTrend:
+            trend,
 
-        whaleLastError:
-          null
+          whaleUniqueOwners:
+            owners.size,
+
+          whaleHolders:
+            holders,
+
+          whaleFlags:
+            result.flags,
+
+          whaleLastError:
+            null,
+
+          smartScore,
+
+          finalScore:
+            smartScore,
+
+          finalDecision
+        }
       }
-    }
-  );
+    );
 
   state.whaleScanned++;
+
+  if (
+    finalDecision ===
+    "APPROVED_CANDIDATE"
+  ) {
+    state.approved++;
+  }
+
+  if (
+    finalDecision ===
+    "BLOCKED_WHALE"
+  ) {
+    state.blockedWhale++;
+  }
+
+  log(
+    `🧠 SMART ${mint} | Security ${num(token.securityScore)} | DEX ${num(token.dexScore)} | Whale ${result.score} | FINAL ${smartScore}/100 | ${finalDecision}`
+  );
 
   log(
     `🐋 DONE ${mint} | ${result.score}/100 ${result.decision} | Top10 ${top10.toFixed(2)}%`
@@ -2248,15 +2417,18 @@ function scheduleWhaleRetry(
     whaleRecheck.has(
       key
     )
-  ) return;
+  ) {
+    return;
+  }
 
   const timer =
     setTimeout(
       () => {
 
-        whaleRecheck.delete(
-          key
-        );
+        whaleRecheck
+          .delete(
+            key
+          );
 
         queueWhale(
           mint
@@ -2282,15 +2454,18 @@ function scheduleWhaleSnapshot(
     whaleRecheck.has(
       key
     )
-  ) return;
+  ) {
+    return;
+  }
 
   const timer =
     setTimeout(
       () => {
 
-        whaleRecheck.delete(
-          key
-        );
+        whaleRecheck
+          .delete(
+            key
+          );
 
         queueWhale(
           mint
@@ -2378,7 +2553,9 @@ async function processLogs(
           )
       );
 
-  if (!relevant) {
+  if (
+    !relevant
+  ) {
     return;
   }
 
@@ -2500,13 +2677,14 @@ async function processLogs(
 
     if (!token) {
 
-      await FreshToken.create({
-        mint,
-        signature,
-        program,
-        paperOnly:
-          true
-      });
+      await FreshToken
+        .create({
+          mint,
+          signature,
+          program,
+          paperOnly:
+            true
+        });
 
       log(
         "🆕 Fresh Mint",
@@ -2556,7 +2734,7 @@ async function processLogs(
 }
 
 // ======================================================
-// WEBSOCKET MANAGEMENT
+// WEBSOCKET
 // ======================================================
 
 async function removeHunterSubscriptions() {
@@ -2580,7 +2758,8 @@ async function removeHunterSubscriptions() {
   try {
 
     if (
-      token2022Sub !== null
+      token2022Sub !==
+      null
     ) {
 
       await connection
@@ -2588,8 +2767,7 @@ async function removeHunterSubscriptions() {
           token2022Sub
         );
 
-      token2022Sub =
-        null;
+      token2022Sub = null;
     }
 
   } catch {}
@@ -2660,16 +2838,17 @@ async function startHunter() {
       );
 
     slotSub =
-      connection.onSlotChange(
-        () => {
+      connection
+        .onSlotChange(
+          () => {
 
-          lastWsHeartbeat =
-            Date.now();
+            lastWsHeartbeat =
+              Date.now();
 
-          state.websocket =
-            "online";
-        }
-      );
+            state.websocket =
+              "online";
+          }
+        );
 
     state.hunter =
       "running";
@@ -2784,29 +2963,51 @@ async function recoverPending() {
   if (
     mongoose.connection
       .readyState !== 1
-  ) return;
+  ) {
+    return;
+  }
 
   try {
+
+    // تشمل Candidates القديمة من V4.4
+    // والجديدة من V4.5.
 
     const whales =
       await FreshToken
         .find({
-          finalDecision:
-            "CANDIDATE",
 
-          $or: [
+          $and: [
+
             {
-              whaleChecked: {
-                $ne: true
+              finalDecision: {
+                $in: [
+                  "CANDIDATE",
+                  "CANDIDATE_PENDING_WHALE"
+                ]
               }
             },
+
             {
-              whaleStatus:
-                "RETRY"
+              $or: [
+
+                {
+                  whaleChecked: {
+                    $ne: true
+                  }
+                },
+
+                {
+                  whaleStatus:
+                    "RETRY"
+                }
+              ]
             }
           ]
         })
         .sort({
+          preWhaleScore:
+            -1,
+
           finalScore:
             -1
         })
@@ -2878,13 +3079,17 @@ function registerTelegramCommands() {
   bot.start(
     ctx =>
       ctx.reply(
-        "🤖 LOMY V4.4.3\n\n" +
+
+        "🧠 LOMY V4.5\n\n" +
+
         "🔎 Hunter ON\n" +
         "🛡 Security ON\n" +
         "💧 DEX ON\n" +
         "🐋 Whale Engine ON\n" +
-        "🌐 Network Protection ON\n" +
+        "🧠 Smart Final Score ON\n" +
+        "🌐 Helius RPC ON\n" +
         "📡 Telegram IPv4 ON\n\n" +
+
         "🧪 PAPER MODE\n" +
         "🔒 NO BUY / NO SELL"
       )
@@ -2895,7 +3100,7 @@ function registerTelegramCommands() {
     ctx =>
       ctx.reply(
 
-        `🤖 LOMY V4.4.3 STATUS\n\n` +
+        `🧠 LOMY V4.5 STATUS\n\n` +
 
         `🌐 Server: ${state.server}\n` +
         `🗄 Database: ${state.database}\n` +
@@ -2947,118 +3152,9 @@ function registerTelegramCommands() {
       )
   );
 
-  bot.command(
-    "whales",
-    async ctx => {
-
-      const [
-        done,
-        queued,
-        scanning,
-        retry
-      ] =
-      await Promise.all([
-        FreshToken
-          .find({
-            finalDecision:
-              "CANDIDATE",
-
-            whaleStatus:
-              "DONE"
-          })
-          .sort({
-            whaleScore:
-              -1,
-
-            finalScore:
-              -1
-          })
-          .limit(5)
-          .lean(),
-
-        FreshToken
-          .countDocuments({
-            finalDecision:
-              "CANDIDATE",
-
-            whaleStatus:
-              "QUEUED"
-          }),
-
-        FreshToken
-          .countDocuments({
-            finalDecision:
-              "CANDIDATE",
-
-            whaleStatus:
-              "SCANNING"
-          }),
-
-        FreshToken
-          .countDocuments({
-            finalDecision:
-              "CANDIDATE",
-
-            whaleStatus:
-              "RETRY"
-          })
-      ]);
-
-      let text =
-        `🐋 WHALE ENGINE\n\n` +
-
-        `Done: ${done.length}\n` +
-        `Queued: ${queued}\n` +
-        `Scanning: ${scanning}\n` +
-        `Retry: ${retry}\n`;
-
-      if (
-        !done.length
-      ) {
-
-        text +=
-          "\n⏳ لم يكتمل فحص Candidate حتى الآن.";
-
-        return ctx.reply(
-          text
-        );
-      }
-
-      for (
-        let i = 0;
-        i < done.length;
-        i++
-      ) {
-
-        const t =
-          done[i];
-
-        text +=
-
-          `\n━━━━━━━━━━━━━━\n` +
-
-          `${i + 1}) ${t.mint}\n\n` +
-
-          `🐋 Score: ${num(t.whaleScore)}/100\n` +
-          `Decision: ${t.whaleDecision}\n` +
-
-          `👤 Largest: ${num(t.largestHolderPct).toFixed(2)}%\n` +
-          `👥 Top 5: ${num(t.top5Pct).toFixed(2)}%\n` +
-          `👥 Top 10: ${num(t.top10Pct).toFixed(2)}%\n` +
-
-          `🔄 Change: ${num(t.top10ChangePct).toFixed(2)}%\n` +
-          `📈 Trend: ${t.whaleTrend}\n` +
-          `👛 Owners: ${t.whaleUniqueOwners || 0}\n`;
-      }
-
-      text +=
-        "\n🧪 PAPER ONLY";
-
-      await ctx.reply(
-        text
-      );
-    }
-  );
+  // ==================================================
+  // APPROVED CANDIDATES
+  // ==================================================
 
   bot.command(
     "candidates",
@@ -3068,10 +3164,10 @@ function registerTelegramCommands() {
         await FreshToken
           .find({
             finalDecision:
-              "CANDIDATE"
+              "APPROVED_CANDIDATE"
           })
           .sort({
-            finalScore:
+            smartScore:
               -1,
 
             liquidityUsd:
@@ -3085,41 +3181,44 @@ function registerTelegramCommands() {
       ) {
 
         return ctx.reply(
-          "🎯 لا توجد Candidates حالياً."
+          "🎯 لا توجد Approved Candidates حالياً.\n\n🐋 العملة لازم تنجح في فحص الحيتان أولاً."
         );
       }
 
       let text =
-        `🎯 TOP CANDIDATES (${tokens.length})\n`;
+        `✅ APPROVED CANDIDATES (${tokens.length})\n`;
 
-      tokens.forEach(
-        (t, i) => {
+      for (
+        let i = 0;
+        i < tokens.length;
+        i++
+      ) {
 
-          const whale =
-            t.whaleStatus ===
-            "DONE"
-              ?
-              `${num(t.whaleScore)}/100 ${t.whaleDecision}`
-              :
-              t.whaleStatus ||
-              "PENDING";
+        const t =
+          tokens[i];
 
-          text +=
+        text +=
 
-            `\n━━━━━━━━━━━━━━\n` +
+          `\n━━━━━━━━━━━━━━\n` +
 
-            `${i + 1}) ${t.mint}\n` +
+          `${i + 1}) ${t.mint}\n\n` +
 
-            `🎯 Final: ${num(t.finalScore)}/100\n` +
-            `🛡 Security: ${num(t.securityScore)}/100\n` +
-            `💧 DEX: ${num(t.dexScore)}/100\n` +
-            `🐋 Whale: ${whale}\n` +
-            `💵 Liquidity: $${num(t.liquidityUsd).toFixed(0)}\n`;
-        }
-      );
+          `🧠 Smart Score: ${num(t.smartScore)}/100\n` +
+
+          `🛡 Security: ${num(t.securityScore)}/100\n` +
+          `💧 DEX: ${num(t.dexScore)}/100\n` +
+          `🐋 Whale: ${num(t.whaleScore)}/100 ${t.whaleDecision}\n\n` +
+
+          `💵 Liquidity: $${num(t.liquidityUsd).toFixed(0)}\n` +
+
+          `👤 Largest Holder: ${num(t.largestHolderPct).toFixed(2)}%\n` +
+          `👥 Top10: ${num(t.top10Pct).toFixed(2)}%\n` +
+
+          `✅ Decision: APPROVED\n`;
+      }
 
       text +=
-        "\n🔒 PAPER ONLY";
+        "\n🧪 PAPER ONLY";
 
       await ctx.reply(
         text
@@ -3127,26 +3226,191 @@ function registerTelegramCommands() {
     }
   );
 
+  // ==================================================
+  // WHALE REPORT
+  // ==================================================
+
+  bot.command(
+    "whales",
+    async ctx => {
+
+      const tokens =
+        await FreshToken
+          .find({
+            whaleStatus:
+              "DONE"
+          })
+          .sort({
+            updatedAt:
+              -1
+          })
+          .limit(5)
+          .lean();
+
+      if (
+        !tokens.length
+      ) {
+
+        return ctx.reply(
+          "🐋 WHALE ENGINE\n\n⏳ لا توجد نتائج مكتملة حتى الآن."
+        );
+      }
+
+      let text =
+        `🐋 WHALE + SMART REPORT\n`;
+
+      tokens.forEach(
+        (t, i) => {
+
+          text +=
+
+            `\n━━━━━━━━━━━━━━\n` +
+
+            `${i + 1}) ${t.mint}\n\n` +
+
+            `🧠 Smart: ${num(t.smartScore || t.finalScore)}/100\n` +
+
+            `🎯 Final Decision: ${t.finalDecision}\n\n` +
+
+            `🐋 Whale: ${num(t.whaleScore)}/100 ${t.whaleDecision}\n` +
+
+            `👤 Largest: ${num(t.largestHolderPct).toFixed(2)}%\n` +
+
+            `👥 Top 5: ${num(t.top5Pct).toFixed(2)}%\n` +
+
+            `👥 Top 10: ${num(t.top10Pct).toFixed(2)}%\n` +
+
+            `🔄 Change: ${num(t.top10ChangePct).toFixed(2)}%\n` +
+
+            `📈 Trend: ${t.whaleTrend}\n` +
+
+            `👛 Owners: ${t.whaleUniqueOwners || 0}\n`;
+        }
+      );
+
+      text +=
+        "\n🧪 PAPER ONLY";
+
+      await ctx.reply(
+        text
+      );
+    }
+  );
+
+  // ==================================================
+  // BLOCKED TOKENS
+  // ==================================================
+
+  bot.command(
+    "blocked",
+    async ctx => {
+
+      const tokens =
+        await FreshToken
+          .find({
+            finalDecision:
+              "BLOCKED_WHALE"
+          })
+          .sort({
+            updatedAt:
+              -1
+          })
+          .limit(10)
+          .lean();
+
+      if (
+        !tokens.length
+      ) {
+
+        return ctx.reply(
+          "✅ مفيش عملات Blocked by Whale حالياً."
+        );
+      }
+
+      let text =
+        `⛔ WHALE BLOCKED (${tokens.length})\n`;
+
+      tokens.forEach(
+        (t, i) => {
+
+          text +=
+
+            `\n━━━━━━━━━━━━━━\n` +
+
+            `${i + 1}) ${t.mint}\n` +
+
+            `🧠 Smart: ${num(t.smartScore)}/100\n` +
+
+            `🐋 Whale: ${num(t.whaleScore)}/100 DANGER\n` +
+
+            `👤 Largest: ${num(t.largestHolderPct).toFixed(2)}%\n` +
+
+            `👥 Top10: ${num(t.top10Pct).toFixed(2)}%\n`;
+        }
+      );
+
+      text +=
+        "\n🔒 BLOCKED FROM APPROVAL";
+
+      await ctx.reply(
+        text
+      );
+    }
+  );
+
+  // ==================================================
+  // STATS
+  // ==================================================
+
   bot.command(
     "stats",
     async ctx => {
 
       const [
         total,
-        candidates,
+        pendingWhale,
+        approved,
+        blocked,
+        watchWhale,
+        watchScore,
         whaleDone,
         safe,
         caution,
         danger
       ] =
       await Promise.all([
+
         FreshToken
           .countDocuments(),
 
         FreshToken
           .countDocuments({
             finalDecision:
-              "CANDIDATE"
+              "CANDIDATE_PENDING_WHALE"
+          }),
+
+        FreshToken
+          .countDocuments({
+            finalDecision:
+              "APPROVED_CANDIDATE"
+          }),
+
+        FreshToken
+          .countDocuments({
+            finalDecision:
+              "BLOCKED_WHALE"
+          }),
+
+        FreshToken
+          .countDocuments({
+            finalDecision:
+              "WATCH_WHALE"
+          }),
+
+        FreshToken
+          .countDocuments({
+            finalDecision:
+              "WATCH_SCORE"
           }),
 
         FreshToken
@@ -3176,18 +3440,32 @@ function registerTelegramCommands() {
 
       await ctx.reply(
 
-        `📊 V4.4.3 STATS\n\n` +
+        `📊 LOMY V4.5 STATS\n\n` +
 
-        `Total Tokens: ${total}\n` +
-        `Candidates: ${candidates} 🎯\n\n` +
+        `Total Tokens: ${total}\n\n` +
 
-        `Whale DONE: ${whaleDone} 🐋\n` +
+        `⏳ Pending Whale: ${pendingWhale}\n` +
+
+        `✅ Approved: ${approved}\n` +
+
+        `⛔ Whale Blocked: ${blocked}\n` +
+
+        `⚠️ Whale Watch: ${watchWhale}\n` +
+
+        `👀 Score Watch: ${watchScore}\n\n` +
+
+        `🐋 Whale DONE: ${whaleDone}\n` +
+
         `SAFE: ${safe} ✅\n` +
+
         `CAUTION: ${caution} ⚠️\n` +
+
         `DANGER: ${danger} ❌\n\n` +
 
         `RPC 429: ${state.rpc429}\n` +
+
         `RPC Dropped: ${state.rpcDropped}\n` +
+
         `Errors: ${state.errors}\n\n` +
 
         `🧪 PAPER MODE`
@@ -3199,7 +3477,9 @@ function registerTelegramCommands() {
     "balance",
     async ctx => {
 
-      if (!wallet) {
+      if (
+        !wallet
+      ) {
 
         return ctx.reply(
           "❌ Wallet unavailable"
@@ -3242,7 +3522,7 @@ function registerTelegramCommands() {
 }
 
 // ======================================================
-// TELEGRAM RETRY ENGINE
+// TELEGRAM ENGINE
 // ======================================================
 
 async function startTelegram() {
@@ -3284,19 +3564,38 @@ async function startTelegram() {
       );
 
       const me =
-        await bot.telegram.getMe();
+        await bot.telegram
+          .getMe();
 
       log(
         `✅ Telegram API reached: @${me.username || "BOT"}`
       );
 
-      await bot.launch({
-        dropPendingUpdates:
-          false
-      });
+      // مهم:
+      // نحدّث الحالة هنا قبل launch
+      // لأن launch يستمر في polling.
 
       state.telegram =
         "online";
+
+      bot.launch({
+        dropPendingUpdates:
+          false
+      })
+      .catch(
+        async err => {
+
+          state.telegram =
+            "error";
+
+          state.telegramRetries++;
+
+          errLog(
+            "Telegram polling",
+            err
+          );
+        }
+      );
 
       log(
         "✅ Telegram online"
@@ -3316,23 +3615,29 @@ async function startTelegram() {
         "⚠️ Telegram connection failed",
         {
           message:
-            err?.message || null,
+            err?.message ||
+            null,
 
           code:
-            err?.code || null,
+            err?.code ||
+            null,
 
           errno:
-            err?.errno || null,
+            err?.errno ||
+            null,
 
           type:
-            err?.type || null,
+            err?.type ||
+            null,
 
           cause:
-            err?.cause?.message ||
+            err?.cause
+              ?.message ||
             null,
 
           causeCode:
-            err?.cause?.code ||
+            err?.cause
+              ?.code ||
             null
         }
       );
@@ -3448,7 +3753,9 @@ process.on(
         reason
         :
         new Error(
-          String(reason)
+          String(
+            reason
+          )
         )
     );
   }
@@ -3491,24 +3798,39 @@ async function main() {
   console.log(
     "================================"
   );
+
   console.log(
-    "🚀 LOMY SOLANA HUNTER V4.4.3"
+    "🚀 LOMY SOLANA HUNTER V4.5"
   );
+
   console.log(
-    "📡 TELEGRAM IPV4 FIX"
+    "🧠 SMART FINAL SCORE ENGINE"
   );
+
   console.log(
-    "🌐 NETWORK STABILITY ENGINE"
+    "🛡 SECURITY 45%"
   );
+
   console.log(
-    "🐋 WHALE ENGINE"
+    "💧 DEX 35%"
   );
+
+  console.log(
+    "🐋 WHALE 20%"
+  );
+
+  console.log(
+    "⛔ WHALE DANGER = HARD BLOCK"
+  );
+
   console.log(
     "🧪 PAPER MODE"
   );
+
   console.log(
     "🔒 LIVE TRADING DISABLED"
   );
+
   console.log(
     "================================"
   );
@@ -3548,7 +3870,11 @@ async function main() {
     );
 
   log(
-    "✅ LOMY V4.4.3 STARTED"
+    "✅ LOMY V4.5 STARTED"
+  );
+
+  log(
+    "🧠 SMART FINAL SCORE ACTIVE"
   );
 
   log(
