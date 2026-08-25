@@ -1,7 +1,11 @@
 // ======================================================
-// LOMY SOLANA HUNTER V3
-// Render Safe + Fresh Token Hunter + Security Engine V1
-// PAPER MODE ONLY - NO BUY / NO SELL
+// LOMY SOLANA HUNTER V4
+// Render Safe
+// Fresh Token Hunter
+// Security Engine V2
+// DEX / Liquidity Engine V1
+// PAPER MODE ONLY
+// ABSOLUTELY NO BUY / NO SELL
 // ======================================================
 
 require('dotenv').config();
@@ -45,7 +49,7 @@ const PORT = Number(process.env.PORT) || 10000;
 const TRADING_MODE = 'PAPER';
 const LIVE_TRADING_ENABLED = false;
 
-// لا توجد أي دوال BUY / SELL في هذه النسخة.
+// لا توجد أي دالة شراء أو بيع في V4.
 
 // ======================================================
 // TOKEN PROGRAMS
@@ -60,66 +64,22 @@ const TOKEN_2022_PROGRAM_ID = new PublicKey(
 );
 
 // ======================================================
-// STATE
+// V4 FILTER SETTINGS
 // ======================================================
 
-const systemState = {
-    server: 'starting',
-    database: 'disconnected',
-    wallet: 'not_loaded',
-    solana: 'disconnected',
-    telegram: 'stopped',
-    trading: 'disabled',
-    mode: TRADING_MODE,
-    ready: false,
-    startedAt: new Date().toISOString(),
-    lastError: null
-};
+// هذه حدود مراقبة وليست قواعد تداول.
 
-const hunterState = {
-    status: 'stopped',
-    detected: 0,
-    saved: 0,
-    duplicates: 0,
-    errors: 0,
-    startedAt: null,
-    lastDetectedAt: null,
-    lastMint: null
-};
+const MIN_LIQUIDITY_USD = 3000;
+const STRONG_LIQUIDITY_USD = 10000;
 
-const securityState = {
-    status: 'idle',
-    scanned: 0,
-    passed: 0,
-    review: 0,
-    rejected: 0,
-    errors: 0,
-    lastMint: null,
-    lastScore: null,
-    lastDecision: null
-};
+const MIN_VOLUME_M5 = 250;
+const MIN_TXNS_M5 = 5;
+
+const DEX_RECHECK_DELAY_MS = 30000;
+const DEX_MAX_RECHECKS = 5;
 
 // ======================================================
-// GLOBALS
-// ======================================================
-
-let wallet = null;
-let bot = null;
-let httpServer = null;
-let telegramStarted = false;
-let shuttingDown = false;
-
-let tokenProgramSubscription = null;
-let token2022Subscription = null;
-
-const processingSignatures = new Set();
-const securityQueue = [];
-const securityQueuedMints = new Set();
-
-let securityWorkerRunning = false;
-
-// ======================================================
-// SOLANA CONNECTION
+// CONNECTION
 // ======================================================
 
 const connection = new Connection(
@@ -130,25 +90,115 @@ const connection = new Connection(
 );
 
 // ======================================================
-// LOGGING
+// STATES
 // ======================================================
 
+const systemState = {
+    server: 'starting',
+    database: 'disconnected',
+    wallet: 'not_loaded',
+    solana: 'disconnected',
+    telegram: 'stopped',
+    ready: false,
+    trading: 'disabled',
+    mode: 'PAPER',
+    startedAt: new Date().toISOString(),
+    lastError: null
+};
+
+const hunterState = {
+    status: 'stopped',
+    detected: 0,
+    saved: 0,
+    duplicates: 0,
+    errors: 0,
+    lastMint: null
+};
+
+const securityState = {
+    status: 'idle',
+    scanned: 0,
+    pass: 0,
+    review: 0,
+    reject: 0,
+    errors: 0,
+    queue: 0,
+    lastMint: null,
+    lastScore: null,
+    lastDecision: null
+};
+
+const dexState = {
+    status: 'idle',
+    scanned: 0,
+    listed: 0,
+    noPool: 0,
+    pass: 0,
+    watch: 0,
+    reject: 0,
+    errors: 0,
+    queue: 0,
+    lastMint: null,
+    lastDex: null,
+    lastLiquidity: null
+};
+
+// ======================================================
+// GLOBALS
+// ======================================================
+
+let wallet = null;
+let bot = null;
+let httpServer = null;
+
+let telegramStarted = false;
+let shuttingDown = false;
+
+let tokenProgramSubscription = null;
+let token2022Subscription = null;
+
+const processingSignatures = new Set();
+
+const securityQueue = [];
+const securityQueued = new Set();
+
+const dexQueue = [];
+const dexQueued = new Set();
+
+let securityWorkerRunning = false;
+let dexWorkerRunning = false;
+
+// ======================================================
+// HELPERS
+// ======================================================
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function now() {
+    return new Date().toISOString();
+}
+
+function safeNumber(value, fallback = 0) {
+
+    const n = Number(value);
+
+    return Number.isFinite(n)
+        ? n
+        : fallback;
+}
+
 function logInfo(message) {
-    console.log(
-        `[${new Date().toISOString()}] ℹ️ ${message}`
-    );
+    console.log(`[${now()}] ℹ️ ${message}`);
 }
 
 function logSuccess(message) {
-    console.log(
-        `[${new Date().toISOString()}] ✅ ${message}`
-    );
+    console.log(`[${now()}] ✅ ${message}`);
 }
 
 function logWarning(message) {
-    console.warn(
-        `[${new Date().toISOString()}] ⚠️ ${message}`
-    );
+    console.warn(`[${now()}] ⚠️ ${message}`);
 }
 
 function logError(message, error = null) {
@@ -156,7 +206,7 @@ function logError(message, error = null) {
     if (error) {
 
         console.error(
-            `[${new Date().toISOString()}] ❌ ${message}`,
+            `[${now()}] ❌ ${message}`,
             error
         );
 
@@ -166,22 +216,12 @@ function logError(message, error = null) {
     } else {
 
         console.error(
-            `[${new Date().toISOString()}] ❌ ${message}`
+            `[${now()}] ❌ ${message}`
         );
 
         systemState.lastError = message;
     }
 }
-
-function sleep(ms) {
-    return new Promise(
-        resolve => setTimeout(resolve, ms)
-    );
-}
-
-// ======================================================
-// READY STATE
-// ======================================================
 
 function updateReadyState() {
 
@@ -192,147 +232,196 @@ function updateReadyState() {
         systemState.solana === 'connected';
 
     systemState.trading = 'disabled';
+
+    securityState.queue =
+        securityQueue.length;
+
+    dexState.queue =
+        dexQueue.length;
 }
 
 // ======================================================
-// DATABASE MODEL
+// DATABASE
 // ======================================================
 
-const freshTokenSchema =
-    new mongoose.Schema(
-        {
-            mint: {
-                type: String,
-                required: true,
-                unique: true,
-                index: true
-            },
+const tokenSchema = new mongoose.Schema({
 
-            signature: {
-                type: String,
-                index: true
-            },
+    mint: {
+        type: String,
+        required: true,
+        unique: true,
+        index: true
+    },
 
-            slot: Number,
+    signature: String,
 
-            tokenProgram: String,
+    slot: Number,
 
-            detectedAt: {
-                type: Date,
-                default: Date.now,
-                index: true
-            },
+    tokenProgram: String,
 
-            status: {
-                type: String,
-                default: 'NEW'
-            },
+    detectedAt: {
+        type: Date,
+        default: Date.now,
+        index: true
+    },
 
-            paperOnly: {
-                type: Boolean,
-                default: true
-            },
+    paperOnly: {
+        type: Boolean,
+        default: true
+    },
 
-            securityChecked: {
-                type: Boolean,
-                default: false,
-                index: true
-            },
+    // ---------------- SECURITY ----------------
 
-            securityCheckedAt: Date,
+    securityChecked: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
 
-            securityScore: {
-                type: Number,
-                default: null,
-                index: true
-            },
+    securityCheckedAt: Date,
 
-            securityDecision: {
-                type: String,
-                default: 'PENDING',
-                index: true
-            },
+    securityScore: {
+        type: Number,
+        default: null
+    },
 
-            securityRisk: {
-                type: String,
-                default: 'UNKNOWN'
-            },
+    securityDecision: {
+        type: String,
+        default: 'PENDING',
+        index: true
+    },
 
-            mintAuthority: {
-                type: String,
-                default: null
-            },
+    securityRisk: {
+        type: String,
+        default: 'UNKNOWN'
+    },
 
-            mintAuthorityRevoked: {
-                type: Boolean,
-                default: false
-            },
+    mintAuthority: String,
 
-            freezeAuthority: {
-                type: String,
-                default: null
-            },
+    mintAuthorityRevoked: {
+        type: Boolean,
+        default: false
+    },
 
-            freezeAuthorityRevoked: {
-                type: Boolean,
-                default: false
-            },
+    freezeAuthority: String,
 
-            supplyRaw: {
-                type: String,
-                default: null
-            },
+    freezeAuthorityRevoked: {
+        type: Boolean,
+        default: false
+    },
 
-            decimals: {
-                type: Number,
-                default: null
-            },
+    supplyRaw: String,
 
-            isInitialized: {
-                type: Boolean,
-                default: null
-            },
+    decimals: Number,
 
-            actualProgramOwner: {
-                type: String,
-                default: null
-            },
+    token2022: {
+        type: Boolean,
+        default: false
+    },
 
-            programOwnerValid: {
-                type: Boolean,
-                default: false
-            },
+    extensions: {
+        type: [String],
+        default: []
+    },
 
-            token2022: {
-                type: Boolean,
-                default: false
-            },
+    dangerousExtensions: {
+        type: [String],
+        default: []
+    },
 
-            riskFlags: {
-                type: [String],
-                default: []
-            },
+    securityFlags: {
+        type: [String],
+        default: []
+    },
 
-            positiveFlags: {
-                type: [String],
-                default: []
-            },
+    securityError: String,
 
-            securityError: {
-                type: String,
-                default: null
-            }
-        },
-        {
-            timestamps: true
-        }
-    );
+    // ---------------- DEX ----------------
+
+    dexChecked: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
+
+    dexCheckedAt: Date,
+
+    dexListed: {
+        type: Boolean,
+        default: false
+    },
+
+    dexId: String,
+
+    pairAddress: String,
+
+    pairCreatedAt: Date,
+
+    pairAgeMinutes: Number,
+
+    priceUsd: Number,
+
+    liquidityUsd: Number,
+
+    volumeM5: Number,
+
+    volumeH1: Number,
+
+    volumeH24: Number,
+
+    buysM5: Number,
+
+    sellsM5: Number,
+
+    txnsM5: Number,
+
+    fdv: Number,
+
+    marketCap: Number,
+
+    dexScore: Number,
+
+    dexDecision: {
+        type: String,
+        default: 'PENDING',
+        index: true
+    },
+
+    dexFlags: {
+        type: [String],
+        default: []
+    },
+
+    dexCheckAttempts: {
+        type: Number,
+        default: 0
+    },
+
+    dexError: String,
+
+    // ---------------- FINAL ----------------
+
+    finalScore: {
+        type: Number,
+        default: null,
+        index: true
+    },
+
+    finalDecision: {
+        type: String,
+        default: 'PENDING',
+        index: true
+    }
+
+}, {
+    timestamps: true
+});
 
 const FreshToken =
     mongoose.models.FreshToken ||
     mongoose.model(
         'FreshToken',
-        freshTokenSchema
+        tokenSchema
     );
 
 // ======================================================
@@ -342,7 +431,7 @@ const FreshToken =
 app.get('/', (req, res) => {
 
     res.status(200).send(
-        '✅ LOMY Solana Hunter V3 - PAPER MODE'
+        '✅ LOMY SOLANA HUNTER V4 - PAPER MODE'
     );
 });
 
@@ -352,7 +441,7 @@ app.get('/health', (req, res) => {
 
     res.status(200).json({
 
-        service: 'LOMY Solana Hunter V3',
+        service: 'LOMY V4',
 
         server: systemState.server,
         database: systemState.database,
@@ -364,23 +453,16 @@ app.get('/health', (req, res) => {
 
         security: securityState.status,
 
-        securityQueue:
-            securityQueue.length,
-
-        trading: systemState.trading,
-
-        tradingMode: TRADING_MODE,
-
-        liveTradingEnabled:
-            LIVE_TRADING_ENABLED,
+        dex: dexState.status,
 
         ready: systemState.ready,
 
+        mode: 'PAPER',
+
+        liveTrading: false,
+
         uptimeSeconds:
             Math.floor(process.uptime()),
-
-        startedAt:
-            systemState.startedAt,
 
         lastError:
             systemState.lastError
@@ -395,46 +477,24 @@ app.get('/api/status', (req, res) => {
 
         success: true,
 
-        mode: TRADING_MODE,
-
-        liveTrading:
-            LIVE_TRADING_ENABLED,
-
-        ready:
-            systemState.ready,
-
-        services: {
-            database:
-                systemState.database,
-
-            wallet:
-                systemState.wallet,
-
-            solana:
-                systemState.solana,
-
-            telegram:
-                systemState.telegram,
-
-            hunter:
-                hunterState.status,
-
-            security:
-                securityState.status
-        },
+        system: systemState,
 
         hunter: hunterState,
 
         security: {
             ...securityState,
-            queue:
-                securityQueue.length
+            queue: securityQueue.length
+        },
+
+        dex: {
+            ...dexState,
+            queue: dexQueue.length
         }
     });
 });
 
 // ======================================================
-// HTTP SERVER FIRST FOR RENDER
+// HTTP SERVER - RENDER FIRST
 // ======================================================
 
 function startHttpServer() {
@@ -452,7 +512,7 @@ function startHttpServer() {
                             'online';
 
                         logSuccess(
-                            `Render HTTP Server يعمل على PORT ${PORT}`
+                            `Render Server PORT ${PORT}`
                         );
 
                         updateReadyState();
@@ -468,11 +528,6 @@ function startHttpServer() {
                     systemState.server =
                         'error';
 
-                    logError(
-                        'HTTP Server error',
-                        error
-                    );
-
                     reject(error);
                 }
             );
@@ -481,7 +536,7 @@ function startHttpServer() {
 }
 
 // ======================================================
-// MONGODB EVENTS
+// MONGODB
 // ======================================================
 
 mongoose.connection.on(
@@ -506,25 +561,6 @@ mongoose.connection.on(
         systemState.database =
             'disconnected';
 
-        logWarning(
-            'MongoDB disconnected'
-        );
-
-        updateReadyState();
-    }
-);
-
-mongoose.connection.on(
-    'reconnected',
-    () => {
-
-        systemState.database =
-            'connected';
-
-        logSuccess(
-            'MongoDB reconnected'
-        );
-
         updateReadyState();
     }
 );
@@ -540,37 +576,22 @@ mongoose.connection.on(
             'MongoDB error',
             error
         );
-
-        updateReadyState();
     }
 );
 
-// ======================================================
-// CONNECT DATABASE
-// ======================================================
-
-async function connectToDatabase() {
-
-    if (!MONGODB_URI) {
-
-        systemState.database =
-            'missing_config';
-
-        logError(
-            'MONGODB_URI غير موجود'
-        );
-
-        return;
-    }
+async function connectDatabase() {
 
     try {
 
+        if (!MONGODB_URI) {
+
+            throw new Error(
+                'MONGODB_URI missing'
+            );
+        }
+
         systemState.database =
             'connecting';
-
-        logInfo(
-            'جاري الاتصال بـ MongoDB...'
-        );
 
         await mongoose.connect(
             MONGODB_URI,
@@ -580,25 +601,16 @@ async function connectToDatabase() {
             }
         );
 
-        systemState.database =
-            'connected';
-
-        logSuccess(
-            'تم الاتصال بقاعدة البيانات'
-        );
-
     } catch (error) {
 
         systemState.database =
             'error';
 
         logError(
-            'فشل MongoDB',
+            'Database connection failed',
             error
         );
     }
-
-    updateReadyState();
 }
 
 // ======================================================
@@ -612,7 +624,7 @@ async function loadWallet() {
         if (!BOT_PRIVATE_KEY) {
 
             throw new Error(
-                'BOT_PRIVATE_KEY غير موجود'
+                'BOT_PRIVATE_KEY missing'
             );
         }
 
@@ -663,7 +675,7 @@ async function loadWallet() {
             'loaded';
 
         logSuccess(
-            `المحفظة: ${wallet.publicKey.toString()}`
+            `Wallet: ${wallet.publicKey.toString()}`
         );
 
     } catch (error) {
@@ -674,19 +686,17 @@ async function loadWallet() {
             'error';
 
         logError(
-            'فشل تحميل المحفظة',
+            'Wallet error',
             error
         );
     }
-
-    updateReadyState();
 }
 
 // ======================================================
-// SOLANA TEST
+// SOLANA
 // ======================================================
 
-async function testSolanaConnection() {
+async function testSolana() {
 
     if (!wallet) {
 
@@ -703,19 +713,11 @@ async function testSolanaConnection() {
                 wallet.publicKey
             );
 
-        const sol =
-            balance /
-            LAMPORTS_PER_SOL;
-
         systemState.solana =
             'connected';
 
         logSuccess(
-            'Solana RPC متصل'
-        );
-
-        logSuccess(
-            `الرصيد: ${sol.toFixed(6)} SOL`
+            `Solana connected | ${(balance / LAMPORTS_PER_SOL).toFixed(6)} SOL`
         );
 
     } catch (error) {
@@ -733,19 +735,150 @@ async function testSolanaConnection() {
 }
 
 // ======================================================
-// SECURITY ENGINE V1
+// TOKEN-2022 EXTENSION EXTRACTION
 // ======================================================
 
-function calculateSecurityScore(data) {
+function extractExtensions(parsedInfo) {
+
+    const result = [];
+
+    function walk(value) {
+
+        if (!value) return;
+
+        if (Array.isArray(value)) {
+
+            for (const item of value) {
+
+                if (
+                    item &&
+                    typeof item === 'object'
+                ) {
+
+                    if (
+                        typeof item.extension ===
+                        'string'
+                    ) {
+
+                        result.push(
+                            item.extension
+                        );
+                    }
+
+                    if (
+                        typeof item.extensionType ===
+                        'string'
+                    ) {
+
+                        result.push(
+                            item.extensionType
+                        );
+                    }
+                }
+
+                walk(item);
+            }
+
+            return;
+        }
+
+        if (typeof value === 'object') {
+
+            for (
+                const [key, val]
+                of Object.entries(value)
+            ) {
+
+                const lower =
+                    key.toLowerCase();
+
+                if (
+                    lower.includes(
+                        'permanentdelegate'
+                    )
+                ) {
+
+                    result.push(
+                        'PermanentDelegate'
+                    );
+                }
+
+                if (
+                    lower.includes(
+                        'transferfee'
+                    )
+                ) {
+
+                    result.push(
+                        'TransferFeeConfig'
+                    );
+                }
+
+                if (
+                    lower.includes(
+                        'nontransferable'
+                    )
+                ) {
+
+                    result.push(
+                        'NonTransferable'
+                    );
+                }
+
+                if (
+                    lower.includes(
+                        'transferhook'
+                    )
+                ) {
+
+                    result.push(
+                        'TransferHook'
+                    );
+                }
+
+                if (
+                    lower.includes(
+                        'defaultaccountstate'
+                    )
+                ) {
+
+                    result.push(
+                        'DefaultAccountState'
+                    );
+                }
+
+                if (
+                    lower.includes(
+                        'confidential'
+                    )
+                ) {
+
+                    result.push(
+                        'ConfidentialTransfer'
+                    );
+                }
+
+                walk(val);
+            }
+        }
+    }
+
+    walk(parsedInfo);
+
+    return [
+        ...new Set(result)
+    ];
+}
+
+// ======================================================
+// SECURITY V2
+// ======================================================
+
+function calculateSecurity(data) {
 
     let score = 50;
 
-    const riskFlags = [];
-    const positiveFlags = [];
-
-    // ==============================================
-    // MINT AUTHORITY
-    // ==============================================
+    const flags = [];
 
     if (
         data.mintAuthority === null
@@ -753,22 +886,18 @@ function calculateSecurityScore(data) {
 
         score += 20;
 
-        positiveFlags.push(
-            'MINT_AUTHORITY_REVOKED'
+        flags.push(
+            'MINT_REVOKED'
         );
 
     } else {
 
         score -= 20;
 
-        riskFlags.push(
+        flags.push(
             'MINT_AUTHORITY_ACTIVE'
         );
     }
-
-    // ==============================================
-    // FREEZE AUTHORITY
-    // ==============================================
 
     if (
         data.freezeAuthority === null
@@ -776,132 +905,135 @@ function calculateSecurityScore(data) {
 
         score += 20;
 
-        positiveFlags.push(
-            'FREEZE_AUTHORITY_REVOKED'
+        flags.push(
+            'FREEZE_REVOKED'
         );
 
     } else {
 
         score -= 25;
 
-        riskFlags.push(
+        flags.push(
             'FREEZE_AUTHORITY_ACTIVE'
         );
     }
 
-    // ==============================================
-    // INITIALIZED
-    // ==============================================
-
-    if (
-        data.isInitialized === true
-    ) {
+    if (data.supply > 0n) {
 
         score += 5;
 
-        positiveFlags.push(
-            'MINT_INITIALIZED'
-        );
-
     } else {
 
-        score -= 30;
+        score -= 15;
 
-        riskFlags.push(
-            'MINT_NOT_INITIALIZED'
+        flags.push(
+            'ZERO_SUPPLY'
         );
     }
-
-    // ==============================================
-    // PROGRAM OWNER
-    // ==============================================
 
     if (
-        data.programOwnerValid
-    ) {
-
-        score += 5;
-
-        positiveFlags.push(
-            'VALID_TOKEN_PROGRAM'
-        );
-
-    } else {
-
-        score -= 40;
-
-        riskFlags.push(
-            'INVALID_PROGRAM_OWNER'
-        );
-    }
-
-    // ==============================================
-    // SUPPLY
-    // ==============================================
-
-    try {
-
-        const supply =
-            BigInt(
-                data.supplyRaw || '0'
-            );
-
-        if (supply <= 0n) {
-
-            score -= 10;
-
-            riskFlags.push(
-                'ZERO_SUPPLY'
-            );
-
-        } else {
-
-            positiveFlags.push(
-                'POSITIVE_SUPPLY'
-            );
-        }
-
-    } catch {
-
-        score -= 5;
-
-        riskFlags.push(
-            'INVALID_SUPPLY'
-        );
-    }
-
-    // ==============================================
-    // DECIMALS
-    // ==============================================
-
-    if (
-        typeof data.decimals ===
-            'number' &&
         data.decimals >= 0 &&
         data.decimals <= 18
     ) {
 
-        positiveFlags.push(
-            'NORMAL_DECIMALS_RANGE'
-        );
+        score += 5;
 
     } else {
 
         score -= 10;
 
-        riskFlags.push(
+        flags.push(
             'UNUSUAL_DECIMALS'
         );
     }
 
-    // Token-2022 مش نصب تلقائياً.
-    // لكن يحتاج Extensions Scan لاحقاً.
+    const dangerous = [];
 
-    if (data.token2022) {
+    for (
+        const extension
+        of data.extensions
+    ) {
 
-        riskFlags.push(
-            'TOKEN_2022_REQUIRES_EXTENSION_SCAN'
-        );
+        const e =
+            extension.toLowerCase();
+
+        if (
+            e.includes(
+                'permanentdelegate'
+            )
+        ) {
+
+            score -= 35;
+
+            dangerous.push(
+                'PermanentDelegate'
+            );
+        }
+
+        if (
+            e.includes(
+                'nontransferable'
+            )
+        ) {
+
+            score -= 50;
+
+            dangerous.push(
+                'NonTransferable'
+            );
+        }
+
+        if (
+            e.includes(
+                'transferhook'
+            )
+        ) {
+
+            score -= 20;
+
+            dangerous.push(
+                'TransferHook'
+            );
+        }
+
+        if (
+            e.includes(
+                'transferfee'
+            )
+        ) {
+
+            score -= 10;
+
+            dangerous.push(
+                'TransferFeeConfig'
+            );
+        }
+
+        if (
+            e.includes(
+                'defaultaccountstate'
+            )
+        ) {
+
+            score -= 15;
+
+            dangerous.push(
+                'DefaultAccountState'
+            );
+        }
+
+        if (
+            e.includes(
+                'confidential'
+            )
+        ) {
+
+            score -= 15;
+
+            dangerous.push(
+                extension
+            );
+        }
     }
 
     score =
@@ -936,16 +1068,12 @@ function calculateSecurityScore(data) {
         score,
         decision,
         risk,
-        riskFlags,
-        positiveFlags
+        flags,
+        dangerous
     };
 }
 
-// ======================================================
-// SCAN TOKEN SECURITY
-// ======================================================
-
-async function scanTokenSecurity(
+async function scanSecurity(
     mintAddress
 ) {
 
@@ -954,42 +1082,37 @@ async function scanTokenSecurity(
 
     try {
 
-        const mintPublicKey =
+        const pubkey =
             new PublicKey(
                 mintAddress
             );
 
-        const accountInfo =
+        const response =
             await connection
                 .getParsedAccountInfo(
-                    mintPublicKey,
+                    pubkey,
                     'confirmed'
                 );
 
-        if (
-            !accountInfo ||
-            !accountInfo.value
-        ) {
+        if (!response.value) {
 
             throw new Error(
-                'Mint account not found'
+                'Mint not found'
             );
         }
 
-        const value =
-            accountInfo.value;
+        const account =
+            response.value;
 
         const owner =
-            value.owner.toString();
+            account.owner.toString();
 
-        const validOwner =
+        const token2022 =
             owner ===
-                TOKEN_PROGRAM_ID.toString() ||
-            owner ===
-                TOKEN_2022_PROGRAM_ID.toString();
+            TOKEN_2022_PROGRAM_ID.toString();
 
         const parsed =
-            value.data?.parsed;
+            account.data?.parsed;
 
         if (
             !parsed ||
@@ -997,52 +1120,47 @@ async function scanTokenSecurity(
         ) {
 
             throw new Error(
-                'Account is not a parsed Mint'
+                'Not parsed mint'
             );
         }
 
         const info =
             parsed.info || {};
 
-        const mintAuthority =
-            info.mintAuthority ?? null;
-
-        const freezeAuthority =
-            info.freezeAuthority ?? null;
+        const extensions =
+            token2022
+                ? extractExtensions(
+                    account.data
+                )
+                : [];
 
         const data = {
 
-            mintAuthority,
+            mintAuthority:
+                info.mintAuthority ??
+                null,
 
-            freezeAuthority,
+            freezeAuthority:
+                info.freezeAuthority ??
+                null,
 
-            supplyRaw:
-                String(
-                    info.supply ?? '0'
+            supply:
+                BigInt(
+                    String(
+                        info.supply || '0'
+                    )
                 ),
 
             decimals:
-                Number(
-                    info.decimals ?? 0
+                safeNumber(
+                    info.decimals
                 ),
 
-            isInitialized:
-                info.isInitialized === true,
-
-            actualProgramOwner:
-                owner,
-
-            programOwnerValid:
-                validOwner,
-
-            token2022:
-                owner ===
-                TOKEN_2022_PROGRAM_ID
-                    .toString()
+            extensions
         };
 
         const result =
-            calculateSecurityScore(
+            calculateSecurity(
                 data
             );
 
@@ -1084,34 +1202,23 @@ async function scanTokenSecurity(
                         null,
 
                     supplyRaw:
-                        data.supplyRaw,
+                        data.supply.toString(),
 
                     decimals:
                         data.decimals,
 
-                    isInitialized:
-                        data.isInitialized,
+                    token2022,
 
-                    actualProgramOwner:
-                        data.actualProgramOwner,
+                    extensions,
 
-                    programOwnerValid:
-                        data.programOwnerValid,
+                    dangerousExtensions:
+                        result.dangerous,
 
-                    token2022:
-                        data.token2022,
-
-                    riskFlags:
-                        result.riskFlags,
-
-                    positiveFlags:
-                        result.positiveFlags,
+                    securityFlags:
+                        result.flags,
 
                     securityError:
-                        null,
-
-                    status:
-                        result.decision
+                        null
                 }
             }
         );
@@ -1132,7 +1239,7 @@ async function scanTokenSecurity(
             'PASS'
         ) {
 
-            securityState.passed++;
+            securityState.pass++;
 
         } else if (
             result.decision ===
@@ -1143,12 +1250,25 @@ async function scanTokenSecurity(
 
         } else {
 
-            securityState.rejected++;
+            securityState.reject++;
         }
 
         logSuccess(
-            `🛡️ Security ${mintAddress} | ${result.score}/100 | ${result.decision}`
+            `🛡️ ${result.score}/100 ${result.decision} ${mintAddress}`
         );
+
+        // حتى PASS وREVIEW ندخلهم DEX.
+        // REJECT لا نضيّع API عليه إلا لاحقاً.
+
+        if (
+            result.decision !==
+            'REJECT'
+        ) {
+
+            queueDex(
+                mintAddress
+            );
+        }
 
         return result;
 
@@ -1157,43 +1277,33 @@ async function scanTokenSecurity(
         securityState.errors++;
 
         logError(
-            `Security Scan failed: ${mintAddress}`,
+            `Security error ${mintAddress}`,
             error
         );
 
-        try {
+        await FreshToken.updateOne(
+            {
+                mint:
+                    mintAddress
+            },
+            {
+                $set: {
 
-            await FreshToken.updateOne(
-                {
-                    mint:
-                        mintAddress
-                },
-                {
-                    $set: {
+                    securityDecision:
+                        'ERROR',
 
-                        securityChecked:
-                            false,
-
-                        securityDecision:
-                            'ERROR',
-
-                        securityRisk:
-                            'UNKNOWN',
-
-                        securityError:
-                            error.message
-                    }
+                    securityError:
+                        error.message
                 }
-            );
-
-        } catch {}
+            }
+        ).catch(() => {});
 
         return null;
 
     } finally {
 
         securityState.status =
-            securityQueue.length > 0
+            securityQueue.length
                 ? 'scanning'
                 : 'idle';
     }
@@ -1203,1212 +1313,26 @@ async function scanTokenSecurity(
 // SECURITY QUEUE
 // ======================================================
 
-function queueSecurityScan(
-    mintAddress
-) {
+function queueSecurity(mint) {
 
     if (
-        !mintAddress ||
-        securityQueuedMints.has(
-            mintAddress
-        )
+        !mint ||
+        securityQueued.has(mint)
     ) {
 
         return;
     }
 
-    securityQueuedMints.add(
-        mintAddress
-    );
+    securityQueued.add(mint);
 
-    securityQueue.push(
-        mintAddress
-    );
+    securityQueue.push(mint);
 
     runSecurityWorker()
         .catch(
-            error => {
-
+            error =>
                 logError(
-                    'Security Worker error',
+                    'Security Worker',
                     error
-                );
-            }
-        );
-}
-
-async function runSecurityWorker() {
-
-    if (securityWorkerRunning) {
-        return;
-    }
-
-    securityWorkerRunning = true;
-
-    try {
-
-        while (
-            securityQueue.length > 0 &&
-            !shuttingDown
-        ) {
-
-            const mint =
-                securityQueue.shift();
-
-            try {
-
-                await scanTokenSecurity(
-                    mint
-                );
-
-            } finally {
-
-                securityQueuedMints.delete(
-                    mint
-                );
-            }
-
-            // حماية الـRPC من الضغط
-            await sleep(250);
-        }
-
-    } finally {
-
-        securityWorkerRunning =
-            false;
-
-        securityState.status =
-            'idle';
-    }
-}
-
-// ======================================================
-// FIND INITIALIZE MINT
-// ======================================================
-
-function findMintInInstructions(
-    instructions
-) {
-
-    if (!Array.isArray(instructions)) {
-        return null;
-    }
-
-    for (
-        const instruction
-        of instructions
-    ) {
-
-        if (
-            instruction?.parsed &&
-            (
-                instruction.parsed.type ===
-                    'initializeMint' ||
-
-                instruction.parsed.type ===
-                    'initializeMint2'
-            )
-        ) {
-
-            const mint =
-                instruction.parsed.info
-                    ?.mint;
-
-            if (mint) {
-                return mint;
-            }
-        }
-    }
-
-    return null;
-}
-
-// ======================================================
-// PROCESS NEW MINT
-// ======================================================
-
-async function processPossibleNewMint(
-    event,
-    programName
-) {
-
-    if (!event || event.err) {
-        return;
-    }
-
-    const logs =
-        event.logs || [];
-
-    const found =
-        logs.some(
-            line =>
-                typeof line ===
-                    'string' &&
-                (
-                    line.includes(
-                        'Instruction: InitializeMint'
-                    ) ||
-                    line.includes(
-                        'Instruction: InitializeMint2'
-                    )
                 )
         );
-
-    if (!found) {
-        return;
-    }
-
-    const signature =
-        event.signature;
-
-    if (
-        !signature ||
-        processingSignatures.has(
-            signature
-        )
-    ) {
-
-        return;
-    }
-
-    processingSignatures.add(
-        signature
-    );
-
-    try {
-
-        let transaction = null;
-
-        for (
-            let attempt = 1;
-            attempt <= 4;
-            attempt++
-        ) {
-
-            try {
-
-                transaction =
-                    await connection
-                        .getParsedTransaction(
-                            signature,
-                            {
-                                commitment:
-                                    'confirmed',
-
-                                maxSupportedTransactionVersion:
-                                    0
-                            }
-                        );
-
-            } catch (error) {
-
-                if (attempt === 4) {
-                    throw error;
-                }
-            }
-
-            if (transaction) {
-                break;
-            }
-
-            await sleep(
-                attempt * 600
-            );
-        }
-
-        if (!transaction) {
-
-            hunterState.errors++;
-
-            return;
-        }
-
-        let mint =
-            findMintInInstructions(
-                transaction.transaction
-                    .message.instructions
-            );
-
-        if (
-            !mint &&
-            transaction.meta
-                ?.innerInstructions
-        ) {
-
-            for (
-                const group
-                of transaction.meta
-                    .innerInstructions
-            ) {
-
-                mint =
-                    findMintInInstructions(
-                        group.instructions
-                    );
-
-                if (mint) {
-                    break;
-                }
-            }
-        }
-
-        if (!mint) {
-            return;
-        }
-
-        hunterState.detected++;
-
-        hunterState.lastMint =
-            mint;
-
-        hunterState.lastDetectedAt =
-            new Date().toISOString();
-
-        if (
-            mongoose.connection
-                .readyState !== 1
-        ) {
-
-            hunterState.errors++;
-
-            return;
-        }
-
-        let tokenDocument = null;
-
-        try {
-
-            tokenDocument =
-                await FreshToken.create(
-                    {
-                        mint,
-
-                        signature,
-
-                        slot:
-                            transaction.slot,
-
-                        tokenProgram:
-                            programName,
-
-                        detectedAt:
-                            new Date(),
-
-                        status:
-                            'NEW',
-
-                        paperOnly:
-                            true,
-
-                        securityChecked:
-                            false,
-
-                        securityDecision:
-                            'PENDING'
-                    }
-                );
-
-            hunterState.saved++;
-
-            logSuccess(
-                `🆕 Token: ${mint}`
-            );
-
-        } catch (error) {
-
-            if (
-                error?.code === 11000
-            ) {
-
-                hunterState.duplicates++;
-
-                tokenDocument =
-                    await FreshToken
-                        .findOne({
-                            mint
-                        });
-
-            } else {
-
-                throw error;
-            }
-        }
-
-        // لو جديد أو لم يتم فحصه سابقاً
-        if (
-            tokenDocument &&
-            !tokenDocument
-                .securityChecked
-        ) {
-
-            queueSecurityScan(
-                mint
-            );
-        }
-
-    } catch (error) {
-
-        hunterState.errors++;
-
-        logError(
-            'Hunter processing error',
-            error
-        );
-
-    } finally {
-
-        processingSignatures.delete(
-            signature
-        );
-    }
 }
-
-// ======================================================
-// HUNTER START
-// ======================================================
-
-async function startFreshTokenHunter() {
-
-    if (
-        hunterState.status ===
-            'running'
-    ) {
-
-        return;
-    }
-
-    if (
-        systemState.solana !==
-        'connected'
-    ) {
-
-        hunterState.status =
-            'waiting_for_solana';
-
-        return;
-    }
-
-    try {
-
-        hunterState.status =
-            'starting';
-
-        tokenProgramSubscription =
-            connection.onLogs(
-
-                TOKEN_PROGRAM_ID,
-
-                event => {
-
-                    processPossibleNewMint(
-                        event,
-                        'SPL_TOKEN'
-                    ).catch(
-                        error =>
-                            logError(
-                                'SPL Hunter error',
-                                error
-                            )
-                    );
-                },
-
-                'confirmed'
-            );
-
-        token2022Subscription =
-            connection.onLogs(
-
-                TOKEN_2022_PROGRAM_ID,
-
-                event => {
-
-                    processPossibleNewMint(
-                        event,
-                        'TOKEN_2022'
-                    ).catch(
-                        error =>
-                            logError(
-                                'Token2022 Hunter error',
-                                error
-                            )
-                    );
-                },
-
-                'confirmed'
-            );
-
-        hunterState.status =
-            'running';
-
-        hunterState.startedAt =
-            new Date().toISOString();
-
-        logSuccess(
-            '🔎 Fresh Token Hunter RUNNING'
-        );
-
-    } catch (error) {
-
-        hunterState.status =
-            'error';
-
-        hunterState.errors++;
-
-        logError(
-            'Hunter start failed',
-            error
-        );
-    }
-}
-
-// ======================================================
-// STOP HUNTER
-// ======================================================
-
-async function stopFreshTokenHunter() {
-
-    try {
-
-        if (
-            tokenProgramSubscription !==
-            null
-        ) {
-
-            await connection
-                .removeOnLogsListener(
-                    tokenProgramSubscription
-                );
-
-            tokenProgramSubscription =
-                null;
-        }
-
-        if (
-            token2022Subscription !==
-            null
-        ) {
-
-            await connection
-                .removeOnLogsListener(
-                    token2022Subscription
-                );
-
-            token2022Subscription =
-                null;
-        }
-
-        hunterState.status =
-            'stopped';
-
-    } catch (error) {
-
-        logError(
-            'Hunter stop error',
-            error
-        );
-    }
-}
-
-// ======================================================
-// TELEGRAM
-// ======================================================
-
-async function startTelegram() {
-
-    if (!TELEGRAM_TOKEN) {
-
-        systemState.telegram =
-            'missing_config';
-
-        return;
-    }
-
-    try {
-
-        bot =
-            new Telegraf(
-                TELEGRAM_TOKEN
-            );
-
-        bot.start(
-            ctx =>
-                ctx.reply(
-                    '🤖 LOMY SOLANA HUNTER V3\n\n' +
-                    '🔎 Fresh Token Hunter: ON\n' +
-                    '🛡️ Security Engine: ON\n' +
-                    '🧪 PAPER MODE\n' +
-                    '🔒 LIVE TRADING: OFF'
-                )
-        );
-
-        // ==============================================
-        // STATUS
-        // ==============================================
-
-        bot.command(
-            'status',
-            async ctx => {
-
-                updateReadyState();
-
-                await ctx.reply(
-
-                    `🤖 LOMY STATUS\n\n` +
-
-                    `🌐 Server: ${systemState.server}\n` +
-
-                    `🗄 Database: ${systemState.database}\n` +
-
-                    `👛 Wallet: ${systemState.wallet}\n` +
-
-                    `⚡ Solana: ${systemState.solana}\n` +
-
-                    `📡 Telegram: ${systemState.telegram}\n` +
-
-                    `🔎 Hunter: ${hunterState.status}\n` +
-
-                    `🛡️ Security: ${securityState.status}\n\n` +
-
-                    `🧪 Mode: PAPER\n` +
-
-                    `🔒 Live Trading: OFF`
-                );
-            }
-        );
-
-        // ==============================================
-        // BALANCE
-        // ==============================================
-
-        bot.command(
-            'balance',
-            async ctx => {
-
-                if (!wallet) {
-
-                    return ctx.reply(
-                        '❌ المحفظة غير جاهزة'
-                    );
-                }
-
-                try {
-
-                    const balance =
-                        await connection
-                            .getBalance(
-                                wallet.publicKey
-                            );
-
-                    await ctx.reply(
-                        `💰 الرصيد: ${(balance / LAMPORTS_PER_SOL).toFixed(6)} SOL`
-                    );
-
-                } catch {
-
-                    await ctx.reply(
-                        '❌ تعذر قراءة الرصيد'
-                    );
-                }
-            }
-        );
-
-        // ==============================================
-        // MODE
-        // ==============================================
-
-        bot.command(
-            'mode',
-            ctx =>
-                ctx.reply(
-                    '🧪 PAPER MODE\n\n' +
-                    '❌ BUY: OFF\n' +
-                    '❌ SELL: OFF\n' +
-                    '🔎 Detection: ON\n' +
-                    '🛡️ Security Analysis: ON'
-                )
-        );
-
-        // ==============================================
-        // HUNTER
-        // ==============================================
-
-        bot.command(
-            'hunter',
-            async ctx => {
-
-                const count =
-                    mongoose.connection
-                        .readyState === 1
-                        ?
-                        await FreshToken
-                            .countDocuments()
-                        :
-                        'N/A';
-
-                await ctx.reply(
-
-                    `🔎 FRESH TOKEN HUNTER\n\n` +
-
-                    `Status: ${hunterState.status}\n` +
-
-                    `Detected: ${hunterState.detected}\n` +
-
-                    `Saved: ${hunterState.saved}\n` +
-
-                    `Database: ${count}\n` +
-
-                    `Duplicates: ${hunterState.duplicates}\n` +
-
-                    `Errors: ${hunterState.errors}\n\n` +
-
-                    `Last Mint:\n${hunterState.lastMint || 'None'}\n\n` +
-
-                    `🔒 NO BUY / NO SELL`
-                );
-            }
-        );
-
-        // ==============================================
-        // SECURITY
-        // ==============================================
-
-        bot.command(
-            'security',
-            async ctx => {
-
-                let last = null;
-
-                try {
-
-                    last =
-                        await FreshToken
-                            .findOne({
-                                securityChecked:
-                                    true
-                            })
-                            .sort({
-                                securityCheckedAt:
-                                    -1
-                            })
-                            .lean();
-
-                } catch {}
-
-                let message =
-
-                    `🛡️ SECURITY ENGINE\n\n` +
-
-                    `Status: ${securityState.status}\n` +
-
-                    `Queue: ${securityQueue.length}\n` +
-
-                    `Scanned: ${securityState.scanned}\n` +
-
-                    `PASS: ${securityState.passed} ✅\n` +
-
-                    `REVIEW: ${securityState.review} ⚠️\n` +
-
-                    `REJECT: ${securityState.rejected} ❌\n` +
-
-                    `Errors: ${securityState.errors}\n`;
-
-                if (last) {
-
-                    message +=
-
-                        `\n──────────────\n` +
-
-                        `LAST SCAN\n\n` +
-
-                        `Mint:\n${last.mint}\n\n` +
-
-                        `Score: ${last.securityScore}/100\n` +
-
-                        `Risk: ${last.securityRisk}\n` +
-
-                        `Decision: ${last.securityDecision}\n\n` +
-
-                        `Mint Authority: ${
-                            last.mintAuthorityRevoked
-                                ? 'REVOKED ✅'
-                                : 'ACTIVE ⚠️'
-                        }\n` +
-
-                        `Freeze Authority: ${
-                            last.freezeAuthorityRevoked
-                                ? 'REVOKED ✅'
-                                : 'ACTIVE ⚠️'
-                        }\n` +
-
-                        `Program: ${last.tokenProgram}\n` +
-
-                        `Decimals: ${last.decimals}\n\n` +
-
-                        `🔒 PAPER ONLY`;
-                }
-
-                await ctx.reply(
-                    message
-                );
-            }
-        );
-
-        // ==============================================
-        // STATS
-        // ==============================================
-
-        bot.command(
-            'stats',
-            async ctx => {
-
-                try {
-
-                    const [
-                        total,
-                        passed,
-                        review,
-                        rejected,
-                        pending
-                    ] =
-                    await Promise.all([
-
-                        FreshToken
-                            .countDocuments(),
-
-                        FreshToken
-                            .countDocuments({
-                                securityDecision:
-                                    'PASS'
-                            }),
-
-                        FreshToken
-                            .countDocuments({
-                                securityDecision:
-                                    'REVIEW'
-                            }),
-
-                        FreshToken
-                            .countDocuments({
-                                securityDecision:
-                                    'REJECT'
-                            }),
-
-                        FreshToken
-                            .countDocuments({
-                                securityChecked:
-                                    false
-                            })
-                    ]);
-
-                    await ctx.reply(
-
-                        `📊 DATABASE STATS\n\n` +
-
-                        `Total Tokens: ${total}\n\n` +
-
-                        `PASS: ${passed} ✅\n` +
-
-                        `REVIEW: ${review} ⚠️\n` +
-
-                        `REJECT: ${rejected} ❌\n` +
-
-                        `Pending: ${pending} ⏳\n\n` +
-
-                        `🧪 PAPER MODE`
-                    );
-
-                } catch {
-
-                    await ctx.reply(
-                        '❌ تعذر قراءة الإحصائيات'
-                    );
-                }
-            }
-        );
-
-        // ==============================================
-        // LAST TOKEN
-        // ==============================================
-
-        bot.command(
-            'lasttoken',
-            async ctx => {
-
-                try {
-
-                    const token =
-                        await FreshToken
-                            .findOne()
-                            .sort({
-                                detectedAt: -1
-                            })
-                            .lean();
-
-                    if (!token) {
-
-                        return ctx.reply(
-                            'لا توجد Tokens'
-                        );
-                    }
-
-                    await ctx.reply(
-
-                        `🆕 LAST TOKEN\n\n` +
-
-                        `Mint:\n${token.mint}\n\n` +
-
-                        `Program: ${token.tokenProgram}\n` +
-
-                        `Security: ${token.securityDecision}\n` +
-
-                        `Score: ${token.securityScore ?? 'PENDING'}\n\n` +
-
-                        `🧪 PAPER ONLY`
-                    );
-
-                } catch {
-
-                    await ctx.reply(
-                        '❌ خطأ'
-                    );
-                }
-            }
-        );
-
-        bot.catch(
-            (error, ctx) => {
-
-                logError(
-                    `Telegram ${ctx.updateType}`,
-                    error
-                );
-            }
-        );
-
-        systemState.telegram =
-            'starting';
-
-        bot.launch()
-            .catch(
-                error => {
-
-                    telegramStarted =
-                        false;
-
-                    systemState.telegram =
-                        'error';
-
-                    logError(
-                        'Telegram polling error',
-                        error
-                    );
-                }
-            );
-
-        telegramStarted =
-            true;
-
-        systemState.telegram =
-            'online';
-
-        logSuccess(
-            'Telegram Bot ONLINE'
-        );
-
-    } catch (error) {
-
-        systemState.telegram =
-            'error';
-
-        logError(
-            'Telegram start error',
-            error
-        );
-    }
-
-    updateReadyState();
-}
-
-// ======================================================
-// RECOVER PENDING TOKENS
-// ======================================================
-
-async function recoverPendingSecurityScans() {
-
-    if (
-        mongoose.connection
-            .readyState !== 1
-    ) {
-
-        return;
-    }
-
-    try {
-
-        // بعد Restart على Render
-        // نكمل آخر Tokens غير المفحوصة.
-
-        const pending =
-            await FreshToken
-                .find({
-                    securityChecked:
-                        false,
-
-                    securityDecision: {
-                        $in: [
-                            'PENDING',
-                            'ERROR'
-                        ]
-                    }
-                })
-                .sort({
-                    detectedAt: -1
-                })
-                .limit(100)
-                .select({
-                    mint: 1
-                })
-                .lean();
-
-        for (
-            const token
-            of pending
-        ) {
-
-            queueSecurityScan(
-                token.mint
-            );
-        }
-
-        logInfo(
-            `Security Recovery queued: ${pending.length}`
-        );
-
-    } catch (error) {
-
-        logError(
-            'Security Recovery error',
-            error
-        );
-    }
-}
-
-// ======================================================
-// SHUTDOWN
-// ======================================================
-
-async function shutdown(signal) {
-
-    if (shuttingDown) {
-        return;
-    }
-
-    shuttingDown = true;
-
-    logWarning(
-        `${signal} - Safe shutdown`
-    );
-
-    systemState.ready =
-        false;
-
-    systemState.trading =
-        'disabled';
-
-    try {
-
-        await stopFreshTokenHunter();
-
-    } catch {}
-
-    try {
-
-        if (
-            bot &&
-            telegramStarted
-        ) {
-
-            bot.stop(signal);
-
-            telegramStarted =
-                false;
-
-            systemState.telegram =
-                'stopped';
-        }
-
-    } catch {}
-
-    try {
-
-        if (
-            mongoose.connection
-                .readyState !== 0
-        ) {
-
-            await mongoose.disconnect();
-        }
-
-    } catch {}
-
-    if (httpServer) {
-
-        httpServer.close(
-            () =>
-                process.exit(0)
-        );
-
-        setTimeout(
-            () => process.exit(0),
-            5000
-        );
-
-    } else {
-
-        process.exit(0);
-    }
-}
-
-// ======================================================
-// ERRORS
-// ======================================================
-
-process.on(
-    'unhandledRejection',
-    reason => {
-
-        logError(
-            'Unhandled Rejection',
-
-            reason instanceof Error
-                ? reason
-                : new Error(
-                    String(reason)
-                )
-        );
-    }
-);
-
-process.on(
-    'uncaughtException',
-    async error => {
-
-        logError(
-            'Uncaught Exception',
-            error
-        );
-
-        await shutdown(
-            'uncaughtException'
-        );
-    }
-);
-
-process.once(
-    'SIGTERM',
-    () =>
-        shutdown('SIGTERM')
-);
-
-process.once(
-    'SIGINT',
-    () =>
-        shutdown('SIGINT')
-);
-
-// ======================================================
-// MAIN
-// ======================================================
-
-async function main() {
-
-    console.log('');
-    console.log(
-        '======================================'
-    );
-    console.log(
-        '🚀 LOMY SOLANA HUNTER V3'
-    );
-    console.log(
-        '🔎 FRESH TOKEN HUNTER'
-    );
-    console.log(
-        '🛡️ SECURITY ENGINE V1'
-    );
-    console.log(
-        '🧪 PAPER MODE'
-    );
-    console.log(
-        '🔒 LIVE TRADING DISABLED'
-    );
-    console.log(
-        '======================================'
-    );
-    console.log('');
-
-    // Render لازم يفتح PORT أولاً
-    await startHttpServer();
-
-    await connectToDatabase();
-
-    await loadWallet();
-
-    await testSolanaConnection();
-
-    // نكمل الفحوصات القديمة
-    await recoverPendingSecurityScans();
-
-    // نبدأ اكتشاف الجديد
-    if (
-        systemState.solana ===
-        'connected'
-    ) {
-
-        await startFreshTokenHunter();
-    }
-
-    await startTelegram();
-
-    updateReadyState();
-
-    console.log('');
-    console.log(
-        '======================================'
-    );
-
-    logSuccess(
-        'LOMY V3 STARTED'
-    );
-
-    console.log(
-        `🔎 Hunter: ${hunterState.status}`
-    );
-
-    console.log(
-        `🛡️ Security: ${securityState.status}`
-    );
-
-    console.log(
-        '🔒 NO LIVE TRADING'
-    );
-
-    console.log(
-        '======================================'
-    );
-}
-
-// ======================================================
-// START
-// ======================================================
-
-main().catch(
-    error => {
-
-        logError(
-            'MAIN ERROR',
-            error
-        );
-
-        updateReadyState();
-    }
-);
