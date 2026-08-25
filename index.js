@@ -41,7 +41,7 @@ const MODE = "PAPER";
 const LIVE_TRADING = false;
 
 // ======================================================
-// V4.5 SMART SCORE SETTINGS
+// SMART SCORE
 // ======================================================
 
 const SCORE_WEIGHTS = {
@@ -131,8 +131,7 @@ const state = {
   whaleRetries: 0,
   telegramRetries: 0,
 
-  approved: 0,
-  blockedWhale: 0,
+  migrated: 0,
 
   errors: 0,
   lastMint: null
@@ -230,16 +229,11 @@ function smartDecision(
   whaleDecision
 ) {
 
-  // Whale DANGER = hard block.
-  // حتى لو Security وDEX ممتازين.
-
   if (
     whaleDecision === "DANGER"
   ) {
     return "BLOCKED_WHALE";
   }
-
-  // CAUTION لا يسمح بالموافقة النهائية.
 
   if (
     whaleDecision === "CAUTION"
@@ -249,8 +243,7 @@ function smartDecision(
 
   if (
     whaleDecision === "SAFE" &&
-    smartScore >=
-      SMART_APPROVAL_SCORE
+    smartScore >= SMART_APPROVAL_SCORE
   ) {
     return "APPROVED_CANDIDATE";
   }
@@ -284,8 +277,7 @@ function rpcCall(
 
       if (
         priority === 2 &&
-        rpcQueue.length >=
-          RPC_SOFT_LIMIT
+        rpcQueue.length >= RPC_SOFT_LIMIT
       ) {
 
         state.rpcDropped++;
@@ -469,11 +461,8 @@ const tokenSchema =
         default: 0
       },
 
-      mintAuthorityRevoked:
-        Boolean,
-
-      freezeAuthorityRevoked:
-        Boolean,
+      mintAuthorityRevoked: Boolean,
+      freezeAuthorityRevoked: Boolean,
 
       decimals: Number,
       supply: String,
@@ -513,14 +502,10 @@ const tokenSchema =
         default: "PENDING"
       },
 
-      // BEFORE WHALE
+      // SMART
 
       preWhaleScore: Number,
-
-      // SMART FINAL
-
       smartScore: Number,
-
       finalScore: Number,
 
       finalDecision: {
@@ -578,8 +563,7 @@ const tokenSchema =
         default: []
       },
 
-      whaleLastError:
-        String,
+      whaleLastError: String,
 
       paperOnly: {
         type: Boolean,
@@ -607,7 +591,7 @@ app.get(
   (req, res) => {
 
     res.send(
-      "✅ LOMY V4.5 SMART FINAL SCORE | PAPER MODE"
+      "✅ LOMY V4.5.1 MIGRATION FIX | PAPER MODE"
     );
   }
 );
@@ -630,7 +614,9 @@ app.get(
       whaleQueue:
         whaleQueue.length,
 
-      mode: MODE,
+      mode:
+        MODE,
+
       liveTrading:
         LIVE_TRADING,
 
@@ -657,8 +643,7 @@ function startServer() {
               "online";
 
             log(
-              "✅ Render Server Online",
-              PORT
+              `✅ Render Server Online : ${PORT}`
             );
 
             resolve();
@@ -874,6 +859,125 @@ async function testSolana() {
 }
 
 // ======================================================
+// V4.5.1 MIGRATION FIX
+// ======================================================
+
+async function migrateOldSmartScores() {
+
+  if (
+    mongoose.connection.readyState !== 1
+  ) {
+    return;
+  }
+
+  try {
+
+    const oldTokens =
+      await FreshToken
+        .find({
+          whaleChecked: true,
+          whaleStatus: "DONE"
+        })
+        .select(
+          "_id mint securityScore dexScore whaleScore whaleDecision finalDecision smartScore finalScore"
+        )
+        .lean();
+
+    log(
+      `🧠 Migration found ${oldTokens.length} whale-completed tokens`
+    );
+
+    let migrated = 0;
+    let approved = 0;
+    let blocked = 0;
+    let watchWhale = 0;
+    let watchScore = 0;
+
+    for (
+      const token
+      of oldTokens
+    ) {
+
+      const smartScore =
+        calculateSmartScore(
+          token.securityScore,
+          token.dexScore,
+          token.whaleScore
+        );
+
+      const finalDecision =
+        smartDecision(
+          smartScore,
+          token.whaleDecision
+        );
+
+      await FreshToken
+        .updateOne(
+          {
+            _id:
+              token._id
+          },
+          {
+            $set: {
+
+              smartScore,
+
+              finalScore:
+                smartScore,
+
+              finalDecision
+            }
+          }
+        );
+
+      migrated++;
+
+      if (
+        finalDecision ===
+        "APPROVED_CANDIDATE"
+      ) {
+        approved++;
+      }
+
+      if (
+        finalDecision ===
+        "BLOCKED_WHALE"
+      ) {
+        blocked++;
+      }
+
+      if (
+        finalDecision ===
+        "WATCH_WHALE"
+      ) {
+        watchWhale++;
+      }
+
+      if (
+        finalDecision ===
+        "WATCH_SCORE"
+      ) {
+        watchScore++;
+      }
+    }
+
+    state.migrated =
+      migrated;
+
+    log(
+      `✅ MIGRATION COMPLETE | Total ${migrated} | Approved ${approved} | Blocked ${blocked} | WhaleWatch ${watchWhale} | ScoreWatch ${watchScore}`
+    );
+
+  } catch (err) {
+
+    errLog(
+      "Smart Score Migration",
+      err
+    );
+  }
+}
+
+// ======================================================
 // SECURITY ENGINE
 // ======================================================
 
@@ -945,6 +1049,7 @@ async function securityScan(
           },
           {
             $set: {
+
               securityAttempts:
                 attempts,
 
@@ -1146,7 +1251,7 @@ function httpsJson(url) {
                 "application/json",
 
               "User-Agent":
-                "LOMY-Solana-Hunter/4.5",
+                "LOMY-Solana-Hunter/4.5.1",
 
               Connection:
                 "close"
@@ -1239,7 +1344,8 @@ async function fetchPairs(
       mint
     );
 
-  let lastError = null;
+  let lastError =
+    null;
 
   for (
     let attempt = 1;
@@ -1327,19 +1433,21 @@ function scheduleDexRecheck(
     setTimeout(
       () => {
 
-        dexRecheck.delete(
-          mint
-        );
+        dexRecheck
+          .delete(
+            mint
+          );
 
         dexScan(
           mint
-        ).catch(
-          err =>
-            errLog(
-              "DEX recheck",
-              err
-            )
-        );
+        )
+          .catch(
+            err =>
+              errLog(
+                "DEX recheck",
+                err
+              )
+          );
 
       },
       45000
@@ -1390,7 +1498,9 @@ async function dexScan(
 
     state.dexScanned++;
 
-    if (!pair) {
+    if (
+      !pair
+    ) {
 
       await FreshToken
         .updateOne(
@@ -1432,28 +1542,33 @@ async function dexScan(
 
     const liquidity =
       num(
-        pair?.liquidity?.usd
+        pair?.liquidity
+          ?.usd
       );
 
     const volumeM5 =
       num(
-        pair?.volume?.m5
+        pair?.volume
+          ?.m5
       );
 
     const volumeH1 =
       num(
-        pair?.volume?.h1
+        pair?.volume
+          ?.h1
       );
 
     const buys =
       num(
-        pair?.txns?.m5
+        pair?.txns
+          ?.m5
           ?.buys
       );
 
     const sells =
       num(
-        pair?.txns?.m5
+        pair?.txns
+          ?.m5
           ?.sells
       );
 
@@ -1475,7 +1590,8 @@ async function dexScan(
     }
 
     if (
-      volumeM5 >= 250
+      volumeM5 >=
+      250
     ) {
       dexScore += 20;
     }
@@ -1487,7 +1603,8 @@ async function dexScan(
     }
 
     if (
-      buys + sells >= 5
+      buys + sells >=
+      5
     ) {
       dexScore += 15;
     }
@@ -1509,8 +1626,10 @@ async function dexScan(
       "WATCH";
 
     if (
-      liquidity >= 3000 &&
-      dexScore >= 60 &&
+      liquidity >=
+        3000 &&
+      dexScore >=
+        60 &&
       sells > 0
     ) {
 
@@ -1523,7 +1642,6 @@ async function dexScan(
         token.securityScore
       );
 
-    // Score القديم قبل الحيتان.
     const preWhaleScore =
       Math.round(
         securityScore *
@@ -1540,11 +1658,9 @@ async function dexScan(
         "PASS" &&
       dexDecision ===
         "PASS" &&
-      preWhaleScore >= 70
+      preWhaleScore >=
+        70
     ) {
-
-      // لم تعد Candidate نهائية.
-      // لازم الحيتان توافق الأول.
 
       finalDecision =
         "CANDIDATE_PENDING_WHALE";
@@ -1838,8 +1954,7 @@ function holderPercentage(
 
     const s =
       BigInt(
-        totalSupply ||
-        "0"
+        totalSupply || "0"
       );
 
     if (
@@ -2002,7 +2117,7 @@ function calculateWhaleScore(
 }
 
 // ======================================================
-// WHALE ENGINE + SMART FINAL DECISION
+// WHALE ENGINE
 // ======================================================
 
 async function whaleScan(
@@ -2071,7 +2186,8 @@ async function whaleScan(
     );
 
   if (
-    totalSupply === "0"
+    totalSupply ===
+    "0"
   ) {
 
     throw new Error(
@@ -2096,7 +2212,8 @@ async function whaleScan(
   const accounts =
     (
       largestResponse
-        ?.value || []
+        ?.value ||
+      []
     ).slice(
       0,
       10
@@ -2132,7 +2249,6 @@ async function whaleScan(
     );
 
   const holders = [];
-
   const owners =
     new Set();
 
@@ -2146,7 +2262,9 @@ async function whaleScan(
       accounts[i];
 
     const account =
-      parsed?.value?.[i];
+      parsed
+        ?.value
+        ?.[i];
 
     const owner =
       account
@@ -2210,10 +2328,10 @@ async function whaleScan(
       )
       .reduce(
         (
-          sum,
+          total,
           h
         ) =>
-          sum +
+          total +
           num(
             h.percent
           ),
@@ -2224,10 +2342,10 @@ async function whaleScan(
     holders
       .reduce(
         (
-          sum,
+          total,
           h
         ) =>
-          sum +
+          total +
           num(
             h.percent
           ),
@@ -2279,10 +2397,6 @@ async function whaleScan(
 
       change
     });
-
-  // ==================================================
-  // V4.5 SMART SCORE
-  // ==================================================
 
   const smartScore =
     calculateSmartScore(
@@ -2369,20 +2483,6 @@ async function whaleScan(
     );
 
   state.whaleScanned++;
-
-  if (
-    finalDecision ===
-    "APPROVED_CANDIDATE"
-  ) {
-    state.approved++;
-  }
-
-  if (
-    finalDecision ===
-    "BLOCKED_WHALE"
-  ) {
-    state.blockedWhale++;
-  }
 
   log(
     `🧠 SMART ${mint} | Security ${num(token.securityScore)} | DEX ${num(token.dexScore)} | Whale ${result.score} | FINAL ${smartScore}/100 | ${finalDecision}`
@@ -2767,7 +2867,8 @@ async function removeHunterSubscriptions() {
           token2022Sub
         );
 
-      token2022Sub = null;
+      token2022Sub =
+        null;
     }
 
   } catch {}
@@ -2969,46 +3070,28 @@ async function recoverPending() {
 
   try {
 
-    // تشمل Candidates القديمة من V4.4
-    // والجديدة من V4.5.
-
     const whales =
       await FreshToken
         .find({
+          finalDecision:
+            "CANDIDATE_PENDING_WHALE",
 
-          $and: [
+          $or: [
 
             {
-              finalDecision: {
-                $in: [
-                  "CANDIDATE",
-                  "CANDIDATE_PENDING_WHALE"
-                ]
+              whaleChecked: {
+                $ne: true
               }
             },
 
             {
-              $or: [
-
-                {
-                  whaleChecked: {
-                    $ne: true
-                  }
-                },
-
-                {
-                  whaleStatus:
-                    "RETRY"
-                }
-              ]
+              whaleStatus:
+                "RETRY"
             }
           ]
         })
         .sort({
           preWhaleScore:
-            -1,
-
-          finalScore:
             -1
         })
         .limit(10)
@@ -3080,13 +3163,14 @@ function registerTelegramCommands() {
     ctx =>
       ctx.reply(
 
-        "🧠 LOMY V4.5\n\n" +
+        "🧠 LOMY V4.5.1\n\n" +
 
         "🔎 Hunter ON\n" +
         "🛡 Security ON\n" +
         "💧 DEX ON\n" +
         "🐋 Whale Engine ON\n" +
         "🧠 Smart Final Score ON\n" +
+        "🔄 Migration Fix ON\n" +
         "🌐 Helius RPC ON\n" +
         "📡 Telegram IPv4 ON\n\n" +
 
@@ -3100,7 +3184,7 @@ function registerTelegramCommands() {
     ctx =>
       ctx.reply(
 
-        `🧠 LOMY V4.5 STATUS\n\n` +
+        `🧠 LOMY V4.5.1 STATUS\n\n` +
 
         `🌐 Server: ${state.server}\n` +
         `🗄 Database: ${state.database}\n` +
@@ -3120,6 +3204,7 @@ function registerTelegramCommands() {
         `RPC Dropped: ${state.rpcDropped}\n` +
         `RPC Delay: ${Math.round(rpcDelay)}ms\n\n` +
 
+        `🔄 Migrated: ${state.migrated}\n` +
         `Telegram Retries: ${state.telegramRetries}\n\n` +
 
         `🧪 PAPER MODE\n` +
@@ -3151,10 +3236,6 @@ function registerTelegramCommands() {
         `Telegram Retries: ${state.telegramRetries}`
       )
   );
-
-  // ==================================================
-  // APPROVED CANDIDATES
-  // ==================================================
 
   bot.command(
     "candidates",
@@ -3211,95 +3292,20 @@ function registerTelegramCommands() {
 
           `💵 Liquidity: $${num(t.liquidityUsd).toFixed(0)}\n` +
 
-          `👤 Largest Holder: ${num(t.largestHolderPct).toFixed(2)}%\n` +
-          `👥 Top10: ${num(t.top10Pct).toFixed(2)}%\n` +
+          `👤 Largest: ${num(t.largestHolderPct).toFixed(2)}%\n` +
+          `👥 Top10: ${num(t.top10Pct).toFixed(2)}%\n\n` +
 
-          `✅ Decision: APPROVED\n`;
+          `✅ APPROVED`;
       }
 
       text +=
-        "\n🧪 PAPER ONLY";
+        "\n\n🧪 PAPER ONLY";
 
       await ctx.reply(
         text
       );
     }
   );
-
-  // ==================================================
-  // WHALE REPORT
-  // ==================================================
-
-  bot.command(
-    "whales",
-    async ctx => {
-
-      const tokens =
-        await FreshToken
-          .find({
-            whaleStatus:
-              "DONE"
-          })
-          .sort({
-            updatedAt:
-              -1
-          })
-          .limit(5)
-          .lean();
-
-      if (
-        !tokens.length
-      ) {
-
-        return ctx.reply(
-          "🐋 WHALE ENGINE\n\n⏳ لا توجد نتائج مكتملة حتى الآن."
-        );
-      }
-
-      let text =
-        `🐋 WHALE + SMART REPORT\n`;
-
-      tokens.forEach(
-        (t, i) => {
-
-          text +=
-
-            `\n━━━━━━━━━━━━━━\n` +
-
-            `${i + 1}) ${t.mint}\n\n` +
-
-            `🧠 Smart: ${num(t.smartScore || t.finalScore)}/100\n` +
-
-            `🎯 Final Decision: ${t.finalDecision}\n\n` +
-
-            `🐋 Whale: ${num(t.whaleScore)}/100 ${t.whaleDecision}\n` +
-
-            `👤 Largest: ${num(t.largestHolderPct).toFixed(2)}%\n` +
-
-            `👥 Top 5: ${num(t.top5Pct).toFixed(2)}%\n` +
-
-            `👥 Top 10: ${num(t.top10Pct).toFixed(2)}%\n` +
-
-            `🔄 Change: ${num(t.top10ChangePct).toFixed(2)}%\n` +
-
-            `📈 Trend: ${t.whaleTrend}\n` +
-
-            `👛 Owners: ${t.whaleUniqueOwners || 0}\n`;
-        }
-      );
-
-      text +=
-        "\n🧪 PAPER ONLY";
-
-      await ctx.reply(
-        text
-      );
-    }
-  );
-
-  // ==================================================
-  // BLOCKED TOKENS
-  // ==================================================
 
   bot.command(
     "blocked",
@@ -3330,24 +3336,27 @@ function registerTelegramCommands() {
       let text =
         `⛔ WHALE BLOCKED (${tokens.length})\n`;
 
-      tokens.forEach(
-        (t, i) => {
+      for (
+        let i = 0;
+        i < tokens.length;
+        i++
+      ) {
 
-          text +=
+        const t =
+          tokens[i];
 
-            `\n━━━━━━━━━━━━━━\n` +
+        text +=
 
-            `${i + 1}) ${t.mint}\n` +
+          `\n━━━━━━━━━━━━━━\n` +
 
-            `🧠 Smart: ${num(t.smartScore)}/100\n` +
+          `${i + 1}) ${t.mint}\n` +
 
-            `🐋 Whale: ${num(t.whaleScore)}/100 DANGER\n` +
+          `🧠 Smart: ${num(t.smartScore)}/100\n` +
+          `🐋 Whale: ${num(t.whaleScore)}/100 ${t.whaleDecision}\n` +
 
-            `👤 Largest: ${num(t.largestHolderPct).toFixed(2)}%\n` +
-
-            `👥 Top10: ${num(t.top10Pct).toFixed(2)}%\n`;
-        }
-      );
+          `👤 Largest: ${num(t.largestHolderPct).toFixed(2)}%\n` +
+          `👥 Top10: ${num(t.top10Pct).toFixed(2)}%\n`;
+      }
 
       text +=
         "\n🔒 BLOCKED FROM APPROVAL";
@@ -3358,9 +3367,76 @@ function registerTelegramCommands() {
     }
   );
 
-  // ==================================================
-  // STATS
-  // ==================================================
+  bot.command(
+    "whales",
+    async ctx => {
+
+      const tokens =
+        await FreshToken
+          .find({
+            whaleStatus:
+              "DONE",
+            whaleChecked:
+              true
+          })
+          .sort({
+            updatedAt:
+              -1
+          })
+          .limit(5)
+          .lean();
+
+      if (
+        !tokens.length
+      ) {
+
+        return ctx.reply(
+          "🐋 WHALE ENGINE\n\n⏳ لا توجد نتائج مكتملة حتى الآن."
+        );
+      }
+
+      let text =
+        "🐋 WHALE + SMART REPORT\n";
+
+      for (
+        let i = 0;
+        i < tokens.length;
+        i++
+      ) {
+
+        const t =
+          tokens[i];
+
+        text +=
+
+          `\n━━━━━━━━━━━━━━\n` +
+
+          `${i + 1}) ${t.mint}\n\n` +
+
+          `🧠 Smart: ${num(t.smartScore)}/100\n` +
+          `🎯 Final Decision: ${t.finalDecision}\n\n` +
+
+          `🛡 Security: ${num(t.securityScore)}/100\n` +
+          `💧 DEX: ${num(t.dexScore)}/100\n` +
+          `🐋 Whale: ${num(t.whaleScore)}/100 ${t.whaleDecision}\n\n` +
+
+          `👤 Largest: ${num(t.largestHolderPct).toFixed(2)}%\n` +
+          `👥 Top 5: ${num(t.top5Pct).toFixed(2)}%\n` +
+          `👥 Top 10: ${num(t.top10Pct).toFixed(2)}%\n` +
+
+          `🔄 Change: ${num(t.top10ChangePct).toFixed(2)}%\n` +
+          `📈 Trend: ${t.whaleTrend}\n` +
+          `👛 Owners: ${t.whaleUniqueOwners || 0}\n`;
+      }
+
+      text +=
+        "\n🧪 PAPER ONLY";
+
+      await ctx.reply(
+        text
+      );
+    }
+  );
 
   bot.command(
     "stats",
@@ -3371,8 +3447,8 @@ function registerTelegramCommands() {
         pendingWhale,
         approved,
         blocked,
-        watchWhale,
-        watchScore,
+        whaleWatch,
+        scoreWatch,
         whaleDone,
         safe,
         caution,
@@ -3440,32 +3516,25 @@ function registerTelegramCommands() {
 
       await ctx.reply(
 
-        `📊 LOMY V4.5 STATS\n\n` +
+        `📊 LOMY V4.5.1 STATS\n\n` +
 
         `Total Tokens: ${total}\n\n` +
 
         `⏳ Pending Whale: ${pendingWhale}\n` +
-
         `✅ Approved: ${approved}\n` +
-
         `⛔ Whale Blocked: ${blocked}\n` +
-
-        `⚠️ Whale Watch: ${watchWhale}\n` +
-
-        `👀 Score Watch: ${watchScore}\n\n` +
+        `⚠️ Whale Watch: ${whaleWatch}\n` +
+        `👀 Score Watch: ${scoreWatch}\n\n` +
 
         `🐋 Whale DONE: ${whaleDone}\n` +
-
         `SAFE: ${safe} ✅\n` +
-
         `CAUTION: ${caution} ⚠️\n` +
-
         `DANGER: ${danger} ❌\n\n` +
 
+        `🔄 Migrated: ${state.migrated}\n\n` +
+
         `RPC 429: ${state.rpc429}\n` +
-
         `RPC Dropped: ${state.rpcDropped}\n` +
-
         `Errors: ${state.errors}\n\n` +
 
         `🧪 PAPER MODE`
@@ -3571,10 +3640,6 @@ async function startTelegram() {
         `✅ Telegram API reached: @${me.username || "BOT"}`
       );
 
-      // مهم:
-      // نحدّث الحالة هنا قبل launch
-      // لأن launch يستمر في polling.
-
       state.telegram =
         "online";
 
@@ -3583,7 +3648,7 @@ async function startTelegram() {
           false
       })
       .catch(
-        async err => {
+        err => {
 
           state.telegram =
             "error";
@@ -3699,6 +3764,7 @@ async function shutdown(
   try {
 
     if (bot) {
+
       bot.stop(
         signal
       );
@@ -3718,7 +3784,9 @@ async function shutdown(
 
   } catch {}
 
-  if (server) {
+  if (
+    server
+  ) {
 
     server.close(
       () =>
@@ -3800,11 +3868,15 @@ async function main() {
   );
 
   console.log(
-    "🚀 LOMY SOLANA HUNTER V4.5"
+    "🚀 LOMY SOLANA HUNTER V4.5.1"
   );
 
   console.log(
-    "🧠 SMART FINAL SCORE ENGINE"
+    "🧠 SMART FINAL SCORE"
+  );
+
+  console.log(
+    "🔄 MIGRATION FIX"
   );
 
   console.log(
@@ -3843,6 +3915,10 @@ async function main() {
 
   await testSolana();
 
+  // يصلح نتائج النسخ القديمة
+  // بدون أي RPC إضافي
+  await migrateOldSmartScores();
+
   startTelegram()
     .catch(
       err =>
@@ -3870,11 +3946,15 @@ async function main() {
     );
 
   log(
-    "✅ LOMY V4.5 STARTED"
+    "✅ LOMY V4.5.1 STARTED"
   );
 
   log(
     "🧠 SMART FINAL SCORE ACTIVE"
+  );
+
+  log(
+    "🔄 OLD DATA MIGRATION COMPLETE"
   );
 
   log(
