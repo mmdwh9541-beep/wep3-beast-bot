@@ -1,7 +1,7 @@
 // ======================================================
-// LOMY SOLANA HUNTER
-// Render-Safe Core V1
-// MODE: PAPER / NO LIVE TRADING
+// LOMY SOLANA HUNTER V2
+// Render-Safe Core + Fresh Token Hunter V1
+// MODE: PAPER / ABSOLUTELY NO LIVE TRADING
 // ======================================================
 
 require('dotenv').config();
@@ -9,7 +9,14 @@ require('dotenv').config();
 const express = require('express');
 const { Telegraf } = require('telegraf');
 const mongoose = require('mongoose');
-const { Connection, Keypair, LAMPORTS_PER_SOL } = require('@solana/web3.js');
+
+const {
+    Connection,
+    Keypair,
+    PublicKey,
+    LAMPORTS_PER_SOL
+} = require('@solana/web3.js');
+
 const bip39 = require('bip39');
 const { derivePath } = require('ed25519-hd-key');
 const bs58 = require('bs58');
@@ -36,47 +43,111 @@ const RPC_URL =
 const PORT = Number(process.env.PORT) || 10000;
 
 // ======================================================
-// IMPORTANT SAFETY LOCK
+// HARD SAFETY LOCK
 // ======================================================
 
-// التداول الحقيقي مقفول تماماً في هذه النسخة.
-// حتى لو تم إضافة TRADING_MODE=LIVE في Render
-// فلن يتم تنفيذ أي تداول.
+// مهم:
+// لا توجد أي دالة BUY أو SELL في هذا الكود.
+// التداول الحقيقي مستحيل في هذه النسخة.
 
 const TRADING_MODE = 'PAPER';
 const LIVE_TRADING_ENABLED = false;
+
+// ======================================================
+// TOKEN PROGRAMS
+// ======================================================
+
+const TOKEN_PROGRAM_ID = new PublicKey(
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+);
+
+const TOKEN_2022_PROGRAM_ID = new PublicKey(
+    'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
+);
 
 // ======================================================
 // SYSTEM STATE
 // ======================================================
 
 const systemState = {
+
     server: 'starting',
+
     database: 'disconnected',
+
     wallet: 'not_loaded',
+
     solana: 'disconnected',
+
     telegram: 'stopped',
+
     trading: 'disabled',
+
     mode: TRADING_MODE,
+
     ready: false,
-    startedAt: new Date().toISOString(),
+
+    startedAt:
+        new Date().toISOString(),
+
     lastError: null
 };
 
 // ======================================================
-// GLOBAL VARIABLES
+// HUNTER STATE
+// ======================================================
+
+const hunterState = {
+
+    status: 'stopped',
+
+    detected: 0,
+
+    saved: 0,
+
+    duplicates: 0,
+
+    errors: 0,
+
+    startedAt: null,
+
+    lastDetectedAt: null,
+
+    lastMint: null,
+
+    lastSignature: null
+};
+
+// ======================================================
+// GLOBALS
 // ======================================================
 
 let wallet = null;
+
 let bot = null;
+
 let httpServer = null;
+
 let telegramStarted = false;
+
 let shuttingDown = false;
 
-// Connection واحدة فقط طول عمر البرنامج
+let tokenProgramSubscription = null;
+
+let token2022Subscription = null;
+
+// لمنع معالجة نفس transaction أكثر من مرة
+const processingSignatures = new Set();
+
+// ======================================================
+// SOLANA CONNECTION
+// ======================================================
+
 const connection = new Connection(
     RPC_URL,
-    'confirmed'
+    {
+        commitment: 'confirmed'
+    }
 );
 
 // ======================================================
@@ -84,18 +155,21 @@ const connection = new Connection(
 // ======================================================
 
 function logInfo(message) {
+
     console.log(
         `[${new Date().toISOString()}] ℹ️ ${message}`
     );
 }
 
 function logSuccess(message) {
+
     console.log(
         `[${new Date().toISOString()}] ✅ ${message}`
     );
 }
 
 function logWarning(message) {
+
     console.warn(
         `[${new Date().toISOString()}] ⚠️ ${message}`
     );
@@ -124,22 +198,86 @@ function logError(message, error = null) {
 }
 
 // ======================================================
-// UPDATE READY STATE
+// READY STATE
 // ======================================================
 
 function updateReadyState() {
 
-    const coreReady =
+    systemState.ready =
+
         systemState.server === 'online' &&
+
         systemState.database === 'connected' &&
+
         systemState.wallet === 'loaded' &&
+
         systemState.solana === 'connected';
 
-    systemState.ready = coreReady;
-
-    // التداول يظل مقفول
+    // التداول يظل مغلقاً مهما حدث
     systemState.trading = 'disabled';
 }
+
+// ======================================================
+// MONGODB MODEL
+// ======================================================
+
+const freshTokenSchema =
+    new mongoose.Schema(
+        {
+
+            mint: {
+                type: String,
+                required: true,
+                unique: true,
+                index: true
+            },
+
+            signature: {
+                type: String,
+                index: true
+            },
+
+            slot: {
+                type: Number
+            },
+
+            tokenProgram: {
+                type: String
+            },
+
+            detectedAt: {
+                type: Date,
+                default: Date.now,
+                index: true
+            },
+
+            status: {
+                type: String,
+                default: 'NEW'
+            },
+
+            securityChecked: {
+                type: Boolean,
+                default: false
+            },
+
+            paperOnly: {
+                type: Boolean,
+                default: true
+            }
+
+        },
+        {
+            timestamps: true
+        }
+    );
+
+const FreshToken =
+    mongoose.models.FreshToken ||
+    mongoose.model(
+        'FreshToken',
+        freshTokenSchema
+    );
 
 // ======================================================
 // HTTP ROUTES
@@ -148,47 +286,63 @@ function updateReadyState() {
 app.get('/', (req, res) => {
 
     res.status(200).send(
-        '✅ LOMY Solana Hunter is running - PAPER MODE'
+        '✅ LOMY Solana Hunter V2 - PAPER MODE'
     );
 });
 
 // ======================================================
-// HEALTH CHECK
+// HEALTH
 // ======================================================
 
-app.get('/health', async (req, res) => {
+app.get('/health', (req, res) => {
 
     updateReadyState();
 
-    const statusCode =
-        systemState.server === 'online'
-            ? 200
-            : 503;
+    res.status(200).json({
 
-    res.status(statusCode).json({
+        service:
+            'LOMY Solana Hunter V2',
 
-        service: 'LOMY Solana Hunter',
+        server:
+            systemState.server,
 
-        server: systemState.server,
+        database:
+            systemState.database,
 
-        database: systemState.database,
+        wallet:
+            systemState.wallet,
 
-        wallet: systemState.wallet,
+        solana:
+            systemState.solana,
 
-        solana: systemState.solana,
+        telegram:
+            systemState.telegram,
 
-        telegram: systemState.telegram,
+        hunter:
+            hunterState.status,
 
-        trading: systemState.trading,
+        hunterDetected:
+            hunterState.detected,
 
-        tradingMode: TRADING_MODE,
+        hunterSaved:
+            hunterState.saved,
 
-        liveTradingEnabled: LIVE_TRADING_ENABLED,
+        trading:
+            systemState.trading,
 
-        ready: systemState.ready,
+        tradingMode:
+            TRADING_MODE,
+
+        liveTradingEnabled:
+            LIVE_TRADING_ENABLED,
+
+        ready:
+            systemState.ready,
 
         uptimeSeconds:
-            Math.floor(process.uptime()),
+            Math.floor(
+                process.uptime()
+            ),
 
         startedAt:
             systemState.startedAt,
@@ -199,7 +353,7 @@ app.get('/health', async (req, res) => {
 });
 
 // ======================================================
-// BOT STATUS
+// API STATUS
 // ======================================================
 
 app.get('/api/status', (req, res) => {
@@ -207,106 +361,234 @@ app.get('/api/status', (req, res) => {
     updateReadyState();
 
     res.json({
+
         success: true,
-        mode: TRADING_MODE,
-        liveTrading: LIVE_TRADING_ENABLED,
-        ready: systemState.ready,
+
+        mode:
+            TRADING_MODE,
+
+        liveTrading:
+            LIVE_TRADING_ENABLED,
+
+        ready:
+            systemState.ready,
+
         services: {
-            database: systemState.database,
-            wallet: systemState.wallet,
-            solana: systemState.solana,
-            telegram: systemState.telegram
+
+            database:
+                systemState.database,
+
+            wallet:
+                systemState.wallet,
+
+            solana:
+                systemState.solana,
+
+            telegram:
+                systemState.telegram,
+
+            hunter:
+                hunterState.status
+        },
+
+        hunter: {
+            detected:
+                hunterState.detected,
+
+            saved:
+                hunterState.saved,
+
+            duplicates:
+                hunterState.duplicates,
+
+            errors:
+                hunterState.errors,
+
+            lastMint:
+                hunterState.lastMint
         }
     });
 });
 
 // ======================================================
-// START HTTP SERVER FIRST
+// HUNTER API
+// ======================================================
+
+app.get('/api/hunter', async (req, res) => {
+
+    let databaseCount = null;
+
+    try {
+
+        if (
+            mongoose.connection.readyState === 1
+        ) {
+
+            databaseCount =
+                await FreshToken.countDocuments();
+        }
+
+    } catch (error) {
+
+        logError(
+            'خطأ في عد Tokens',
+            error
+        );
+    }
+
+    res.json({
+
+        success: true,
+
+        status:
+            hunterState.status,
+
+        detected:
+            hunterState.detected,
+
+        saved:
+            hunterState.saved,
+
+        duplicates:
+            hunterState.duplicates,
+
+        errors:
+            hunterState.errors,
+
+        databaseTokens:
+            databaseCount,
+
+        startedAt:
+            hunterState.startedAt,
+
+        lastDetectedAt:
+            hunterState.lastDetectedAt,
+
+        lastMint:
+            hunterState.lastMint,
+
+        lastSignature:
+            hunterState.lastSignature,
+
+        trading:
+            'DISABLED',
+
+        mode:
+            'PAPER'
+    });
+});
+
+// ======================================================
+// START HTTP SERVER
 // ======================================================
 
 function startHttpServer() {
 
-    return new Promise((resolve, reject) => {
+    return new Promise(
+        (resolve, reject) => {
 
-        httpServer = app.listen(
-            PORT,
-            '0.0.0.0',
-            () => {
+            httpServer =
+                app.listen(
+                    PORT,
+                    '0.0.0.0',
+                    () => {
 
-                systemState.server = 'online';
+                        systemState.server =
+                            'online';
 
-                logSuccess(
-                    `Render HTTP Server يعمل على PORT ${PORT}`
+                        logSuccess(
+                            `Render HTTP Server يعمل على PORT ${PORT}`
+                        );
+
+                        updateReadyState();
+
+                        resolve();
+                    }
                 );
 
-                updateReadyState();
+            httpServer.on(
+                'error',
+                (error) => {
 
-                resolve();
-            }
-        );
+                    systemState.server =
+                        'error';
 
-        httpServer.on('error', (error) => {
+                    logError(
+                        'فشل تشغيل HTTP Server',
+                        error
+                    );
 
-            systemState.server = 'error';
-
-            logError(
-                'فشل تشغيل HTTP Server',
-                error
+                    reject(error);
+                }
             );
-
-            reject(error);
-        });
-    });
+        }
+    );
 }
 
 // ======================================================
 // MONGODB EVENTS
 // ======================================================
 
-mongoose.connection.on('connected', () => {
+mongoose.connection.on(
+    'connected',
+    () => {
 
-    systemState.database = 'connected';
+        systemState.database =
+            'connected';
 
-    logSuccess(
-        'MongoDB connected'
-    );
+        logSuccess(
+            'MongoDB connected'
+        );
 
-    updateReadyState();
-});
+        updateReadyState();
+    }
+);
 
-mongoose.connection.on('disconnected', () => {
+mongoose.connection.on(
+    'disconnected',
+    () => {
 
-    systemState.database = 'disconnected';
+        systemState.database =
+            'disconnected';
 
-    logWarning(
-        'MongoDB disconnected'
-    );
+        logWarning(
+            'MongoDB disconnected'
+        );
 
-    updateReadyState();
-});
+        updateReadyState();
+    }
+);
 
-mongoose.connection.on('reconnected', () => {
+mongoose.connection.on(
+    'reconnected',
+    () => {
 
-    systemState.database = 'connected';
+        systemState.database =
+            'connected';
 
-    logSuccess(
-        'MongoDB reconnected'
-    );
+        logSuccess(
+            'MongoDB reconnected'
+        );
 
-    updateReadyState();
-});
+        updateReadyState();
+    }
+);
 
-mongoose.connection.on('error', (error) => {
+mongoose.connection.on(
+    'error',
+    (error) => {
 
-    systemState.database = 'error';
+        systemState.database =
+            'error';
 
-    logError(
-        'MongoDB connection error',
-        error
-    );
+        logError(
+            'MongoDB connection error',
+            error
+        );
 
-    updateReadyState();
-});
+        updateReadyState();
+    }
+);
 
 // ======================================================
 // CONNECT DATABASE
@@ -316,16 +598,22 @@ async function connectToDatabase() {
 
     if (!MONGODB_URI) {
 
-        systemState.database = 'missing_config';
+        systemState.database =
+            'missing_config';
 
-        throw new Error(
+        logError(
             'MONGODB_URI غير موجود في Render'
         );
+
+        updateReadyState();
+
+        return;
     }
 
     try {
 
-        systemState.database = 'connecting';
+        systemState.database =
+            'connecting';
 
         logInfo(
             'جاري الاتصال بـ MongoDB...'
@@ -334,11 +622,13 @@ async function connectToDatabase() {
         await mongoose.connect(
             MONGODB_URI,
             {
-                serverSelectionTimeoutMS: 10000
+                serverSelectionTimeoutMS:
+                    10000
             }
         );
 
-        systemState.database = 'connected';
+        systemState.database =
+            'connected';
 
         logSuccess(
             'تم الاتصال بقاعدة البيانات'
@@ -346,15 +636,13 @@ async function connectToDatabase() {
 
     } catch (error) {
 
-        systemState.database = 'error';
+        systemState.database =
+            'error';
 
         logError(
             'فشل الاتصال بقاعدة البيانات',
             error
         );
-
-        // لا نغلق Render
-        // ولكن التداول سيظل ممنوعاً
     }
 
     updateReadyState();
@@ -378,13 +666,12 @@ async function loadWallet() {
         const trimmedKey =
             BOT_PRIVATE_KEY.trim();
 
-        // ==============================================
-        // Mnemonic Seed Phrase
-        // ==============================================
-
+        // Seed Phrase
         if (
             trimmedKey.includes(' ') &&
-            bip39.validateMnemonic(trimmedKey)
+            bip39.validateMnemonic(
+                trimmedKey
+            )
         ) {
 
             const seed =
@@ -404,10 +691,7 @@ async function loadWallet() {
                 );
         }
 
-        // ==============================================
-        // JSON Secret Key
-        // ==============================================
-
+        // JSON Key
         else if (
             trimmedKey.startsWith('[')
         ) {
@@ -425,10 +709,7 @@ async function loadWallet() {
                 );
         }
 
-        // ==============================================
-        // Base58 Secret Key
-        // ==============================================
-
+        // Base58
         else {
 
             const decoded =
@@ -442,7 +723,8 @@ async function loadWallet() {
                 );
         }
 
-        systemState.wallet = 'loaded';
+        systemState.wallet =
+            'loaded';
 
         logSuccess(
             `المحفظة تم تحميلها: ${wallet.publicKey.toString()}`
@@ -452,7 +734,8 @@ async function loadWallet() {
 
         wallet = null;
 
-        systemState.wallet = 'error';
+        systemState.wallet =
+            'error';
 
         logError(
             'فشل تحميل المحفظة',
@@ -464,7 +747,7 @@ async function loadWallet() {
 }
 
 // ======================================================
-// TEST SOLANA RPC
+// TEST SOLANA
 // ======================================================
 
 async function testSolanaConnection() {
@@ -495,13 +778,14 @@ async function testSolanaConnection() {
             );
 
         const solBalance =
-            balance / LAMPORTS_PER_SOL;
+            balance /
+            LAMPORTS_PER_SOL;
 
         systemState.solana =
             'connected';
 
         logSuccess(
-            `Solana RPC متصل`
+            'Solana RPC متصل'
         );
 
         logSuccess(
@@ -510,7 +794,8 @@ async function testSolanaConnection() {
 
     } catch (error) {
 
-        systemState.solana = 'error';
+        systemState.solana =
+            'error';
 
         logError(
             'فشل الاتصال بـ Solana RPC',
@@ -519,6 +804,506 @@ async function testSolanaConnection() {
     }
 
     updateReadyState();
+}
+
+// ======================================================
+// FIND INITIALIZE MINT
+// ======================================================
+
+function findMintInInstructions(
+    instructions
+) {
+
+    if (!Array.isArray(instructions)) {
+        return null;
+    }
+
+    for (
+        const instruction
+        of instructions
+    ) {
+
+        if (!instruction) {
+            continue;
+        }
+
+        if (
+            instruction.parsed &&
+            (
+                instruction.parsed.type ===
+                    'initializeMint' ||
+
+                instruction.parsed.type ===
+                    'initializeMint2'
+            )
+        ) {
+
+            const mint =
+                instruction.parsed.info
+                    ?.mint;
+
+            if (mint) {
+                return mint;
+            }
+        }
+    }
+
+    return null;
+}
+
+// ======================================================
+// PROCESS POSSIBLE MINT
+// ======================================================
+
+async function processPossibleNewMint(
+    logEvent,
+    programName
+) {
+
+    if (!logEvent) {
+        return;
+    }
+
+    if (logEvent.err) {
+        return;
+    }
+
+    const logs =
+        logEvent.logs || [];
+
+    const hasInitializeMint =
+        logs.some(
+            (line) =>
+                typeof line ===
+                    'string' &&
+                (
+                    line.includes(
+                        'Instruction: InitializeMint'
+                    ) ||
+                    line.includes(
+                        'Instruction: InitializeMint2'
+                    )
+                )
+        );
+
+    if (!hasInitializeMint) {
+        return;
+    }
+
+    const signature =
+        logEvent.signature;
+
+    if (!signature) {
+        return;
+    }
+
+    if (
+        processingSignatures.has(
+            signature
+        )
+    ) {
+        return;
+    }
+
+    processingSignatures.add(
+        signature
+    );
+
+    try {
+
+        // أحياناً الـ log يصل قبل أن تصبح
+        // transaction متاحة للقراءة.
+        // لذلك نحاول عدة مرات.
+
+        let transaction = null;
+
+        for (
+            let attempt = 1;
+            attempt <= 4;
+            attempt++
+        ) {
+
+            try {
+
+                transaction =
+                    await connection
+                        .getParsedTransaction(
+                            signature,
+                            {
+                                commitment:
+                                    'confirmed',
+
+                                maxSupportedTransactionVersion:
+                                    0
+                            }
+                        );
+
+            } catch (error) {
+
+                if (attempt === 4) {
+                    throw error;
+                }
+            }
+
+            if (transaction) {
+                break;
+            }
+
+            await new Promise(
+                (resolve) =>
+                    setTimeout(
+                        resolve,
+                        attempt * 600
+                    )
+            );
+        }
+
+        if (!transaction) {
+
+            hunterState.errors++;
+
+            logWarning(
+                `لم نستطع قراءة Transaction: ${signature}`
+            );
+
+            return;
+        }
+
+        const outerInstructions =
+            transaction
+                .transaction
+                .message
+                .instructions || [];
+
+        let mintAddress =
+            findMintInInstructions(
+                outerInstructions
+            );
+
+        // بعض عمليات إنشاء Mint قد تكون
+        // داخل Inner Instructions.
+
+        if (
+            !mintAddress &&
+            transaction.meta
+                ?.innerInstructions
+        ) {
+
+            for (
+                const group
+                of transaction.meta
+                    .innerInstructions
+            ) {
+
+                mintAddress =
+                    findMintInInstructions(
+                        group.instructions
+                    );
+
+                if (mintAddress) {
+                    break;
+                }
+            }
+        }
+
+        if (!mintAddress) {
+
+            logWarning(
+                `InitializeMint ظهر لكن Mint Address لم يتم استخراجه: ${signature}`
+            );
+
+            return;
+        }
+
+        hunterState.detected++;
+
+        hunterState.lastDetectedAt =
+            new Date().toISOString();
+
+        hunterState.lastMint =
+            mintAddress;
+
+        hunterState.lastSignature =
+            signature;
+
+        logSuccess(
+            `🆕 Fresh Token detected: ${mintAddress}`
+        );
+
+        // MongoDB لازم يكون متصل
+        // لكي نحفظ الاكتشاف.
+
+        if (
+            mongoose.connection
+                .readyState !== 1
+        ) {
+
+            hunterState.errors++;
+
+            logWarning(
+                'تم اكتشاف Token ولكن MongoDB غير متصل'
+            );
+
+            return;
+        }
+
+        try {
+
+            await FreshToken.create({
+
+                mint:
+                    mintAddress,
+
+                signature,
+
+                slot:
+                    transaction.slot,
+
+                tokenProgram:
+                    programName,
+
+                detectedAt:
+                    new Date(),
+
+                status:
+                    'NEW',
+
+                securityChecked:
+                    false,
+
+                paperOnly:
+                    true
+            });
+
+            hunterState.saved++;
+
+            logSuccess(
+                `💾 Token saved: ${mintAddress}`
+            );
+
+        } catch (error) {
+
+            // Duplicate Mint
+            if (
+                error &&
+                error.code === 11000
+            ) {
+
+                hunterState.duplicates++;
+
+                logInfo(
+                    `Token موجود بالفعل: ${mintAddress}`
+                );
+
+                return;
+            }
+
+            throw error;
+        }
+
+    } catch (error) {
+
+        hunterState.errors++;
+
+        logError(
+            'Hunter transaction processing error',
+            error
+        );
+
+    } finally {
+
+        processingSignatures.delete(
+            signature
+        );
+    }
+}
+
+// ======================================================
+// START FRESH TOKEN HUNTER
+// ======================================================
+
+async function startFreshTokenHunter() {
+
+    if (
+        hunterState.status ===
+            'running' ||
+
+        hunterState.status ===
+            'starting'
+    ) {
+
+        return;
+    }
+
+    if (
+        systemState.solana !==
+        'connected'
+    ) {
+
+        hunterState.status =
+            'waiting_for_solana';
+
+        logWarning(
+            'Hunter لم يبدأ لأن Solana غير متصل'
+        );
+
+        return;
+    }
+
+    try {
+
+        hunterState.status =
+            'starting';
+
+        logInfo(
+            'بدء Fresh Token Hunter...'
+        );
+
+        // SPL Token Program
+        tokenProgramSubscription =
+            connection.onLogs(
+
+                TOKEN_PROGRAM_ID,
+
+                (logs) => {
+
+                    processPossibleNewMint(
+                        logs,
+                        'SPL_TOKEN'
+                    ).catch(
+                        (error) => {
+
+                            hunterState.errors++;
+
+                            logError(
+                                'SPL Hunter callback error',
+                                error
+                            );
+                        }
+                    );
+                },
+
+                'confirmed'
+            );
+
+        // Token-2022
+        token2022Subscription =
+            connection.onLogs(
+
+                TOKEN_2022_PROGRAM_ID,
+
+                (logs) => {
+
+                    processPossibleNewMint(
+                        logs,
+                        'TOKEN_2022'
+                    ).catch(
+                        (error) => {
+
+                            hunterState.errors++;
+
+                            logError(
+                                'Token-2022 Hunter callback error',
+                                error
+                            );
+                        }
+                    );
+                },
+
+                'confirmed'
+            );
+
+        hunterState.status =
+            'running';
+
+        hunterState.startedAt =
+            new Date().toISOString();
+
+        logSuccess(
+            '🔎 Fresh Token Hunter يعمل'
+        );
+
+        logSuccess(
+            '🧪 Observation Only - NO BUY / NO SELL'
+        );
+
+    } catch (error) {
+
+        hunterState.status =
+            'error';
+
+        hunterState.errors++;
+
+        logError(
+            'فشل تشغيل Fresh Token Hunter',
+            error
+        );
+    }
+}
+
+// ======================================================
+// STOP HUNTER
+// ======================================================
+
+async function stopFreshTokenHunter() {
+
+    try {
+
+        if (
+            hunterState.status ===
+            'stopped'
+        ) {
+            return;
+        }
+
+        hunterState.status =
+            'stopping';
+
+        if (
+            tokenProgramSubscription !==
+            null
+        ) {
+
+            await connection
+                .removeOnLogsListener(
+                    tokenProgramSubscription
+                );
+
+            tokenProgramSubscription =
+                null;
+        }
+
+        if (
+            token2022Subscription !==
+            null
+        ) {
+
+            await connection
+                .removeOnLogsListener(
+                    token2022Subscription
+                );
+
+            token2022Subscription =
+                null;
+        }
+
+        hunterState.status =
+            'stopped';
+
+        logSuccess(
+            'Fresh Token Hunter stopped'
+        );
+
+    } catch (error) {
+
+        hunterState.status =
+            'error';
+
+        logError(
+            'خطأ أثناء إغلاق Hunter',
+            error
+        );
+    }
 }
 
 // ======================================================
@@ -546,23 +1331,20 @@ async function startTelegram() {
                 TELEGRAM_TOKEN
             );
 
-        // ==============================================
         // START
-        // ==============================================
+        bot.start(
+            async (ctx) => {
 
-        bot.start(async (ctx) => {
+                await ctx.reply(
+                    '🤖 LOMY Solana Hunter V2\n\n' +
+                    '🧪 PAPER MODE\n' +
+                    '🔎 Fresh Token Hunter\n' +
+                    '🔒 التداول الحقيقي مقفول'
+                );
+            }
+        );
 
-            await ctx.reply(
-                '🤖 LOMY Solana Hunter\n\n' +
-                '🧪 الوضع الحالي: PAPER MODE\n' +
-                '🔒 التداول الحقيقي: مقفول'
-            );
-        });
-
-        // ==============================================
         // STATUS
-        // ==============================================
-
         bot.command(
             'status',
             async (ctx) => {
@@ -581,19 +1363,18 @@ async function startTelegram() {
 
                     `⚡ Solana: ${systemState.solana}\n` +
 
-                    `📡 Telegram: ${systemState.telegram}\n\n` +
+                    `📡 Telegram: ${systemState.telegram}\n` +
 
-                    `🧪 Mode: ${TRADING_MODE}\n` +
+                    `🔎 Hunter: ${hunterState.status}\n\n` +
+
+                    `🧪 Mode: PAPER\n` +
 
                     `🔒 Live Trading: OFF`
                 );
             }
         );
 
-        // ==============================================
         // BALANCE
-        // ==============================================
-
         bot.command(
             'balance',
             async (ctx) => {
@@ -608,9 +1389,10 @@ async function startTelegram() {
                 try {
 
                     const balance =
-                        await connection.getBalance(
-                            wallet.publicKey
-                        );
+                        await connection
+                            .getBalance(
+                                wallet.publicKey
+                            );
 
                     const sol =
                         balance /
@@ -634,27 +1416,141 @@ async function startTelegram() {
             }
         );
 
-        // ==============================================
         // MODE
-        // ==============================================
-
         bot.command(
             'mode',
             async (ctx) => {
 
                 await ctx.reply(
+
                     '🧪 PAPER MODE\n\n' +
+
                     '❌ الشراء الحقيقي: OFF\n' +
+
                     '❌ البيع الحقيقي: OFF\n' +
-                    '✅ التحليل والاختبار فقط'
+
+                    '🔎 Fresh Token Hunter: Observation Only\n' +
+
+                    '✅ التحليل والتسجيل فقط'
                 );
             }
         );
 
-        // ==============================================
-        // TELEGRAM ERROR HANDLER
-        // ==============================================
+        // HUNTER
+        bot.command(
+            'hunter',
+            async (ctx) => {
 
+                let databaseCount =
+                    'N/A';
+
+                try {
+
+                    if (
+                        mongoose.connection
+                            .readyState === 1
+                    ) {
+
+                        databaseCount =
+                            await FreshToken
+                                .countDocuments();
+                    }
+
+                } catch (error) {
+
+                    logError(
+                        'خطأ في Hunter count',
+                        error
+                    );
+                }
+
+                await ctx.reply(
+
+                    `🔎 FRESH TOKEN HUNTER\n\n` +
+
+                    `Status: ${hunterState.status}\n` +
+
+                    `Detected: ${hunterState.detected}\n` +
+
+                    `Saved: ${hunterState.saved}\n` +
+
+                    `Database: ${databaseCount}\n` +
+
+                    `Duplicates: ${hunterState.duplicates}\n` +
+
+                    `Errors: ${hunterState.errors}\n\n` +
+
+                    `Last Mint:\n${hunterState.lastMint || 'None'}\n\n` +
+
+                    `🧪 PAPER MODE\n` +
+
+                    `🔒 NO BUY / NO SELL`
+                );
+            }
+        );
+
+        // LAST TOKEN
+        bot.command(
+            'lasttoken',
+            async (ctx) => {
+
+                try {
+
+                    if (
+                        mongoose.connection
+                            .readyState !== 1
+                    ) {
+
+                        return ctx.reply(
+                            '❌ MongoDB غير متصل'
+                        );
+                    }
+
+                    const token =
+                        await FreshToken
+                            .findOne()
+                            .sort({
+                                detectedAt: -1
+                            })
+                            .lean();
+
+                    if (!token) {
+
+                        return ctx.reply(
+                            '🔎 لم يتم تسجيل Tokens حتى الآن'
+                        );
+                    }
+
+                    await ctx.reply(
+
+                        `🆕 LAST TOKEN\n\n` +
+
+                        `Mint:\n${token.mint}\n\n` +
+
+                        `Program: ${token.tokenProgram}\n` +
+
+                        `Status: ${token.status}\n` +
+
+                        `Security Checked: ${token.securityChecked ? 'YES' : 'NO'}\n` +
+
+                        `🧪 Paper Only: YES`
+                    );
+
+                } catch (error) {
+
+                    logError(
+                        'خطأ في lasttoken',
+                        error
+                    );
+
+                    await ctx.reply(
+                        '❌ تعذر قراءة آخر Token'
+                    );
+                }
+            }
+        );
+
+        // Telegram Errors
         bot.catch(
             (error, ctx) => {
 
@@ -668,9 +1564,35 @@ async function startTelegram() {
         systemState.telegram =
             'starting';
 
-        await bot.launch();
+        /*
+         * لا نستخدم await هنا.
+         * bot.launch يبدأ long polling ويستمر.
+         */
 
-        telegramStarted = true;
+        bot.launch()
+            .then(() => {
+
+                logInfo(
+                    'Telegram polling انتهى'
+                );
+
+            })
+            .catch((error) => {
+
+                telegramStarted =
+                    false;
+
+                systemState.telegram =
+                    'error';
+
+                logError(
+                    'Telegram polling error',
+                    error
+                );
+            });
+
+        telegramStarted =
+            true;
 
         systemState.telegram =
             'online';
@@ -681,7 +1603,8 @@ async function startTelegram() {
 
     } catch (error) {
 
-        telegramStarted = false;
+        telegramStarted =
+            false;
 
         systemState.telegram =
             'error';
@@ -713,9 +1636,23 @@ async function shutdown(signal) {
 
     systemState.ready = false;
 
-    // التداول غير موجود أصلاً في V1
-    systemState.trading = 'disabled';
+    systemState.trading =
+        'disabled';
 
+    // STOP HUNTER
+    try {
+
+        await stopFreshTokenHunter();
+
+    } catch (error) {
+
+        logError(
+            'خطأ أثناء إغلاق Hunter',
+            error
+        );
+    }
+
+    // STOP TELEGRAM
     try {
 
         if (
@@ -725,7 +1662,8 @@ async function shutdown(signal) {
 
             bot.stop(signal);
 
-            telegramStarted = false;
+            telegramStarted =
+                false;
 
             systemState.telegram =
                 'stopped';
@@ -743,10 +1681,12 @@ async function shutdown(signal) {
         );
     }
 
+    // STOP MONGODB
     try {
 
         if (
-            mongoose.connection.readyState !== 0
+            mongoose.connection
+                .readyState !== 0
         ) {
 
             await mongoose.disconnect();
@@ -764,6 +1704,7 @@ async function shutdown(signal) {
         );
     }
 
+    // STOP HTTP
     try {
 
         if (httpServer) {
@@ -779,7 +1720,6 @@ async function shutdown(signal) {
                 }
             );
 
-            // حماية لو السيرفر لم يغلق
             setTimeout(
                 () => process.exit(0),
                 5000
@@ -811,9 +1751,12 @@ process.on(
 
         logError(
             'Unhandled Promise Rejection',
+
             reason instanceof Error
                 ? reason
-                : new Error(String(reason))
+                : new Error(
+                    String(reason)
+                )
         );
     }
 );
@@ -826,10 +1769,6 @@ process.on(
             'Uncaught Exception',
             error
         );
-
-        // الخطأ غير المتوقع قد يترك البرنامج
-        // في حالة غير آمنة.
-        // Render سيعيد تشغيله بعد الخروج.
 
         await shutdown(
             'uncaughtException'
@@ -854,36 +1793,56 @@ process.once(
 async function main() {
 
     console.log('');
-    console.log('========================================');
-    console.log('🚀 LOMY SOLANA HUNTER');
-    console.log('🧪 PAPER MODE');
-    console.log('🔒 LIVE TRADING DISABLED');
-    console.log('========================================');
+    console.log(
+        '========================================'
+    );
+    console.log(
+        '🚀 LOMY SOLANA HUNTER V2'
+    );
+    console.log(
+        '🔎 FRESH TOKEN HUNTER V1'
+    );
+    console.log(
+        '🧪 PAPER MODE'
+    );
+    console.log(
+        '🔒 LIVE TRADING DISABLED'
+    );
+    console.log(
+        '========================================'
+    );
     console.log('');
 
-    // ==============================================
-    // أهم خطوة لـ Render
-    // السيرفر يفتح أولاً
-    // ==============================================
-
+    // Render أولاً
     await startHttpServer();
 
-    // ==============================================
-    // بعد فتح PORT نبدأ الخدمات
-    // ==============================================
-
+    // MongoDB
     await connectToDatabase();
 
+    // Wallet
     await loadWallet();
 
+    // Solana
     await testSolanaConnection();
 
+    // Hunter
+    if (
+        systemState.solana ===
+        'connected'
+    ) {
+
+        await startFreshTokenHunter();
+    }
+
+    // Telegram
     await startTelegram();
 
     updateReadyState();
 
     console.log('');
-    console.log('========================================');
+    console.log(
+        '========================================'
+    );
 
     if (systemState.ready) {
 
@@ -899,10 +1858,16 @@ async function main() {
     }
 
     console.log(
+        `🔎 Hunter: ${hunterState.status}`
+    );
+
+    console.log(
         '🔒 التداول الحقيقي مازال مقفولاً'
     );
 
-    console.log('========================================');
+    console.log(
+        '========================================'
+    );
     console.log('');
 }
 
@@ -917,9 +1882,6 @@ main().catch(
             'خطأ في MAIN',
             error
         );
-
-        // HTTP Server قد يكون شغال
-        // فلا نسمح بسقوط صامت.
 
         updateReadyState();
     }
