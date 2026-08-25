@@ -40,7 +40,15 @@ const BOT_PRIVATE_KEY = process.env.BOT_PRIVATE_KEY;
 const MODE = "PAPER";
 const LIVE_TRADING = false;
 
-// لا يوجد أي BUY أو SELL حقيقي.
+// ======================================================
+// TELEGRAM IPV4 AGENT
+// ======================================================
+
+const telegramAgent = new https.Agent({
+  keepAlive: true,
+  family: 4,
+  timeout: 30000
+});
 
 // ======================================================
 // SOLANA
@@ -178,10 +186,6 @@ function jitter(ms) {
 // RPC SMART PRIORITY QUEUE
 // ======================================================
 
-// 0 = WHALE / CRITICAL
-// 1 = NORMAL
-// 2 = HUNTER / LOW PRIORITY
-
 const rpcQueue = [];
 
 let rpcBusy = false;
@@ -201,8 +205,6 @@ function rpcCall(
   return new Promise(
     (resolve, reject) => {
 
-      // لو الطابور مزدحم جدًا
-      // طلبات Hunter الجديدة فقط يتم إسقاطها.
       if (
         priority === 2 &&
         rpcQueue.length >=
@@ -273,8 +275,6 @@ async function runRpcQueue() {
           const result =
             await job.fn();
 
-          // الشبكة مستقرة
-          // نقلل التأخير تدريجيًا
           rpcDelay =
             Math.max(
               RPC_MIN_DELAY,
@@ -320,8 +320,6 @@ async function runRpcQueue() {
         job.reject(lastError);
       }
 
-      // لو الطابور انفجر
-      // نهدي أكثر بدل ما نقتل RPC
       if (
         rpcQueue.length >=
         RPC_HARD_LIMIT
@@ -365,8 +363,6 @@ const tokenSchema =
         default: Date.now
       },
 
-      // SECURITY
-
       securityChecked: {
         type: Boolean,
         default: false
@@ -393,8 +389,6 @@ const tokenSchema =
       decimals: Number,
       supply: String,
       token2022: Boolean,
-
-      // DEX
 
       dexChecked: {
         type: Boolean,
@@ -434,8 +428,6 @@ const tokenSchema =
         type: String,
         default: "PENDING"
       },
-
-      // WHALES
 
       whaleStatus: {
         type: String,
@@ -514,7 +506,7 @@ app.get(
   (req, res) => {
 
     res.send(
-      "✅ LOMY V4.4.2 NETWORK FIX | PAPER MODE"
+      "✅ LOMY V4.4.3 TELEGRAM FIX | PAPER MODE"
     );
   }
 );
@@ -1041,7 +1033,7 @@ function httpsJson(url) {
                 "application/json",
 
               "User-Agent":
-                "LOMY-Solana-Hunter/4.4.2",
+                "LOMY-Solana-Hunter/4.4.3",
 
               Connection:
                 "close"
@@ -1424,10 +1416,8 @@ async function dexScan(
 
     const finalScore =
       Math.round(
-
         securityScore *
           0.60 +
-
         dexScore *
           0.40
       );
@@ -1687,7 +1677,6 @@ async function runWhaleWorker() {
         }
       }
 
-      // لا نفحص حوتين وراء بعض بسرعة
       await sleep(
         2500
       );
@@ -1928,9 +1917,6 @@ async function whaleScan(
   log(
     `🐋 Whale scanning ${mint} attempt ${attempts}`
   );
-
-  // Priority 0
-  // أهم طلبات RPC
 
   const supplyResponse =
     await rpcCall(
@@ -2396,8 +2382,6 @@ async function processLogs(
     return;
   }
 
-  // لو RPC مزدحم
-  // لا نزوده بحِمل جديد.
   if (
     rpcQueue.length >=
     RPC_SOFT_LIMIT
@@ -2675,7 +2659,6 @@ async function startHunter() {
         "confirmed"
       );
 
-    // WebSocket heartbeat
     slotSub =
       connection.onSlotChange(
         () => {
@@ -2765,7 +2748,6 @@ async function restartHunter(
   }
 }
 
-// كل 30 ثانية نراقب WebSocket
 setInterval(
   () => {
 
@@ -2779,7 +2761,6 @@ setInterval(
       Date.now() -
       lastWsHeartbeat;
 
-    // مفيش Slot heartbeat لمدة دقيقة
     if (
       silentFor >
       60000
@@ -2847,9 +2828,6 @@ async function recoverPending() {
       );
     }
 
-    // نأخر Security recovery
-    // عشان الحيتان تخلص الأول
-
     await sleep(
       5000
     );
@@ -2892,7 +2870,7 @@ async function recoverPending() {
 }
 
 // ======================================================
-// TELEGRAM
+// TELEGRAM COMMANDS
 // ======================================================
 
 function registerTelegramCommands() {
@@ -2900,12 +2878,13 @@ function registerTelegramCommands() {
   bot.start(
     ctx =>
       ctx.reply(
-        "🤖 LOMY V4.4.2\n\n" +
+        "🤖 LOMY V4.4.3\n\n" +
         "🔎 Hunter ON\n" +
         "🛡 Security ON\n" +
         "💧 DEX ON\n" +
         "🐋 Whale Engine ON\n" +
-        "🌐 Network Protection ON\n\n" +
+        "🌐 Network Protection ON\n" +
+        "📡 Telegram IPv4 ON\n\n" +
         "🧪 PAPER MODE\n" +
         "🔒 NO BUY / NO SELL"
       )
@@ -2916,7 +2895,7 @@ function registerTelegramCommands() {
     ctx =>
       ctx.reply(
 
-        `🤖 LOMY V4.4.2 STATUS\n\n` +
+        `🤖 LOMY V4.4.3 STATUS\n\n` +
 
         `🌐 Server: ${state.server}\n` +
         `🗄 Database: ${state.database}\n` +
@@ -2935,6 +2914,8 @@ function registerTelegramCommands() {
         `RPC Retries: ${state.rpcRetries}\n` +
         `RPC Dropped: ${state.rpcDropped}\n` +
         `RPC Delay: ${Math.round(rpcDelay)}ms\n\n` +
+
+        `Telegram Retries: ${state.telegramRetries}\n\n` +
 
         `🧪 PAPER MODE\n` +
         `🔒 LIVE TRADING OFF`
@@ -2962,7 +2943,6 @@ function registerTelegramCommands() {
         `🐋 Whale Retries: ${state.whaleRetries}\n\n` +
 
         `DEX Errors: ${state.dexNetworkErrors}\n` +
-
         `Telegram Retries: ${state.telegramRetries}`
       )
   );
@@ -3196,7 +3176,7 @@ function registerTelegramCommands() {
 
       await ctx.reply(
 
-        `📊 V4.4.2 STATS\n\n` +
+        `📊 V4.4.3 STATS\n\n` +
 
         `Total Tokens: ${total}\n` +
         `Candidates: ${candidates} 🎯\n\n` +
@@ -3279,16 +3259,19 @@ async function startTelegram() {
 
   bot =
     new Telegraf(
-      TELEGRAM_TOKEN
+      TELEGRAM_TOKEN,
+      {
+        telegram: {
+          agent:
+            telegramAgent
+        }
+      }
     );
 
   registerTelegramCommands();
 
   state.telegram =
     "connecting";
-
-  // لا نوقف باقي البوت لو Telegram وقع
-  // نحاول باستمرار.
 
   while (
     !shuttingDown
@@ -3297,10 +3280,15 @@ async function startTelegram() {
     try {
 
       log(
-        "📡 Connecting Telegram..."
+        "📡 Connecting Telegram via IPv4..."
       );
 
-      await bot.telegram.getMe();
+      const me =
+        await bot.telegram.getMe();
+
+      log(
+        `✅ Telegram API reached: @${me.username || "BOT"}`
+      );
 
       await bot.launch({
         dropPendingUpdates:
@@ -3325,8 +3313,28 @@ async function startTelegram() {
 
       console.error(
         new Date().toISOString(),
-        "⚠️ Telegram connection failed:",
-        err?.message || err
+        "⚠️ Telegram connection failed",
+        {
+          message:
+            err?.message || null,
+
+          code:
+            err?.code || null,
+
+          errno:
+            err?.errno || null,
+
+          type:
+            err?.type || null,
+
+          cause:
+            err?.cause?.message ||
+            null,
+
+          causeCode:
+            err?.cause?.code ||
+            null
+        }
       );
 
       await sleep(
@@ -3390,6 +3398,12 @@ async function shutdown(
         signal
       );
     }
+
+  } catch {}
+
+  try {
+
+    telegramAgent.destroy();
 
   } catch {}
 
@@ -3478,7 +3492,10 @@ async function main() {
     "================================"
   );
   console.log(
-    "🚀 LOMY SOLANA HUNTER V4.4.2"
+    "🚀 LOMY SOLANA HUNTER V4.4.3"
+  );
+  console.log(
+    "📡 TELEGRAM IPV4 FIX"
   );
   console.log(
     "🌐 NETWORK STABILITY ENGINE"
@@ -3496,7 +3513,6 @@ async function main() {
     "================================"
   );
 
-  // Render أولًا
   await startServer();
 
   await connectDatabase();
@@ -3505,8 +3521,6 @@ async function main() {
 
   await testSolana();
 
-  // Telegram في الخلفية
-  // لو وقع مش يوقف باقي البوت
   startTelegram()
     .catch(
       err =>
@@ -3534,7 +3548,7 @@ async function main() {
     );
 
   log(
-    "✅ LOMY V4.4.2 STARTED"
+    "✅ LOMY V4.4.3 STARTED"
   );
 
   log(
