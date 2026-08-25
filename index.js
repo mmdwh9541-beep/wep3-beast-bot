@@ -26,7 +26,8 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const BOT_PRIVATE_KEY = process.env.BOT_PRIVATE_KEY;
 
-const connection = new Connection(RPC_URL, "confirmed");
+const connection =
+  new Connection(RPC_URL, "confirmed");
 
 const TOKEN_PROGRAM_ID = new PublicKey(
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
@@ -36,12 +37,23 @@ const TOKEN_2022_PROGRAM_ID = new PublicKey(
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 );
 
+// ======================================================
+// SAFETY
+// ======================================================
+
 const MODE = "PAPER";
 const LIVE_TRADING = false;
+
+// لا يوجد BUY أو SELL حقيقي في هذه النسخة.
+
+// ======================================================
+// GLOBALS
+// ======================================================
 
 let wallet = null;
 let bot = null;
 let server = null;
+
 let tokenSub = null;
 let token2022Sub = null;
 
@@ -61,7 +73,6 @@ const state = {
   detected: 0,
   securityScanned: 0,
   dexScanned: 0,
-  candidates: 0,
 
   rpc429: 0,
   rpcRetries: 0,
@@ -73,8 +84,15 @@ const state = {
   lastMint: null
 };
 
+// ======================================================
+// HELPERS
+// ======================================================
+
 function log(...x) {
-  console.log(new Date().toISOString(), ...x);
+  console.log(
+    new Date().toISOString(),
+    ...x
+  );
 }
 
 function errLog(name, err) {
@@ -89,20 +107,29 @@ function errLog(name, err) {
 }
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(
+    resolve =>
+      setTimeout(resolve, ms)
+  );
 }
 
 function num(v) {
   const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
+
+  return Number.isFinite(n)
+    ? n
+    : 0;
 }
 
 function is429(err) {
-  const s = String(err?.message || err).toLowerCase();
+  const text =
+    String(
+      err?.message || err
+    ).toLowerCase();
 
   return (
-    s.includes("429") ||
-    s.includes("rate limit")
+    text.includes("429") ||
+    text.includes("rate limit")
   );
 }
 
@@ -111,19 +138,23 @@ function is429(err) {
 // ======================================================
 
 const rpcQueue = [];
+
 let rpcBusy = false;
 let rpcDelay = 500;
 
 function rpcCall(fn) {
-  return new Promise((resolve, reject) => {
-    rpcQueue.push({
-      fn,
-      resolve,
-      reject
-    });
+  return new Promise(
+    (resolve, reject) => {
 
-    runRpcQueue();
-  });
+      rpcQueue.push({
+        fn,
+        resolve,
+        reject
+      });
+
+      runRpcQueue();
+    }
+  );
 }
 
 async function runRpcQueue() {
@@ -132,27 +163,39 @@ async function runRpcQueue() {
   rpcBusy = true;
 
   try {
-    while (rpcQueue.length) {
-      const job = rpcQueue.shift();
 
-      let completed = false;
+    while (rpcQueue.length) {
+
+      const job =
+        rpcQueue.shift();
+
+      let done = false;
       let lastError = null;
 
-      for (let i = 1; i <= 5; i++) {
-        try {
-          const result = await job.fn();
+      for (
+        let attempt = 1;
+        attempt <= 5;
+        attempt++
+      ) {
 
-          rpcDelay = Math.max(
-            400,
-            rpcDelay - 50
-          );
+        try {
+
+          const result =
+            await job.fn();
+
+          rpcDelay =
+            Math.max(
+              400,
+              rpcDelay - 50
+            );
 
           job.resolve(result);
-          completed = true;
 
+          done = true;
           break;
 
         } catch (err) {
+
           lastError = err;
 
           if (!is429(err)) {
@@ -162,26 +205,33 @@ async function runRpcQueue() {
           state.rpc429++;
           state.rpcRetries++;
 
-          rpcDelay = Math.min(
-            5000,
-            rpcDelay * 2
-          );
+          rpcDelay =
+            Math.min(
+              5000,
+              rpcDelay * 2
+            );
 
           log(
-            `⚠️ RPC 429 retry ${i}/5 delay=${rpcDelay}`
+            `⚠️ RPC 429 retry ${attempt}/5 delay=${rpcDelay}`
           );
 
-          await sleep(rpcDelay);
+          await sleep(
+            rpcDelay
+          );
         }
       }
 
-      if (!completed) {
+      if (!done) {
         job.reject(lastError);
       }
 
-      await sleep(rpcDelay);
+      await sleep(
+        rpcDelay
+      );
     }
+
   } finally {
+
     rpcBusy = false;
   }
 }
@@ -190,140 +240,172 @@ async function runRpcQueue() {
 // DATABASE
 // ======================================================
 
-const tokenSchema = new mongoose.Schema(
-  {
-    mint: {
-      type: String,
-      unique: true,
-      index: true
+const tokenSchema =
+  new mongoose.Schema(
+    {
+      mint: {
+        type: String,
+        unique: true,
+        index: true
+      },
+
+      signature: String,
+      program: String,
+
+      detectedAt: {
+        type: Date,
+        default: Date.now
+      },
+
+      securityChecked: {
+        type: Boolean,
+        default: false
+      },
+
+      securityScore: Number,
+
+      securityDecision: {
+        type: String,
+        default: "PENDING"
+      },
+
+      securityAttempts: {
+        type: Number,
+        default: 0
+      },
+
+      mintAuthorityRevoked:
+        Boolean,
+
+      freezeAuthorityRevoked:
+        Boolean,
+
+      decimals: Number,
+      supply: String,
+      token2022: Boolean,
+
+      dexChecked: {
+        type: Boolean,
+        default: false
+      },
+
+      dexListed: {
+        type: Boolean,
+        default: false
+      },
+
+      dexAttempts: {
+        type: Number,
+        default: 0
+      },
+
+      dexId: String,
+      pairAddress: String,
+
+      liquidityUsd: Number,
+      volumeM5: Number,
+      volumeH1: Number,
+
+      buysM5: Number,
+      sellsM5: Number,
+
+      dexScore: Number,
+
+      dexDecision: {
+        type: String,
+        default: "PENDING"
+      },
+
+      finalScore: Number,
+
+      finalDecision: {
+        type: String,
+        default: "PENDING"
+      },
+
+      paperOnly: {
+        type: Boolean,
+        default: true
+      }
     },
-
-    signature: String,
-    program: String,
-
-    detectedAt: {
-      type: Date,
-      default: Date.now
-    },
-
-    securityChecked: {
-      type: Boolean,
-      default: false
-    },
-
-    securityScore: Number,
-
-    securityDecision: {
-      type: String,
-      default: "PENDING"
-    },
-
-    securityAttempts: {
-      type: Number,
-      default: 0
-    },
-
-    mintAuthorityRevoked: Boolean,
-    freezeAuthorityRevoked: Boolean,
-    decimals: Number,
-    supply: String,
-    token2022: Boolean,
-
-    dexChecked: {
-      type: Boolean,
-      default: false
-    },
-
-    dexListed: {
-      type: Boolean,
-      default: false
-    },
-
-    dexAttempts: {
-      type: Number,
-      default: 0
-    },
-
-    dexId: String,
-    pairAddress: String,
-
-    liquidityUsd: Number,
-    volumeM5: Number,
-    volumeH1: Number,
-
-    buysM5: Number,
-    sellsM5: Number,
-
-    dexScore: Number,
-
-    dexDecision: {
-      type: String,
-      default: "PENDING"
-    },
-
-    finalScore: Number,
-
-    finalDecision: {
-      type: String,
-      default: "PENDING"
-    },
-
-    paperOnly: {
-      type: Boolean,
-      default: true
+    {
+      timestamps: true
     }
-  },
-  {
-    timestamps: true
-  }
-);
+  );
 
 const FreshToken =
   mongoose.models.FreshToken ||
-  mongoose.model("FreshToken", tokenSchema);
+  mongoose.model(
+    "FreshToken",
+    tokenSchema
+  );
 
 // ======================================================
 // SERVER
 // ======================================================
 
 app.get("/", (req, res) => {
+
   res.send(
-    "✅ LOMY V4.3 ONLINE | PAPER MODE"
+    "✅ LOMY V4.3.1 ONLINE | PAPER MODE"
   );
 });
 
-app.get("/health", (req, res) => {
-  res.json({
-    ...state,
-    rpcDelay,
-    mode: MODE,
-    liveTrading: LIVE_TRADING,
-    uptime: Math.floor(process.uptime())
-  });
-});
+app.get(
+  "/health",
+  (req, res) => {
+
+    res.json({
+      ...state,
+
+      rpcDelay,
+
+      rpcQueue:
+        rpcQueue.length,
+
+      mode:
+        MODE,
+
+      liveTrading:
+        LIVE_TRADING,
+
+      uptime:
+        Math.floor(
+          process.uptime()
+        )
+    });
+  }
+);
 
 function startServer() {
-  return new Promise((resolve, reject) => {
-    server = app.listen(
-      PORT,
-      "0.0.0.0",
-      () => {
-        state.server = "online";
 
-        log(
-          "✅ Render server online",
-          PORT
+  return new Promise(
+    (resolve, reject) => {
+
+      server =
+        app.listen(
+          PORT,
+          "0.0.0.0",
+          () => {
+
+            state.server =
+              "online";
+
+            log(
+              "✅ Render server online",
+              PORT
+            );
+
+            resolve();
+          }
         );
 
-        resolve();
-      }
-    );
-
-    server.on(
-      "error",
-      reject
-    );
-  });
+      server.on(
+        "error",
+        reject
+      );
+    }
+  );
 }
 
 // ======================================================
@@ -331,30 +413,38 @@ function startServer() {
 // ======================================================
 
 async function connectDatabase() {
+
   try {
+
     if (!MONGODB_URI) {
+
       throw new Error(
         "MONGODB_URI missing"
       );
     }
 
-    state.database = "connecting";
+    state.database =
+      "connecting";
 
     await mongoose.connect(
       MONGODB_URI,
       {
-        serverSelectionTimeoutMS: 10000
+        serverSelectionTimeoutMS:
+          10000
       }
     );
 
-    state.database = "connected";
+    state.database =
+      "connected";
 
     log(
       "✅ MongoDB connected"
     );
 
   } catch (err) {
-    state.database = "error";
+
+    state.database =
+      "error";
 
     errLog(
       "MongoDB",
@@ -366,14 +456,18 @@ async function connectDatabase() {
 mongoose.connection.on(
   "disconnected",
   () => {
-    state.database = "disconnected";
+
+    state.database =
+      "disconnected";
   }
 );
 
 mongoose.connection.on(
   "reconnected",
   () => {
-    state.database = "connected";
+
+    state.database =
+      "connected";
   }
 );
 
@@ -382,8 +476,11 @@ mongoose.connection.on(
 // ======================================================
 
 async function loadWallet() {
+
   try {
+
     if (!BOT_PRIVATE_KEY) {
+
       throw new Error(
         "BOT_PRIVATE_KEY missing"
       );
@@ -396,8 +493,11 @@ async function loadWallet() {
       key.includes(" ") &&
       bip39.validateMnemonic(key)
     ) {
+
       const seed =
-        bip39.mnemonicToSeedSync(key);
+        bip39.mnemonicToSeedSync(
+          key
+        );
 
       const derived =
         derivePath(
@@ -406,11 +506,14 @@ async function loadWallet() {
         ).key;
 
       wallet =
-        Keypair.fromSeed(derived);
+        Keypair.fromSeed(
+          derived
+        );
 
     } else if (
       key.startsWith("[")
     ) {
+
       wallet =
         Keypair.fromSecretKey(
           Uint8Array.from(
@@ -419,13 +522,15 @@ async function loadWallet() {
         );
 
     } else {
+
       wallet =
         Keypair.fromSecretKey(
           bs58.decode(key)
         );
     }
 
-    state.wallet = "loaded";
+    state.wallet =
+      "loaded";
 
     log(
       "✅ Wallet",
@@ -433,7 +538,9 @@ async function loadWallet() {
     );
 
   } catch (err) {
-    state.wallet = "error";
+
+    state.wallet =
+      "error";
 
     errLog(
       "Wallet",
@@ -443,13 +550,15 @@ async function loadWallet() {
 }
 
 // ======================================================
-// SOLANA
+// SOLANA TEST
 // ======================================================
 
 async function testSolana() {
+
   if (!wallet) return;
 
   try {
+
     const balance =
       await rpcCall(
         () =>
@@ -458,7 +567,8 @@ async function testSolana() {
           )
       );
 
-    state.solana = "connected";
+    state.solana =
+      "connected";
 
     log(
       "✅ Solana",
@@ -470,7 +580,9 @@ async function testSolana() {
     );
 
   } catch (err) {
-    state.solana = "error";
+
+    state.solana =
+      "error";
 
     errLog(
       "Solana",
@@ -480,41 +592,60 @@ async function testSolana() {
 }
 
 // ======================================================
-// SECURITY WITH RETRY
+// SECURITY ENGINE
 // ======================================================
 
 async function securityScan(mint) {
-  state.security = "scanning";
+
+  state.security =
+    "scanning";
 
   try {
+
     const existing =
       await FreshToken
-        .findOne({ mint })
+        .findOne({
+          mint
+        })
         .lean();
 
     const attempts =
-      num(existing?.securityAttempts) + 1;
+      num(
+        existing
+          ?.securityAttempts
+      ) + 1;
 
     let account = null;
 
-    for (let i = 1; i <= 4; i++) {
+    for (
+      let i = 1;
+      i <= 4;
+      i++
+    ) {
+
       account =
         await rpcCall(
           () =>
-            connection.getParsedAccountInfo(
-              new PublicKey(mint),
-              "confirmed"
-            )
-        ).catch(
+            connection
+              .getParsedAccountInfo(
+                new PublicKey(
+                  mint
+                ),
+                "confirmed"
+              )
+        )
+        .catch(
           () => null
         );
 
-      if (account?.value) {
+      if (
+        account?.value
+      ) {
         break;
       }
 
       log(
-        `⏳ Mint unavailable retry ${i}/4 ${mint}`
+        `⏳ Mint retry ${i}/4 ${mint}`
       );
 
       await sleep(
@@ -522,35 +653,43 @@ async function securityScan(mint) {
       );
     }
 
-    if (!account?.value) {
+    if (
+      !account?.value
+    ) {
+
       await FreshToken.updateOne(
-        { mint },
+        {
+          mint
+        },
         {
           $set: {
-            securityAttempts: attempts,
+            securityAttempts:
+              attempts,
+
             securityDecision:
               "RETRY_LATER"
           }
         }
       );
 
-      log(
-        `⚠️ Mint delayed ${mint}`
-      );
-
       return;
     }
 
     const owner =
-      account.value.owner.toString();
+      account.value
+        .owner
+        .toString();
 
     const parsed =
-      account.value.data?.parsed;
+      account.value
+        .data
+        ?.parsed;
 
     if (
       !parsed ||
       parsed.type !== "mint"
     ) {
+
       throw new Error(
         "Invalid mint"
       );
@@ -560,17 +699,22 @@ async function securityScan(mint) {
       parsed.info || {};
 
     const mintRevoked =
-      info.mintAuthority == null;
+      info.mintAuthority ==
+      null;
 
     const freezeRevoked =
-      info.freezeAuthority == null;
+      info.freezeAuthority ==
+      null;
 
     const token2022 =
       owner ===
-      TOKEN_2022_PROGRAM_ID.toString();
+      TOKEN_2022_PROGRAM_ID
+        .toString();
 
     const decimals =
-      num(info.decimals);
+      num(
+        info.decimals
+      );
 
     const supply =
       String(
@@ -613,22 +757,40 @@ async function securityScan(mint) {
         )
       );
 
-    let decision = "REJECT";
+    let decision =
+      "REJECT";
 
     if (score >= 80) {
-      decision = "PASS";
-    } else if (score >= 55) {
-      decision = "REVIEW";
+
+      decision =
+        "PASS";
+
+    } else if (
+      score >= 55
+    ) {
+
+      decision =
+        "REVIEW";
     }
 
     await FreshToken.updateOne(
-      { mint },
+      {
+        mint
+      },
       {
         $set: {
-          securityChecked: true,
-          securityAttempts: attempts,
-          securityScore: score,
-          securityDecision: decision,
+
+          securityChecked:
+            true,
+
+          securityAttempts:
+            attempts,
+
+          securityScore:
+            score,
+
+          securityDecision:
+            decision,
 
           mintAuthorityRevoked:
             mintRevoked,
@@ -650,27 +812,35 @@ async function securityScan(mint) {
     );
 
     if (
-      decision !== "REJECT"
+      decision !==
+      "REJECT"
     ) {
-      await dexScan(mint);
+
+      await dexScan(
+        mint
+      );
     }
 
   } catch (err) {
+
     errLog(
       `Security ${mint}`,
       err
     );
 
   } finally {
-    state.security = "idle";
+
+    state.security =
+      "idle";
   }
 }
 
 // ======================================================
-// ROBUST HTTPS GET FOR DEX
+// DEX NETWORK
 // ======================================================
 
 function httpsJson(url) {
+
   return new Promise(
     (resolve, reject) => {
 
@@ -680,18 +850,19 @@ function httpsJson(url) {
           {
             family: 4,
 
+            timeout:
+              10000,
+
             headers: {
               Accept:
                 "application/json",
 
               "User-Agent":
-                "LOMY-Solana-Hunter/4.3",
+                "LOMY-Solana-Hunter/4.3.1",
 
               Connection:
                 "close"
-            },
-
-            timeout: 10000
+            }
           },
           response => {
 
@@ -704,6 +875,7 @@ function httpsJson(url) {
             response.on(
               "data",
               chunk => {
+
                 body += chunk;
               }
             );
@@ -713,9 +885,12 @@ function httpsJson(url) {
               () => {
 
                 if (
-                  response.statusCode < 200 ||
-                  response.statusCode >= 300
+                  response.statusCode <
+                    200 ||
+                  response.statusCode >=
+                    300
                 ) {
+
                   return reject(
                     new Error(
                       `DEX HTTP ${response.statusCode}`
@@ -724,11 +899,15 @@ function httpsJson(url) {
                 }
 
                 try {
+
                   resolve(
-                    JSON.parse(body)
+                    JSON.parse(
+                      body
+                    )
                   );
 
                 } catch {
+
                   reject(
                     new Error(
                       "DEX invalid JSON"
@@ -760,23 +939,36 @@ function httpsJson(url) {
   );
 }
 
-async function fetchPairs(mint) {
+async function fetchPairs(
+  mint
+) {
 
   const url =
     "https://api.dexscreener.com/" +
     "token-pairs/v1/solana/" +
-    encodeURIComponent(mint);
+    encodeURIComponent(
+      mint
+    );
 
-  let lastError = null;
+  let lastError =
+    null;
 
-  for (let attempt = 1; attempt <= 5; attempt++) {
+  for (
+    let attempt = 1;
+    attempt <= 5;
+    attempt++
+  ) {
 
     try {
 
       const data =
-        await httpsJson(url);
+        await httpsJson(
+          url
+        );
 
-      return Array.isArray(data)
+      return Array.isArray(
+        data
+      )
         ? data
         : [];
 
@@ -791,24 +983,28 @@ async function fetchPairs(mint) {
         Math.min(
           10000,
           1000 *
-          Math.pow(
-            2,
-            attempt - 1
-          )
+            Math.pow(
+              2,
+              attempt - 1
+            )
         );
 
       log(
-        `⚠️ DEX retry ${attempt}/5 ${delay}ms | ${err.message}`
+        `⚠️ DEX retry ${attempt}/5 ${delay}ms ${err.message}`
       );
 
-      await sleep(delay);
+      await sleep(
+        delay
+      );
     }
   }
 
   throw lastError;
 }
 
-function bestPool(pairs) {
+function bestPool(
+  pairs
+) {
 
   return [...pairs]
     .filter(
@@ -819,10 +1015,12 @@ function bestPool(pairs) {
     .sort(
       (a, b) =>
         num(
-          b?.liquidity?.usd
+          b?.liquidity
+            ?.usd
         ) -
         num(
-          a?.liquidity?.usd
+          a?.liquidity
+            ?.usd
         )
     )[0] || null;
 }
@@ -831,10 +1029,14 @@ function bestPool(pairs) {
 // DEX RECHECK
 // ======================================================
 
-function scheduleDexRecheck(mint) {
+function scheduleDexRecheck(
+  mint
+) {
 
   if (
-    dexRecheck.has(mint)
+    dexRecheck.has(
+      mint
+    )
   ) {
     return;
   }
@@ -848,6 +1050,7 @@ function scheduleDexRecheck(mint) {
         );
 
         try {
+
           await dexScan(
             mint
           );
@@ -859,7 +1062,6 @@ function scheduleDexRecheck(mint) {
             err
           );
         }
-
       },
       30000
     );
@@ -910,7 +1112,9 @@ async function dexScan(mint) {
     if (!pair) {
 
       await FreshToken.updateOne(
-        { mint },
+        {
+          mint
+        },
         {
           $set: {
 
@@ -939,6 +1143,7 @@ async function dexScan(mint) {
       if (
         attempts < 5
       ) {
+
         scheduleDexRecheck(
           mint
         );
@@ -964,42 +1169,55 @@ async function dexScan(mint) {
 
     const buys =
       num(
-        pair?.txns?.m5?.buys
+        pair?.txns
+          ?.m5
+          ?.buys
       );
 
     const sells =
       num(
-        pair?.txns?.m5?.sells
+        pair?.txns
+          ?.m5
+          ?.sells
       );
 
     let dexScore = 0;
 
     if (
-      liquidity >= 10000
+      liquidity >=
+      10000
     ) {
+
       dexScore += 40;
 
     } else if (
-      liquidity >= 3000
+      liquidity >=
+      3000
     ) {
+
       dexScore += 25;
     }
 
     if (
-      volumeM5 >= 250
+      volumeM5 >=
+      250
     ) {
+
       dexScore += 20;
     }
 
     if (
       volumeH1 > 0
     ) {
+
       dexScore += 10;
     }
 
     if (
-      buys + sells >= 5
+      buys + sells >=
+      5
     ) {
+
       dexScore += 15;
     }
 
@@ -1007,6 +1225,7 @@ async function dexScan(mint) {
       buys > 0 &&
       sells > 0
     ) {
+
       dexScore += 15;
     }
 
@@ -1024,6 +1243,7 @@ async function dexScan(mint) {
       dexScore >= 60 &&
       sells > 0
     ) {
+
       dexDecision =
         "PASS";
     }
@@ -1035,10 +1255,12 @@ async function dexScan(mint) {
 
     const finalScore =
       Math.round(
+
         securityScore *
-          0.6 +
+          0.60 +
+
         dexScore *
-          0.4
+          0.40
       );
 
     let finalDecision =
@@ -1051,12 +1273,15 @@ async function dexScan(mint) {
         "PASS" &&
       finalScore >= 70
     ) {
+
       finalDecision =
         "CANDIDATE";
     }
 
     await FreshToken.updateOne(
-      { mint },
+      {
+        mint
+      },
       {
         $set: {
 
@@ -1091,21 +1316,15 @@ async function dexScan(mint) {
 
           dexScore,
           dexDecision,
+
           finalScore,
           finalDecision
         }
       }
     );
 
-    if (
-      finalDecision ===
-      "CANDIDATE"
-    ) {
-      state.candidates++;
-    }
-
     log(
-      `💧 DEX OK ${mint} | $${liquidity.toFixed(0)} | ${finalDecision}`
+      `💧 DEX OK ${mint} | $${liquidity.toFixed(0)} | FINAL ${finalScore} | ${finalDecision}`
     );
 
   } catch (err) {
@@ -1115,12 +1334,13 @@ async function dexScan(mint) {
       err
     );
 
-    // Network failure ≠ token rejection
-
     await FreshToken.updateOne(
-      { mint },
+      {
+        mint
+      },
       {
         $set: {
+
           dexChecked:
             false,
 
@@ -1147,10 +1367,12 @@ async function dexScan(mint) {
 }
 
 // ======================================================
-// HUNTER
+// TOKEN HUNTER
 // ======================================================
 
-function findMint(instructions) {
+function findMint(
+  instructions
+) {
 
   if (
     !Array.isArray(
@@ -1176,7 +1398,9 @@ function findMint(instructions) {
     ) {
 
       return (
-        ix?.parsed?.info?.mint ||
+        ix?.parsed
+          ?.info
+          ?.mint ||
         null
       );
     }
@@ -1297,6 +1521,7 @@ async function processLogs(
     if (!mint) return;
 
     state.detected++;
+
     state.lastMint =
       mint;
 
@@ -1366,8 +1591,7 @@ function startHunter() {
         processLogs(
           event,
           "SPL_TOKEN"
-        )
-        .catch(
+        ).catch(
           err =>
             errLog(
               "SPL Hunter",
@@ -1386,8 +1610,7 @@ function startHunter() {
         processLogs(
           event,
           "TOKEN_2022"
-        )
-        .catch(
+        ).catch(
           err =>
             errLog(
               "Token2022 Hunter",
@@ -1529,22 +1752,30 @@ async function startTelegram() {
     bot.start(
       ctx =>
         ctx.reply(
-          "🤖 LOMY V4.3\n\n" +
+
+          "🤖 LOMY V4.3.1\n\n" +
+
           "🔎 Hunter ON\n" +
-          "🛡 Security Retry ON\n" +
-          "💧 DEX Retry ON\n" +
-          "🚦 RPC Limiter ON\n" +
+
+          "🛡 Security ON\n" +
+
+          "💧 DEX ON\n" +
+
+          "🎯 Candidates ON\n" +
+
           "🧪 PAPER MODE\n" +
+
           "🔒 NO BUY / NO SELL"
         )
     );
 
+    // STATUS
     bot.command(
       "status",
       ctx =>
         ctx.reply(
 
-          `🤖 LOMY V4.3 STATUS\n\n` +
+          `🤖 LOMY V4.3.1 STATUS\n\n` +
 
           `🌐 Server: ${state.server}\n` +
 
@@ -1566,7 +1797,7 @@ async function startTelegram() {
 
           `🔁 RPC Retries: ${state.rpcRetries}\n` +
 
-          `🌐 DEX Network Errors: ${state.dexNetworkErrors}\n` +
+          `🌐 DEX Errors: ${state.dexNetworkErrors}\n` +
 
           `🔄 DEX Retries: ${state.dexRetries}\n\n` +
 
@@ -1576,6 +1807,7 @@ async function startTelegram() {
         )
     );
 
+    // BALANCE
     bot.command(
       "balance",
       async ctx => {
@@ -1585,9 +1817,10 @@ async function startTelegram() {
           const balance =
             await rpcCall(
               () =>
-                connection.getBalance(
-                  wallet.publicKey
-                )
+                connection
+                  .getBalance(
+                    wallet.publicKey
+                  )
             );
 
           await ctx.reply(
@@ -1603,6 +1836,7 @@ async function startTelegram() {
       }
     );
 
+    // NETWORK
     bot.command(
       "network",
       ctx =>
@@ -1624,6 +1858,7 @@ async function startTelegram() {
         )
     );
 
+    // STATS
     bot.command(
       "stats",
       async ctx => {
@@ -1668,7 +1903,7 @@ async function startTelegram() {
 
         await ctx.reply(
 
-          `📊 V4.3 STATS\n\n` +
+          `📊 V4.3.1 STATS\n\n` +
 
           `Total: ${total}\n` +
 
@@ -1686,6 +1921,151 @@ async function startTelegram() {
 
           `🧪 PAPER MODE`
         );
+      }
+    );
+
+    // ==================================================
+    // CANDIDATES - NEW FIX
+    // ==================================================
+
+    bot.command(
+      "candidates",
+      async ctx => {
+
+        try {
+
+          const tokens =
+            await FreshToken
+              .find({
+                finalDecision:
+                  "CANDIDATE"
+              })
+              .sort({
+                finalScore:
+                  -1,
+
+                liquidityUsd:
+                  -1,
+
+                detectedAt:
+                  -1
+              })
+              .limit(10)
+              .lean();
+
+          if (
+            !tokens.length
+          ) {
+
+            return ctx.reply(
+
+              "🎯 CANDIDATES\n\n" +
+
+              "لا توجد عملات مرشحة حالياً.\n\n" +
+
+              "🧪 PAPER MODE\n" +
+
+              "🔒 NO BUY / NO SELL"
+            );
+          }
+
+          let text =
+            `🎯 TOP CANDIDATES (${tokens.length})\n`;
+
+          for (
+            let i = 0;
+            i < tokens.length;
+            i++
+          ) {
+
+            const t =
+              tokens[i];
+
+            text +=
+              `\n━━━━━━━━━━━━━━\n` +
+
+              `${i + 1}) Mint:\n${t.mint}\n\n` +
+
+              `🛡 Security: ${num(t.securityScore)}/100\n` +
+
+              `💧 DEX Score: ${num(t.dexScore)}/100\n` +
+
+              `🎯 Final: ${num(t.finalScore)}/100\n\n` +
+
+              `💵 Liquidity: $${num(t.liquidityUsd).toFixed(0)}\n` +
+
+              `📊 Volume M5: $${num(t.volumeM5).toFixed(0)}\n` +
+
+              `🟢 Buys M5: ${num(t.buysM5)}\n` +
+
+              `🔴 Sells M5: ${num(t.sellsM5)}\n` +
+
+              `🏦 DEX: ${t.dexId || "Unknown"}\n`;
+          }
+
+          text +=
+            `\n━━━━━━━━━━━━━━\n` +
+
+            `🧪 PAPER MODE\n` +
+
+            `🔒 NO BUY / NO SELL`;
+
+          // حماية من حد طول رسالة Telegram
+          if (
+            text.length <=
+            3900
+          ) {
+
+            await ctx.reply(
+              text
+            );
+
+          } else {
+
+            const first =
+              tokens.slice(
+                0,
+                5
+              );
+
+            let shortText =
+              "🎯 TOP 5 CANDIDATES\n";
+
+            first.forEach(
+              (t, i) => {
+
+                shortText +=
+                  `\n${i + 1}) ${t.mint}\n` +
+
+                  `Final: ${num(t.finalScore)}/100\n` +
+
+                  `Security: ${num(t.securityScore)}/100\n` +
+
+                  `DEX: ${num(t.dexScore)}/100\n` +
+
+                  `Liquidity: $${num(t.liquidityUsd).toFixed(0)}\n`;
+              }
+            );
+
+            shortText +=
+              "\n🔒 PAPER ONLY";
+
+            await ctx.reply(
+              shortText
+            );
+          }
+
+        } catch (err) {
+
+          errLog(
+            "Candidates",
+            err
+          );
+
+          await ctx.reply(
+            "❌ تعذر قراءة Candidates"
+          );
+        }
       }
     );
 
@@ -1737,7 +2117,9 @@ async function startTelegram() {
 // SHUTDOWN
 // ======================================================
 
-async function shutdown(signal) {
+async function shutdown(
+  signal
+) {
 
   log(
     `⚠️ ${signal} shutdown`
@@ -1781,6 +2163,7 @@ async function shutdown(signal) {
   try {
 
     if (bot) {
+
       bot.stop(
         signal
       );
@@ -1874,10 +2257,10 @@ async function main() {
     "============================"
   );
   console.log(
-    "🚀 LOMY SOLANA HUNTER V4.3"
+    "🚀 LOMY SOLANA HUNTER V4.3.1"
   );
   console.log(
-    "🌐 NETWORK RECOVERY ENGINE"
+    "🎯 CANDIDATE VIEW ENABLED"
   );
   console.log(
     "🧪 PAPER MODE"
@@ -1911,13 +2294,13 @@ async function main() {
     .catch(
       err =>
         errLog(
-          "Recovery background",
+          "Recovery",
           err
         )
     );
 
   log(
-    "✅ LOMY V4.3 STARTED"
+    "✅ LOMY V4.3.1 STARTED"
   );
 
   log(
