@@ -4,7 +4,6 @@ const express = require("express");
 const mongoose = require("mongoose");
 const { Telegraf } = require("telegraf");
 const https = require("https");
-
 const {
   Connection,
   Keypair,
@@ -20,92 +19,91 @@ const app = express();
 app.use(express.json());
 
 // ======================================================
-// ENV
+// CONFIG
 // ======================================================
 
 const PORT = Number(process.env.PORT) || 10000;
-const RPC_URL = process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
+const RPC_URL =
+  process.env.RPC_URL ||
+  "https://api.mainnet-beta.solana.com";
+
 const MONGODB_URI = process.env.MONGODB_URI;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const BOT_PRIVATE_KEY = process.env.BOT_PRIVATE_KEY;
 
-// ======================================================
-// SAFETY
-// ======================================================
-
+const VERSION = "V4.6.2";
 const MODE = "PAPER";
 const LIVE_TRADING = false;
 
-// ======================================================
-// SMART SCORE
-// ======================================================
-
-const SCORE_WEIGHTS = {
+const SCORE = {
   security: 0.45,
   dex: 0.35,
-  whale: 0.20
+  whale: 0.20,
+  approval: 75
 };
-
-const SMART_APPROVAL_SCORE = 75;
-
-// ======================================================
-// PAPER TRADING V1
-// ======================================================
 
 const PAPER = {
   enabled: true,
-  testRun: "V4.6.1",
-  accountKey: "v461-main",
+  testRun: "V4.6.2",
+  accountKey: "v462-main",
+
   startingBalanceUsd: 20,
-  maxOpenTrades: 4,
   positionSizeUsd: 5,
+  maxOpenTrades: 4,
+
   hardStopPct: 12,
   takeProfitPct: 100,
+
   trailingActivationPct: 15,
   trailingDistancePct: 8,
+
   assumedSlippagePct: 1.5,
   assumedFeePct: 0.5,
-  monitorMs: 20000,
+
   maxTradeAgeMinutes: 180,
-  minLiquidityUsd: 3000,
 
-  // Continuous Opportunity Engine
-  opportunityMs: 60000,
-  opportunityBatch: 15,
-  cooldownMinutes: 90,
-  maxEntriesPerMint24h: 2,
-
-  // Entry quality filter
+  minLiquidityUsd: 5000,
   minVolumeM5: 300,
   minBuysM5: 5,
   minBuySellRatio: 1.05,
+
   minPriceChangeM5: -3,
-  maxPriceChangeM5: 25
+  maxPriceChangeM5: 25,
+
+  cooldownMinutes: 90,
+  maxEntriesPerMint24h: 2,
+
+  monitorMs: 30000,
+  opportunityMs: 60000
 };
 
-// ======================================================
-// DUAL MARKET SCANNER V1
-// ======================================================
-
-const MARKET_SCANNER = {
+const DISCOVERY = {
   enabled: true,
-  scanMs: 10 * 60 * 1000,
-  externalRawLimit: 18,
-  maxNewEstablishedPerCycle: 3,
-  maxDbRescansPerCycle: 4,
-  oldAgeMinutes: 60,
-  minLiquidityUsd: 10000,
-  minVolumeH1Usd: 5000,
-  precheckDelayMs: 350
+
+  // بدل WebSocket firehose
+  scanMs: 120000,
+
+  rawLimit: 40,
+  processPerCycle: 8,
+
+  minLiquidityUsd: 5000,
+  minVolumeH1Usd: 2500,
+
+  // العملة تعتبر "Fresh" لو عمر الـPair أقل من 6 ساعات
+  freshAgeHours: 6
 };
 
-// Fresh Hunter throttling protects RPC.
-// Established scanner can recover good opportunities later.
-const HUNTER_MAX_TX_PER_MINUTE = 25;
+// ======================================================
+// SOLANA / TELEGRAM
+// ======================================================
 
-// ======================================================
-// TELEGRAM IPV4
-// ======================================================
+const connection = new Connection(
+  RPC_URL,
+  {
+    commitment: "confirmed",
+    confirmTransactionInitialTimeout: 30000
+  }
+);
 
 const telegramAgent = new https.Agent({
   keepAlive: true,
@@ -114,49 +112,27 @@ const telegramAgent = new https.Agent({
 });
 
 // ======================================================
-// SOLANA
-// ======================================================
-
-const connection = new Connection(RPC_URL, {
-  commitment: "confirmed",
-  confirmTransactionInitialTimeout: 30000
-});
-
-const TOKEN_PROGRAM_ID = new PublicKey(
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-);
-
-const TOKEN_2022_PROGRAM_ID = new PublicKey(
-  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-);
-
-// ======================================================
-// GLOBAL
+// GLOBAL STATE
 // ======================================================
 
 let wallet = null;
 let bot = null;
 let server = null;
-let tokenSub = null;
-let token2022Sub = null;
-let slotSub = null;
-let paperMonitorTimer = null;
-let opportunityTimer = null;
-let marketScannerTimer = null;
 
-let hunterRestarting = false;
 let shuttingDown = false;
-let lastWsHeartbeat = Date.now();
+let paperTimer = null;
+let discoveryTimer = null;
+let opportunityTimer = null;
 
-const processing = new Set();
-const dexRecheck = new Map();
-const whaleRecheck = new Map();
-const paperOpening = new Set();
-
-let hunterMinuteWindow = Date.now();
-let hunterMinuteCount = 0;
+let discoveryBusy = false;
 let opportunityBusy = false;
-let marketScannerBusy = false;
+let paperBusy = false;
+
+const paperOpening = new Set();
+const whaleQueued = new Set();
+const whaleQueue = [];
+
+let whaleWorkerBusy = false;
 
 const state = {
   server: "starting",
@@ -164,44 +140,37 @@ const state = {
   wallet: "not_loaded",
   solana: "disconnected",
   telegram: "stopped",
-  hunter: "stopped",
-  websocket: "starting",
+
+  discovery: "idle",
   security: "idle",
   dex: "idle",
   whales: "idle",
-  paper: "starting",
+  paper: "idle",
 
-  detected: 0,
+  discovered: 0,
+  fresh: 0,
+  established: 0,
+
   securityScanned: 0,
   dexScanned: 0,
   whaleScanned: 0,
-
-  rpc429: 0,
-  rpcRetries: 0,
-  rpcDropped: 0,
-
-  dexRetries: 0,
-  dexNetworkErrors: 0,
-
-  whaleRetries: 0,
-  telegramRetries: 0,
-
-  migrated: 0,
 
   paperOpened: 0,
   paperClosed: 0,
   paperEntryAttempts: 0,
   paperEntrySkips: 0,
-  paperLastSkip: null,
+  lastSkip: null,
 
+  rpc429: 0,
+  rpcRetries: 0,
+  rpcDropped: 0,
+
+  dexErrors: 0,
+  errors: 0,
+
+  discoveryCycles: 0,
   opportunityCycles: 0,
 
-  establishedDiscovered: 0,
-  establishedScanned: 0,
-
-  hunterThrottled: 0,
-
-  errors: 0,
   lastMint: null
 };
 
@@ -209,10 +178,10 @@ const state = {
 // HELPERS
 // ======================================================
 
-function log(...x) {
+function log(...args) {
   console.log(
     new Date().toISOString(),
-    ...x
+    ...args
   );
 }
 
@@ -230,146 +199,60 @@ function errLog(name, err) {
 function sleep(ms) {
   return new Promise(
     resolve =>
-      setTimeout(
-        resolve,
-        ms
-      )
+      setTimeout(resolve, ms)
   );
 }
 
 function num(v) {
-  const n =
-    Number(v);
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
 
-  return Number.isFinite(n)
-    ? n
-    : 0;
+function pctChange(current, base) {
+  if (!base || base <= 0) return 0;
+
+  return (
+    ((current - base) / base) *
+    100
+  );
 }
 
 function is429(err) {
-  const text =
+  const s =
     String(
-      err?.message ||
-      err
+      err?.message || err
     ).toLowerCase();
 
   return (
-    text.includes("429") ||
-    text.includes("rate limit") ||
-    text.includes("too many requests")
+    s.includes("429") ||
+    s.includes("rate limit") ||
+    s.includes("too many requests")
   );
 }
 
-function jitter(ms) {
-  return (
-    ms +
-    Math.floor(
-      Math.random() *
-      300
-    )
-  );
-}
+function pairAgeHours(pair) {
+  const created =
+    num(pair?.pairCreatedAt);
 
-function pctChange(
-  current,
-  base
-) {
-  if (
-    !base ||
-    base <= 0
-  ) {
-    return 0;
-  }
+  if (!created) return 999999;
 
   return (
-    (
-      current -
-      base
-    ) /
-    base
-  ) * 100;
+    Date.now() - created
+  ) / 3600000;
 }
 
 // ======================================================
-// SMART FINAL SCORE
-// ======================================================
-
-function calculateSmartScore(
-  securityScore,
-  dexScore,
-  whaleScore
-) {
-  const score =
-    num(
-      securityScore
-    ) *
-    SCORE_WEIGHTS.security +
-
-    num(
-      dexScore
-    ) *
-    SCORE_WEIGHTS.dex +
-
-    num(
-      whaleScore
-    ) *
-    SCORE_WEIGHTS.whale;
-
-  return Math.max(
-    0,
-    Math.min(
-      100,
-      Math.round(
-        score
-      )
-    )
-  );
-}
-
-function smartDecision(
-  smartScore,
-  whaleDecision
-) {
-  if (
-    whaleDecision ===
-    "DANGER"
-  ) {
-    return "BLOCKED_WHALE";
-  }
-
-  if (
-    whaleDecision ===
-    "CAUTION"
-  ) {
-    return "WATCH_WHALE";
-  }
-
-  if (
-    whaleDecision ===
-      "SAFE" &&
-    smartScore >=
-      SMART_APPROVAL_SCORE
-  ) {
-    return "APPROVED_CANDIDATE";
-  }
-
-  return "WATCH_SCORE";
-}
-
-// ======================================================
-// RPC SMART QUEUE
+// NETWORK-SAFE RPC
 // ======================================================
 
 const rpcQueue = [];
 
 let rpcBusy = false;
-let rpcDelay = 700;
+let rpcDelay = 900;
 
-const RPC_MIN_DELAY = 650;
-const RPC_MAX_DELAY = 8000;
-
-const RPC_SOFT_LIMIT = 18;
-const RPC_HARD_LIMIT = 35;
+const RPC_MIN_DELAY = 900;
+const RPC_MAX_DELAY = 15000;
+const RPC_QUEUE_LIMIT = 20;
 
 function rpcCall(
   fn,
@@ -377,49 +260,39 @@ function rpcCall(
   label = "RPC"
 ) {
   return new Promise(
-    (
-      resolve,
-      reject
-    ) => {
+    (resolve, reject) => {
 
       if (
-        priority === 2 &&
         rpcQueue.length >=
-          RPC_SOFT_LIMIT
+        RPC_QUEUE_LIMIT
       ) {
         state.rpcDropped++;
 
         return reject(
           new Error(
-            "RPC_QUEUE_BUSY"
+            "RPC_QUEUE_FULL"
           )
         );
       }
 
       rpcQueue.push({
         fn,
-        resolve,
-        reject,
         priority,
         label,
-        createdAt:
-          Date.now()
+        resolve,
+        reject
       });
 
       rpcQueue.sort(
-        (
-          a,
-          b
-        ) =>
-          a.priority -
-          b.priority
+        (a, b) =>
+          a.priority - b.priority
       );
 
       runRpcQueue()
         .catch(
           err =>
             errLog(
-              "RPC Worker",
+              "RPC worker",
               err
             )
         );
@@ -428,29 +301,23 @@ function rpcCall(
 }
 
 async function runRpcQueue() {
-  if (
-    rpcBusy
-  ) {
-    return;
-  }
+  if (rpcBusy) return;
 
   rpcBusy = true;
 
   try {
 
-    while (
-      rpcQueue.length
-    ) {
+    while (rpcQueue.length) {
 
       const job =
         rpcQueue.shift();
 
-      let done = false;
       let lastError = null;
+      let success = false;
 
       for (
         let attempt = 1;
-        attempt <= 5;
+        attempt <= 4;
         attempt++
       ) {
 
@@ -462,27 +329,19 @@ async function runRpcQueue() {
           rpcDelay =
             Math.max(
               RPC_MIN_DELAY,
-              rpcDelay - 75
+              rpcDelay - 100
             );
 
-          job.resolve(
-            result
-          );
+          job.resolve(result);
 
-          done = true;
-
+          success = true;
           break;
 
         } catch (err) {
 
-          lastError =
-            err;
+          lastError = err;
 
-          if (
-            !is429(
-              err
-            )
-          ) {
+          if (!is429(err)) {
             break;
           }
 
@@ -493,59 +352,132 @@ async function runRpcQueue() {
             Math.min(
               RPC_MAX_DELAY,
               Math.max(
-                1400,
-                rpcDelay *
-                  1.7
+                2500,
+                rpcDelay * 2
               )
             );
 
           log(
-            `⚠️ RPC 429 | ${job.label} | attempt ${attempt}/5 | delay=${Math.round(rpcDelay)}ms`
+            `⚠️ RPC 429 ${job.label} attempt ${attempt}/4 wait ${Math.round(rpcDelay)}ms`
           );
 
           await sleep(
-            jitter(
-              rpcDelay
+            rpcDelay +
+            Math.floor(
+              Math.random() * 500
             )
           );
         }
       }
 
-      if (
-        !done
-      ) {
-        job.reject(
-          lastError
-        );
-      }
-
-      if (
-        rpcQueue.length >=
-        RPC_HARD_LIMIT
-      ) {
-        rpcDelay =
-          Math.max(
-            rpcDelay,
-            2500
-          );
+      if (!success) {
+        job.reject(lastError);
       }
 
       await sleep(
-        jitter(
-          rpcDelay
+        rpcDelay +
+        Math.floor(
+          Math.random() * 250
         )
       );
     }
 
   } finally {
 
-    rpcBusy =
-      false;
+    rpcBusy = false;
   }
 }
 
 // ======================================================
-// DATABASE MODELS
+// HTTPS JSON
+// ======================================================
+
+function httpsJson(url) {
+  return new Promise(
+    (resolve, reject) => {
+
+      const req =
+        https.get(
+          url,
+          {
+            family: 4,
+            timeout: 12000,
+
+            headers: {
+              Accept: "application/json",
+              "User-Agent":
+                "LOMY-V4.6.2",
+              Connection: "close"
+            }
+          },
+
+          res => {
+
+            let body = "";
+
+            res.setEncoding("utf8");
+
+            res.on(
+              "data",
+              chunk =>
+                body += chunk
+            );
+
+            res.on(
+              "end",
+              () => {
+
+                if (
+                  res.statusCode < 200 ||
+                  res.statusCode >= 300
+                ) {
+
+                  return reject(
+                    new Error(
+                      `HTTP ${res.statusCode}`
+                    )
+                  );
+                }
+
+                try {
+
+                  resolve(
+                    JSON.parse(body)
+                  );
+
+                } catch {
+
+                  reject(
+                    new Error(
+                      "INVALID_JSON"
+                    )
+                  );
+                }
+              }
+            );
+          }
+        );
+
+      req.on(
+        "timeout",
+        () =>
+          req.destroy(
+            new Error(
+              "HTTP_TIMEOUT"
+            )
+          )
+      );
+
+      req.on(
+        "error",
+        reject
+      );
+    }
+  );
+}
+
+// ======================================================
+// DATABASE
 // ======================================================
 
 const tokenSchema =
@@ -557,138 +489,69 @@ const tokenSchema =
         index: true
       },
 
-      signature:
-        String,
-
-      program:
-        String,
-
       origin: {
         type: String,
-        default: "FRESH"
+        default: "UNKNOWN"
       },
 
-      discoveredBy:
-        String,
-
-      establishedDiscoveredAt:
-        Date,
-
+      discoveredBy: String,
       detectedAt: {
         type: Date,
-        default:
-          Date.now
+        default: Date.now
       },
 
-      // SECURITY
+      pairCreatedAt: Number,
 
       securityChecked: {
         type: Boolean,
         default: false
       },
 
-      securityScore:
-        Number,
+      securityScore: Number,
 
       securityDecision: {
         type: String,
-        default:
-          "PENDING"
+        default: "PENDING"
       },
 
-      securityAttempts: {
-        type: Number,
-        default: 0
-      },
-
-      mintAuthorityRevoked:
-        Boolean,
-
-      freezeAuthorityRevoked:
-        Boolean,
-
-      decimals:
-        Number,
-
-      supply:
-        String,
-
-      token2022:
-        Boolean,
-
-      // DEX
+      mintAuthorityRevoked: Boolean,
+      freezeAuthorityRevoked: Boolean,
+      decimals: Number,
+      supply: String,
+      token2022: Boolean,
 
       dexChecked: {
         type: Boolean,
         default: false
       },
 
-      dexListed: {
-        type: Boolean,
-        default: false
-      },
+      dexId: String,
+      pairAddress: String,
 
-      dexAttempts: {
-        type: Number,
-        default: 0
-      },
+      priceUsd: Number,
+      liquidityUsd: Number,
 
-      dexId:
-        String,
+      volumeM5: Number,
+      volumeH1: Number,
 
-      pairAddress:
-        String,
+      buysM5: Number,
+      sellsM5: Number,
 
-      priceUsd:
-        Number,
+      priceChangeM5: Number,
+      priceChangeH1: Number,
 
-      liquidityUsd:
-        Number,
-
-      volumeM5:
-        Number,
-
-      volumeH1:
-        Number,
-
-      buysM5:
-        Number,
-
-      sellsM5:
-        Number,
-
-      dexScore:
-        Number,
+      dexScore: Number,
 
       dexDecision: {
         type: String,
-        default:
-          "PENDING"
+        default: "PENDING"
       },
 
-      // SMART
-
-      preWhaleScore:
-        Number,
-
-      smartScore:
-        Number,
-
-      finalScore:
-        Number,
-
-      finalDecision: {
-        type: String,
-        default:
-          "PENDING"
-      },
-
-      // WHALE
+      preWhaleScore: Number,
 
       whaleStatus: {
         type: String,
-        default:
-          "PENDING"
+        default: "PENDING"
       },
 
       whaleChecked: {
@@ -696,59 +559,30 @@ const tokenSchema =
         default: false
       },
 
-      whaleCheckedAt:
-        Date,
-
-      whaleAttempts: {
-        type: Number,
-        default: 0
-      },
-
-      whaleScore:
-        Number,
+      whaleScore: Number,
 
       whaleDecision: {
         type: String,
-        default:
-          "PENDING"
+        default: "PENDING"
       },
 
-      largestHolderPct:
-        Number,
+      largestHolderPct: Number,
+      top5Pct: Number,
+      top10Pct: Number,
 
-      top5Pct:
-        Number,
-
-      top10Pct:
-        Number,
-
-      previousTop10Pct:
-        Number,
-
-      top10ChangePct:
-        Number,
-
-      whaleTrend: {
-        type: String,
-        default:
-          "UNKNOWN"
-      },
-
-      whaleUniqueOwners:
-        Number,
-
-      whaleHolders: {
-        type: Array,
-        default: []
-      },
+      whaleUniqueOwners: Number,
 
       whaleFlags: {
         type: [String],
         default: []
       },
 
-      whaleLastError:
-        String,
+      smartScore: Number,
+
+      finalDecision: {
+        type: String,
+        default: "PENDING"
+      },
 
       paperOnly: {
         type: Boolean,
@@ -756,8 +590,7 @@ const tokenSchema =
       }
     },
     {
-      timestamps:
-        true
+      timestamps: true
     }
   );
 
@@ -774,21 +607,8 @@ const paperTradeSchema =
         index: true
       },
 
-      source: {
-        type: String,
-        default:
-          "UNKNOWN",
-        index: true
-      },
-
-      entryTrigger:
-        String,
-
-      pairAddress:
-        String,
-
-      dexId:
-        String,
+      source: String,
+      entryTrigger: String,
 
       status: {
         type: String,
@@ -796,127 +616,67 @@ const paperTradeSchema =
           "OPEN",
           "CLOSED"
         ],
-        default:
-          "OPEN",
+        default: "OPEN",
         index: true
       },
 
       openedAt: {
         type: Date,
-        default:
-          Date.now
+        default: Date.now
       },
 
-      closedAt:
-        Date,
+      closedAt: Date,
+      exitReason: String,
 
-      exitReason:
-        String,
+      marketEntryPrice: Number,
+      entryPrice: Number,
+      currentPrice: Number,
 
-      marketEntryPrice:
-        Number,
+      highestPrice: Number,
+      lowestPrice: Number,
 
-      entryPrice:
-        Number,
+      exitMarketPrice: Number,
+      exitPrice: Number,
 
-      currentPrice:
-        Number,
+      allocatedUsd: Number,
+      quantity: Number,
 
-      highestPrice:
-        Number,
+      entryFeeUsd: Number,
+      exitFeeUsd: Number,
 
-      lowestPrice:
-        Number,
-
-      exitMarketPrice:
-        Number,
-
-      exitPrice:
-        Number,
-
-      allocatedUsd:
-        Number,
-
-      quantity:
-        Number,
-
-      entryFeeUsd:
-        Number,
-
-      exitFeeUsd:
-        Number,
-
-      hardStopPrice:
-        Number,
-
-      takeProfitPrice:
-        Number,
+      hardStopPrice: Number,
+      takeProfitPrice: Number,
 
       trailingActive: {
         type: Boolean,
         default: false
       },
 
-      trailingStopPrice:
-        Number,
+      trailingStopPrice: Number,
 
-      grossPnlUsd:
-        Number,
+      netPnlUsd: Number,
+      pnlPct: Number,
 
-      netPnlUsd:
-        Number,
+      maxRunupPct: Number,
+      maxDrawdownPct: Number,
 
-      pnlPct:
-        Number,
+      securityScore: Number,
+      dexScore: Number,
+      whaleScore: Number,
+      smartScore: Number,
 
-      maxRunupPct:
-        Number,
+      liquidityAtEntry: Number,
+      volumeM5AtEntry: Number,
+      buysM5AtEntry: Number,
+      sellsM5AtEntry: Number,
 
-      maxDrawdownPct:
-        Number,
+      buySellRatioAtEntry: Number,
+      priceChangeM5AtEntry: Number,
 
-      securityScore:
-        Number,
-
-      dexScore:
-        Number,
-
-      whaleScore:
-        Number,
-
-      smartScore:
-        Number,
-
-      whaleDecision:
-        String,
-
-      liquidityAtEntry:
-        Number,
-
-      volumeM5AtEntry:
-        Number,
-
-      buysM5AtEntry:
-        Number,
-
-      sellsM5AtEntry:
-        Number,
-
-      buySellRatioAtEntry:
-        Number,
-
-      priceChangeM5AtEntry:
-        Number,
-
-      priceChangeH1AtEntry:
-        Number,
-
-      lastPriceCheckAt:
-        Date
+      lastPriceCheckAt: Date
     },
     {
-      timestamps:
-        true
+      timestamps: true
     }
   );
 
@@ -925,16 +685,11 @@ const paperAccountSchema =
     {
       key: {
         type: String,
-        unique: true,
-        default:
-          "main"
+        unique: true
       },
 
-      startingBalanceUsd:
-        Number,
-
-      cashBalanceUsd:
-        Number,
+      startingBalanceUsd: Number,
+      cashBalanceUsd: Number,
 
       realizedPnlUsd: {
         type: Number,
@@ -972,8 +727,7 @@ const paperAccountSchema =
       }
     },
     {
-      timestamps:
-        true
+      timestamps: true
     }
   );
 
@@ -999,42 +753,28 @@ const PaperAccount =
   );
 
 // ======================================================
-// SERVER
+// SERVER / DB
 // ======================================================
 
 app.get(
   "/",
-  (
-    req,
-    res
-  ) => {
+  (req, res) => {
 
     res.send(
-      "✅ LOMY V4.6.1 DUAL MARKET PAPER ENGINE | LIVE OFF"
+      "✅ LOMY V4.6.2 NETWORK SAFE | PAPER ONLY"
     );
   }
 );
 
 app.get(
   "/health",
-  (
-    req,
-    res
-  ) => {
+  (req, res) => {
 
     res.json({
       ...state,
 
-      rpcQueue:
-        rpcQueue.length,
-
-      rpcDelay:
-        Math.round(
-          rpcDelay
-        ),
-
-      whaleQueue:
-        whaleQueue.length,
+      version:
+        VERSION,
 
       mode:
         MODE,
@@ -1042,8 +782,13 @@ app.get(
       liveTrading:
         LIVE_TRADING,
 
-      paperEnabled:
-        PAPER.enabled,
+      rpcQueue:
+        rpcQueue.length,
+
+      rpcDelay,
+
+      whaleQueue:
+        whaleQueue.length,
 
       uptime:
         Math.floor(
@@ -1053,12 +798,10 @@ app.get(
   }
 );
 
-function startServer() {
+async function startServer() {
+
   return new Promise(
-    (
-      resolve,
-      reject
-    ) => {
+    (resolve, reject) => {
 
       server =
         app.listen(
@@ -1070,7 +813,7 @@ function startServer() {
               "online";
 
             log(
-              `✅ Render Server Online : ${PORT}`
+              `✅ Server online ${PORT}`
             );
 
             resolve();
@@ -1085,18 +828,11 @@ function startServer() {
   );
 }
 
-// ======================================================
-// MONGODB
-// ======================================================
-
 async function connectDatabase() {
 
   try {
 
-    if (
-      !MONGODB_URI
-    ) {
-
+    if (!MONGODB_URI) {
       throw new Error(
         "MONGODB_URI missing"
       );
@@ -1132,24 +868,6 @@ async function connectDatabase() {
   }
 }
 
-mongoose.connection.on(
-  "disconnected",
-  () => {
-
-    state.database =
-      "disconnected";
-  }
-);
-
-mongoose.connection.on(
-  "reconnected",
-  () => {
-
-    state.database =
-      "connected";
-  }
-);
-
 // ======================================================
 // WALLET
 // ======================================================
@@ -1158,10 +876,7 @@ async function loadWallet() {
 
   try {
 
-    if (
-      !BOT_PRIVATE_KEY
-    ) {
-
+    if (!BOT_PRIVATE_KEY) {
       throw new Error(
         "BOT_PRIVATE_KEY missing"
       );
@@ -1171,12 +886,8 @@ async function loadWallet() {
       BOT_PRIVATE_KEY.trim();
 
     if (
-      key.includes(
-        " "
-      ) &&
-      bip39.validateMnemonic(
-        key
-      )
+      key.includes(" ") &&
+      bip39.validateMnemonic(key)
     ) {
 
       const seed =
@@ -1187,9 +898,7 @@ async function loadWallet() {
       const derived =
         derivePath(
           "m/44'/501'/0'/0'",
-          seed.toString(
-            "hex"
-          )
+          seed.toString("hex")
         ).key;
 
       wallet =
@@ -1198,17 +907,13 @@ async function loadWallet() {
         );
 
     } else if (
-      key.startsWith(
-        "["
-      )
+      key.startsWith("[")
     ) {
 
       wallet =
         Keypair.fromSecretKey(
           Uint8Array.from(
-            JSON.parse(
-              key
-            )
+            JSON.parse(key)
           )
         );
 
@@ -1216,9 +921,7 @@ async function loadWallet() {
 
       wallet =
         Keypair.fromSecretKey(
-          bs58.decode(
-            key
-          )
+          bs58.decode(key)
         );
     }
 
@@ -1227,8 +930,7 @@ async function loadWallet() {
 
     log(
       "✅ Wallet",
-      wallet.publicKey
-        .toString()
+      wallet.publicKey.toString()
     );
 
   } catch (err) {
@@ -1243,27 +945,18 @@ async function loadWallet() {
   }
 }
 
-// ======================================================
-// SOLANA TEST
-// ======================================================
-
 async function testSolana() {
 
-  if (
-    !wallet
-  ) {
-    return;
-  }
+  if (!wallet) return;
 
   try {
 
     const balance =
       await rpcCall(
         () =>
-          connection
-            .getBalance(
-              wallet.publicKey
-            ),
+          connection.getBalance(
+            wallet.publicKey
+          ),
         0,
         "BALANCE"
       );
@@ -1272,13 +965,11 @@ async function testSolana() {
       "connected";
 
     log(
-      "✅ Solana connected",
+      "✅ Solana",
       (
         balance /
         LAMPORTS_PER_SOL
-      ).toFixed(
-        6
-      ),
+      ).toFixed(6),
       "SOL"
     );
 
@@ -1295,206 +986,211 @@ async function testSolana() {
 }
 
 // ======================================================
-// V4.5.1 MIGRATION
+// DEX
 // ======================================================
 
-async function migrateOldSmartScores() {
+async function fetchPairs(mint) {
 
-  if (
-    mongoose.connection
-      .readyState !==
-    1
-  ) {
-    return;
-  }
+  const url =
+    "https://api.dexscreener.com/token-pairs/v1/solana/" +
+    encodeURIComponent(mint);
 
   try {
 
-    const oldTokens =
-      await FreshToken
-        .find({
-          whaleChecked:
-            true,
+    const data =
+      await httpsJson(url);
 
-          whaleStatus:
-            "DONE"
-        })
-        .select(
-          "_id mint securityScore dexScore whaleScore whaleDecision"
-        )
-        .lean();
-
-    log(
-      `🧠 Migration found ${oldTokens.length} whale-completed tokens`
-    );
-
-    let migrated =
-      0;
-
-    for (
-      const token
-      of oldTokens
-    ) {
-
-      const smartScore =
-        calculateSmartScore(
-          token.securityScore,
-          token.dexScore,
-          token.whaleScore
-        );
-
-      const finalDecision =
-        smartDecision(
-          smartScore,
-          token.whaleDecision
-        );
-
-      await FreshToken
-        .updateOne(
-          {
-            _id:
-              token._id
-          },
-          {
-            $set: {
-              smartScore,
-              finalScore:
-                smartScore,
-              finalDecision
-            }
-          }
-        );
-
-      migrated++;
-    }
-
-    state.migrated =
-      migrated;
-
-    log(
-      `✅ MIGRATION COMPLETE | Total ${migrated}`
-    );
+    return Array.isArray(data)
+      ? data
+      : [];
 
   } catch (err) {
 
-    errLog(
-      "Smart Score Migration",
-      err
-    );
+    state.dexErrors++;
+
+    return [];
   }
 }
 
+function bestPool(pairs) {
+
+  return [...pairs]
+    .filter(
+      p =>
+        p?.chainId ===
+        "solana"
+    )
+    .sort(
+      (a, b) =>
+        num(
+          b?.liquidity?.usd
+        ) -
+        num(
+          a?.liquidity?.usd
+        )
+    )[0] || null;
+}
+
+function calculateDexScore(pair) {
+
+  const liquidity =
+    num(
+      pair?.liquidity?.usd
+    );
+
+  const volumeM5 =
+    num(
+      pair?.volume?.m5
+    );
+
+  const volumeH1 =
+    num(
+      pair?.volume?.h1
+    );
+
+  const buys =
+    num(
+      pair?.txns?.m5?.buys
+    );
+
+  const sells =
+    num(
+      pair?.txns?.m5?.sells
+    );
+
+  let score = 0;
+
+  if (
+    liquidity >= 50000
+  ) score += 40;
+  else if (
+    liquidity >= 10000
+  ) score += 35;
+  else if (
+    liquidity >= 5000
+  ) score += 25;
+
+  if (
+    volumeM5 >= 1000
+  ) score += 20;
+  else if (
+    volumeM5 >= 300
+  ) score += 15;
+
+  if (
+    volumeH1 >= 5000
+  ) score += 10;
+
+  if (
+    buys + sells >= 10
+  ) score += 15;
+
+  if (
+    buys > sells &&
+    sells > 0
+  ) score += 15;
+
+  return Math.min(
+    100,
+    score
+  );
+}
+
 // ======================================================
-// SECURITY ENGINE
+// SMART SCORE
 // ======================================================
 
-async function securityScan(
-  mint
+function calculateSmartScore(
+  security,
+  dex,
+  whale
 ) {
+
+  return Math.round(
+    num(security) *
+      SCORE.security +
+    num(dex) *
+      SCORE.dex +
+    num(whale) *
+      SCORE.whale
+  );
+}
+
+function smartDecision(
+  score,
+  whaleDecision
+) {
+
+  if (
+    whaleDecision ===
+    "DANGER"
+  ) {
+    return "BLOCKED_WHALE";
+  }
+
+  if (
+    whaleDecision ===
+    "CAUTION"
+  ) {
+    return "WATCH_WHALE";
+  }
+
+  if (
+    whaleDecision ===
+      "SAFE" &&
+    score >=
+      SCORE.approval
+  ) {
+
+    return "APPROVED_CANDIDATE";
+  }
+
+  return "WATCH_SCORE";
+}
+
+// ======================================================
+// SECURITY
+// ======================================================
+
+async function securityScan(mint) {
 
   state.security =
     "scanning";
 
   try {
 
-    const old =
-      await FreshToken
-        .findOne({
-          mint
-        })
-        .lean();
-
-    const attempts =
-      num(
-        old?.securityAttempts
-      ) + 1;
-
-    let account =
-      null;
-
-    for (
-      let i = 1;
-      i <= 4;
-      i++
-    ) {
-
-      account =
-        await rpcCall(
-          () =>
-            connection
-              .getParsedAccountInfo(
-                new PublicKey(
-                  mint
-                ),
-                "confirmed"
-              ),
-          1,
-          "SECURITY"
-        )
-        .catch(
-          () => null
-        );
-
-      if (
-        account?.value
-      ) {
-        break;
-      }
-
-      await sleep(
-        i *
-        1000
+    const account =
+      await rpcCall(
+        () =>
+          connection
+            .getParsedAccountInfo(
+              new PublicKey(mint),
+              "confirmed"
+            ),
+        1,
+        "SECURITY"
       );
-    }
 
     if (
       !account?.value
     ) {
-
-      await FreshToken
-        .updateOne(
-          {
-            mint
-          },
-          {
-            $set: {
-
-              securityAttempts:
-                attempts,
-
-              securityDecision:
-                "RETRY_LATER"
-            }
-          }
-        );
-
-      return;
+      return false;
     }
-
-    const owner =
-      account.value
-        .owner
-        .toString();
 
     const parsed =
       account.value
-        .data
-        ?.parsed;
+        .data?.parsed;
 
     if (
       !parsed ||
       parsed.type !==
         "mint"
     ) {
-
-      throw new Error(
-        "Invalid mint"
-      );
+      return false;
     }
 
     const info =
-      parsed.info ||
-      {};
+      parsed.info || {};
 
     const mintRevoked =
       info.mintAuthority ==
@@ -1503,11 +1199,6 @@ async function securityScan(
     const freezeRevoked =
       info.freezeAuthority ==
       null;
-
-    const token2022 =
-      owner ===
-      TOKEN_2022_PROGRAM_ID
-        .toString();
 
     const decimals =
       num(
@@ -1520,8 +1211,7 @@ async function securityScan(
         "0"
       );
 
-    let score =
-      50;
+    let score = 50;
 
     score +=
       mintRevoked
@@ -1544,14 +1234,6 @@ async function securityScan(
         ? 5
         : -15;
 
-    if (
-      token2022
-    ) {
-
-      score -=
-        5;
-    }
-
     score =
       Math.max(
         0,
@@ -1561,39 +1243,21 @@ async function securityScan(
         )
       );
 
-    let decision =
-      "REJECT";
-
-    if (
-      score >=
-      80
-    ) {
-
-      decision =
-        "PASS";
-
-    } else if (
-      score >=
-      55
-    ) {
-
-      decision =
-        "REVIEW";
-    }
+    const decision =
+      score >= 80
+        ? "PASS"
+        :
+        score >= 55
+          ? "REVIEW"
+          : "REJECT";
 
     await FreshToken
       .updateOne(
-        {
-          mint
-        },
+        { mint },
         {
           $set: {
-
             securityChecked:
               true,
-
-            securityAttempts:
-              attempts,
 
             securityScore:
               score,
@@ -1608,8 +1272,7 @@ async function securityScan(
               freezeRevoked,
 
             decimals,
-            supply,
-            token2022
+            supply
           }
         }
       );
@@ -1617,18 +1280,13 @@ async function securityScan(
     state.securityScanned++;
 
     log(
-      `🛡 ${score}/100 ${decision} ${mint}`
+      `🛡 ${mint} ${score}/100 ${decision}`
     );
 
-    if (
-      decision !==
-      "REJECT"
-    ) {
-
-      await dexScan(
-        mint
-      );
-    }
+    return (
+      decision ===
+      "PASS"
+    );
 
   } catch (err) {
 
@@ -1636,6 +1294,8 @@ async function securityScan(
       `Security ${mint}`,
       err
     );
+
+    return false;
 
   } finally {
 
@@ -1645,773 +1305,10 @@ async function securityScan(
 }
 
 // ======================================================
-// DEX NETWORK
-// ======================================================
-
-function httpsJson(
-  url
-) {
-
-  return new Promise(
-    (
-      resolve,
-      reject
-    ) => {
-
-      const req =
-        https.get(
-          url,
-          {
-            family: 4,
-
-            timeout:
-              10000,
-
-            headers: {
-
-              Accept:
-                "application/json",
-
-              "User-Agent":
-                "LOMY-Solana-Hunter/4.6.1",
-
-              Connection:
-                "close"
-            }
-          },
-
-          response => {
-
-            let body =
-              "";
-
-            response
-              .setEncoding(
-                "utf8"
-              );
-
-            response.on(
-              "data",
-              chunk => {
-
-                body +=
-                  chunk;
-              }
-            );
-
-            response.on(
-              "end",
-              () => {
-
-                if (
-                  response.statusCode <
-                    200 ||
-                  response.statusCode >=
-                    300
-                ) {
-
-                  return reject(
-                    new Error(
-                      `DEX HTTP ${response.statusCode}`
-                    )
-                  );
-                }
-
-                try {
-
-                  resolve(
-                    JSON.parse(
-                      body
-                    )
-                  );
-
-                } catch {
-
-                  reject(
-                    new Error(
-                      "DEX invalid JSON"
-                    )
-                  );
-                }
-              }
-            );
-          }
-        );
-
-      req.on(
-        "timeout",
-        () => {
-
-          req.destroy(
-            new Error(
-              "DEX timeout"
-            )
-          );
-        }
-      );
-
-      req.on(
-        "error",
-        reject
-      );
-    }
-  );
-}
-
-async function fetchPairs(
-  mint
-) {
-
-  const url =
-    "https://api.dexscreener.com/" +
-    "token-pairs/v1/solana/" +
-    encodeURIComponent(
-      mint
-    );
-
-  let lastError =
-    null;
-
-  for (
-    let attempt = 1;
-    attempt <= 5;
-    attempt++
-  ) {
-
-    try {
-
-      const data =
-        await httpsJson(
-          url
-        );
-
-      return Array.isArray(
-        data
-      )
-        ? data
-        : [];
-
-    } catch (err) {
-
-      lastError =
-        err;
-
-      state.dexRetries++;
-
-      state.dexNetworkErrors++;
-
-      const delay =
-        Math.min(
-          10000,
-          1000 *
-          Math.pow(
-            2,
-            attempt - 1
-          )
-        );
-
-      log(
-        `⚠️ DEX retry ${attempt}/5`
-      );
-
-      await sleep(
-        delay
-      );
-    }
-  }
-
-  throw lastError;
-}
-
-function bestPool(
-  pairs
-) {
-
-  return [
-    ...pairs
-  ]
-    .filter(
-      p =>
-        p?.chainId ===
-        "solana"
-    )
-    .sort(
-      (
-        a,
-        b
-      ) =>
-        num(
-          b?.liquidity
-            ?.usd
-        ) -
-        num(
-          a?.liquidity
-            ?.usd
-        )
-    )[0] ||
-    null;
-}
-
-function scheduleDexRecheck(
-  mint
-) {
-
-  if (
-    dexRecheck.has(
-      mint
-    )
-  ) {
-    return;
-  }
-
-  const timer =
-    setTimeout(
-      () => {
-
-        dexRecheck
-          .delete(
-            mint
-          );
-
-        dexScan(
-          mint
-        )
-          .catch(
-            err =>
-              errLog(
-                "DEX recheck",
-                err
-              )
-          );
-
-      },
-      45000
-    );
-
-  dexRecheck.set(
-    mint,
-    timer
-  );
-}
-
-// ======================================================
-// DEX ENGINE
-// ======================================================
-
-async function dexScan(
-  mint
-) {
-
-  state.dex =
-    "scanning";
-
-  try {
-
-    const token =
-      await FreshToken
-        .findOne({
-          mint
-        })
-        .lean();
-
-    if (
-      !token
-    ) {
-      return;
-    }
-
-    const attempts =
-      num(
-        token.dexAttempts
-      ) + 1;
-
-    const pairs =
-      await fetchPairs(
-        mint
-      );
-
-    const pair =
-      bestPool(
-        pairs
-      );
-
-    state.dexScanned++;
-
-    if (
-      !pair
-    ) {
-
-      await FreshToken
-        .updateOne(
-          {
-            mint
-          },
-          {
-            $set: {
-
-              dexChecked:
-                false,
-
-              dexListed:
-                false,
-
-              dexAttempts:
-                attempts,
-
-              dexDecision:
-                "NO_POOL",
-
-              finalDecision:
-                "WAITING_DEX"
-            }
-          }
-        );
-
-      if (
-        attempts <
-        5
-      ) {
-
-        scheduleDexRecheck(
-          mint
-        );
-      }
-
-      return;
-    }
-
-    const priceUsd =
-      num(
-        pair?.priceUsd
-      );
-
-    const liquidity =
-      num(
-        pair?.liquidity
-          ?.usd
-      );
-
-    const volumeM5 =
-      num(
-        pair?.volume
-          ?.m5
-      );
-
-    const volumeH1 =
-      num(
-        pair?.volume
-          ?.h1
-      );
-
-    const buys =
-      num(
-        pair?.txns
-          ?.m5
-          ?.buys
-      );
-
-    const sells =
-      num(
-        pair?.txns
-          ?.m5
-          ?.sells
-      );
-
-    let dexScore =
-      0;
-
-    if (
-      liquidity >=
-      10000
-    ) {
-
-      dexScore +=
-        40;
-
-    } else if (
-      liquidity >=
-      3000
-    ) {
-
-      dexScore +=
-        25;
-    }
-
-    if (
-      volumeM5 >=
-      250
-    ) {
-
-      dexScore +=
-        20;
-    }
-
-    if (
-      volumeH1 >
-      0
-    ) {
-
-      dexScore +=
-        10;
-    }
-
-    if (
-      buys +
-      sells >=
-      5
-    ) {
-
-      dexScore +=
-        15;
-    }
-
-    if (
-      buys >
-      0 &&
-      sells >
-      0
-    ) {
-
-      dexScore +=
-        15;
-    }
-
-    dexScore =
-      Math.min(
-        100,
-        dexScore
-      );
-
-    let dexDecision =
-      "WATCH";
-
-    if (
-      liquidity >=
-        3000 &&
-      dexScore >=
-        60 &&
-      sells >
-        0
-    ) {
-
-      dexDecision =
-        "PASS";
-    }
-
-    const securityScore =
-      num(
-        token.securityScore
-      );
-
-    const preWhaleScore =
-      Math.round(
-        securityScore *
-          0.60 +
-        dexScore *
-          0.40
-      );
-
-    let finalDecision =
-      "WATCH";
-
-    if (
-      token.securityDecision ===
-        "PASS" &&
-      dexDecision ===
-        "PASS" &&
-      preWhaleScore >=
-        70
-    ) {
-
-      finalDecision =
-        "CANDIDATE_PENDING_WHALE";
-    }
-
-    await FreshToken
-      .updateOne(
-        {
-          mint
-        },
-        {
-          $set: {
-
-            dexChecked:
-              true,
-
-            dexListed:
-              true,
-
-            dexAttempts:
-              attempts,
-
-            dexId:
-              pair.dexId ||
-              null,
-
-            pairAddress:
-              pair.pairAddress ||
-              null,
-
-            priceUsd,
-
-            liquidityUsd:
-              liquidity,
-
-            volumeM5,
-
-            volumeH1,
-
-            buysM5:
-              buys,
-
-            sellsM5:
-              sells,
-
-            dexScore,
-
-            dexDecision,
-
-            preWhaleScore,
-
-            finalScore:
-              preWhaleScore,
-
-            finalDecision
-          }
-        }
-      );
-
-    log(
-      `💧 ${mint} | PreWhale ${preWhaleScore}/100 | ${finalDecision}`
-    );
-
-    if (
-      finalDecision ===
-      "CANDIDATE_PENDING_WHALE"
-    ) {
-
-      queueWhale(
-        mint
-      );
-    }
-
-  } catch (err) {
-
-    errLog(
-      `DEX ${mint}`,
-      err
-    );
-
-    await FreshToken
-      .updateOne(
-        {
-          mint
-        },
-        {
-          $set: {
-
-            dexChecked:
-              false,
-
-            dexDecision:
-              "RETRY_LATER",
-
-            finalDecision:
-              "WAITING_DEX"
-          }
-        }
-      )
-      .catch(
-        () => {}
-      );
-
-    scheduleDexRecheck(
-      mint
-    );
-
-  } finally {
-
-    state.dex =
-      "idle";
-  }
-}
-
-// ======================================================
-// WHALE QUEUE
-// ======================================================
-
-const whaleQueue = [];
-
-const whaleQueuedMints =
-  new Set();
-
-let whaleWorkerBusy =
-  false;
-
-function queueWhale(
-  mint
-) {
-
-  if (
-    whaleQueuedMints
-      .has(
-        mint
-      )
-  ) {
-    return;
-  }
-
-  whaleQueuedMints
-    .add(
-      mint
-    );
-
-  whaleQueue.push(
-    mint
-  );
-
-  FreshToken
-    .updateOne(
-      {
-        mint
-      },
-      {
-        $set: {
-          whaleStatus:
-            "QUEUED"
-        }
-      }
-    )
-    .catch(
-      () => {}
-    );
-
-  runWhaleWorker()
-    .catch(
-      err =>
-        errLog(
-          "Whale Worker",
-          err
-        )
-    );
-}
-
-async function runWhaleWorker() {
-
-  if (
-    whaleWorkerBusy
-  ) {
-    return;
-  }
-
-  whaleWorkerBusy =
-    true;
-
-  try {
-
-    while (
-      whaleQueue.length
-    ) {
-
-      const mint =
-        whaleQueue.shift();
-
-      whaleQueuedMints
-        .delete(
-          mint
-        );
-
-      state.whales =
-        "scanning";
-
-      try {
-
-        await whaleScan(
-          mint
-        );
-
-      } catch (err) {
-
-        state.whaleRetries++;
-
-        errLog(
-          `Whale ${mint}`,
-          err
-        );
-
-        const token =
-          await FreshToken
-            .findOne({
-              mint
-            })
-            .lean()
-            .catch(
-              () => null
-            );
-
-        const attempts =
-          num(
-            token
-              ?.whaleAttempts
-          );
-
-        await FreshToken
-          .updateOne(
-            {
-              mint
-            },
-            {
-              $set: {
-
-                whaleStatus:
-                  "RETRY",
-
-                whaleDecision:
-                  "RETRY",
-
-                whaleLastError:
-                  err?.message ||
-                  String(
-                    err
-                  )
-              }
-            }
-          )
-          .catch(
-            () => {}
-          );
-
-        if (
-          attempts <
-          5
-        ) {
-
-          scheduleWhaleRetry(
-            mint
-          );
-        }
-      }
-
-      await sleep(
-        2500
-      );
-    }
-
-  } finally {
-
-    whaleWorkerBusy =
-      false;
-
-    state.whales =
-      "idle";
-  }
-}
-
-// ======================================================
 // WHALE SCORE
 // ======================================================
 
-function holderPercentage(
+function holderPct(
   amount,
   totalSupply
 ) {
@@ -2420,33 +1317,25 @@ function holderPercentage(
 
     const a =
       BigInt(
-        amount ||
-        "0"
+        amount || "0"
       );
 
     const s =
       BigInt(
-        totalSupply ||
-        "0"
+        totalSupply || "0"
       );
 
     if (
-      s <=
-      0n
-    ) {
-      return 0;
-    }
-
-    const bp =
-      (
-        a *
-        10000n
-      ) /
-      s;
+      s <= 0n
+    ) return 0;
 
     return (
       Number(
-        bp
+        (
+          a *
+          10000n
+        ) /
+        s
       ) /
       100
     );
@@ -2457,126 +1346,70 @@ function holderPercentage(
   }
 }
 
-function calculateWhaleScore(
-  data
-) {
+function whaleScore(data) {
 
-  let score =
-    100;
-
-  const flags =
-    [];
+  let score = 100;
+  const flags = [];
 
   if (
-    data.largest >=
-    25
+    data.largest >= 25
   ) {
 
-    score -=
-      45;
+    score -= 45;
 
     flags.push(
-      "VERY_LARGE_SINGLE_HOLDER"
+      "VERY_LARGE_HOLDER"
     );
 
   } else if (
-    data.largest >=
-    15
+    data.largest >= 15
   ) {
 
-    score -=
-      30;
+    score -= 30;
 
     flags.push(
-      "LARGE_SINGLE_HOLDER"
+      "LARGE_HOLDER"
     );
 
   } else if (
-    data.largest >=
-    10
+    data.largest >= 10
   ) {
 
-    score -=
-      15;
-
-    flags.push(
-      "SINGLE_HOLDER_CAUTION"
-    );
+    score -= 15;
   }
 
   if (
-    data.top10 >=
-    80
+    data.top10 >= 80
   ) {
 
-    score -=
-      40;
+    score -= 40;
 
     flags.push(
-      "EXTREME_TOP10_CONCENTRATION"
+      "EXTREME_TOP10"
     );
 
   } else if (
-    data.top10 >=
-    60
+    data.top10 >= 60
   ) {
 
-    score -=
-      25;
+    score -= 25;
 
     flags.push(
-      "HIGH_TOP10_CONCENTRATION"
+      "HIGH_TOP10"
     );
 
   } else if (
-    data.top10 >=
-    45
+    data.top10 >= 45
   ) {
 
-    score -=
-      10;
-
-    flags.push(
-      "MEDIUM_TOP10_CONCENTRATION"
-    );
+    score -= 10;
   }
 
   if (
-    data.uniqueOwners <
-    5
+    data.owners < 5
   ) {
 
-    score -=
-      15;
-
-    flags.push(
-      "LOW_OWNER_DIVERSITY"
-    );
-  }
-
-  if (
-    data.change >=
-    5
-  ) {
-
-    score -=
-      15;
-
-    flags.push(
-      "CONCENTRATION_INCREASING"
-    );
-
-  } else if (
-    data.change <=
-    -5
-  ) {
-
-    score +=
-      5;
-
-    flags.push(
-      "CONCENTRATION_DECREASING"
-    );
+    score -= 15;
   }
 
   score =
@@ -2588,532 +1421,714 @@ function calculateWhaleScore(
       )
     );
 
-  let decision =
-    "DANGER";
-
-  if (
-    score >=
-    75
-  ) {
-
-    decision =
-      "SAFE";
-
-  } else if (
-    score >=
-    50
-  ) {
-
-    decision =
-      "CAUTION";
-  }
-
   return {
     score,
-    decision,
+
+    decision:
+      score >= 75
+        ? "SAFE"
+        :
+        score >= 50
+          ? "CAUTION"
+          : "DANGER",
+
     flags
   };
 }
 
 // ======================================================
-// WHALE ENGINE + SMART DECISION
+// WHALE QUEUE
 // ======================================================
 
-async function whaleScan(
-  mint
-) {
-
-  const token =
-    await FreshToken
-      .findOne({
-        mint
-      })
-      .lean();
+function queueWhale(mint) {
 
   if (
-    !token
-  ) {
-    return;
-  }
+    whaleQueued.has(mint)
+  ) return;
 
-  const attempts =
-    num(
-      token
-        .whaleAttempts
-    ) + 1;
+  whaleQueued.add(mint);
 
-  await FreshToken
-    .updateOne(
-      {
-        mint
-      },
-      {
-        $set: {
+  whaleQueue.push(mint);
 
-          whaleStatus:
-            "SCANNING",
-
-          whaleAttempts:
-            attempts,
-
-          whaleLastError:
-            null
-        }
-      }
-    );
-
-  log(
-    `🐋 Whale scanning ${mint} attempt ${attempts}`
-  );
-
-  const supplyResponse =
-    await rpcCall(
-      () =>
-        connection
-          .getTokenSupply(
-            new PublicKey(
-              mint
-            ),
-            "confirmed"
-          ),
-      0,
-      "WHALE_SUPPLY"
-    );
-
-  const totalSupply =
-    String(
-      supplyResponse
-        ?.value
-        ?.amount ||
-      token.supply ||
-      "0"
-    );
-
-  if (
-    totalSupply ===
-    "0"
-  ) {
-
-    throw new Error(
-      "Token supply unavailable"
-    );
-  }
-
-  const largestResponse =
-    await rpcCall(
-      () =>
-        connection
-          .getTokenLargestAccounts(
-            new PublicKey(
-              mint
-            ),
-            "confirmed"
-          ),
-      0,
-      "WHALE_LARGEST"
-    );
-
-  const accounts =
-    (
-      largestResponse
-        ?.value ||
-      []
-    ).slice(
-      0,
-      10
-    );
-
-  if (
-    !accounts.length
-  ) {
-
-    throw new Error(
-      "No holder accounts"
-    );
-  }
-
-  const publicKeys =
-    accounts.map(
-      holder =>
-        new PublicKey(
-          holder.address
+  runWhaleWorker()
+    .catch(
+      err =>
+        errLog(
+          "Whale worker",
+          err
         )
     );
+}
 
-  const parsed =
-    await rpcCall(
-      () =>
-        connection
-          .getMultipleParsedAccounts(
-            publicKeys,
-            "confirmed"
-          ),
-      0,
-      "WHALE_OWNERS"
-    );
+async function runWhaleWorker() {
 
-  const holders =
-    [];
+  if (
+    whaleWorkerBusy
+  ) return;
 
-  const owners =
-    new Set();
+  whaleWorkerBusy = true;
 
-  for (
-    let i = 0;
-    i <
-    accounts.length;
-    i++
-  ) {
+  try {
 
-    const holder =
-      accounts[i];
-
-    const account =
-      parsed
-        ?.value
-        ?.[i];
-
-    const owner =
-      account
-        ?.data
-        ?.parsed
-        ?.info
-        ?.owner ||
-      "UNKNOWN";
-
-    if (
-      owner !==
-      "UNKNOWN"
+    while (
+      whaleQueue.length
     ) {
 
-      owners.add(
-        owner
-      );
+      const mint =
+        whaleQueue.shift();
+
+      whaleQueued.delete(mint);
+
+      await whaleScan(mint);
+
+      // مهم جدًا لتجنب 429
+      await sleep(4000);
     }
 
-    const amount =
+  } finally {
+
+    whaleWorkerBusy = false;
+
+    state.whales =
+      "idle";
+  }
+}
+
+// ======================================================
+// WHALE ENGINE
+// ======================================================
+
+async function whaleScan(mint) {
+
+  state.whales =
+    "scanning";
+
+  try {
+
+    const token =
+      await FreshToken
+        .findOne({ mint })
+        .lean();
+
+    if (!token) return;
+
+    const supplyResponse =
+      await rpcCall(
+        () =>
+          connection
+            .getTokenSupply(
+              new PublicKey(mint),
+              "confirmed"
+            ),
+        0,
+        "WHALE_SUPPLY"
+      );
+
+    const totalSupply =
       String(
-        holder.amount ||
+        supplyResponse
+          ?.value?.amount ||
+        token.supply ||
         "0"
       );
 
-    holders.push({
-      rank:
-        i + 1,
+    const largestResponse =
+      await rpcCall(
+        () =>
+          connection
+            .getTokenLargestAccounts(
+              new PublicKey(mint),
+              "confirmed"
+            ),
+        0,
+        "WHALE_LARGEST"
+      );
 
-      tokenAccount:
-        holder.address
-          .toString(),
+    const accounts =
+      (
+        largestResponse
+          ?.value || []
+      ).slice(0, 10);
 
-      owner,
+    if (
+      !accounts.length
+    ) return;
 
-      amount,
+    const parsed =
+      await rpcCall(
+        () =>
+          connection
+            .getMultipleParsedAccounts(
+              accounts.map(
+                x =>
+                  new PublicKey(
+                    x.address
+                  )
+              ),
+              "confirmed"
+            ),
+        0,
+        "WHALE_OWNERS"
+      );
 
-      uiAmount:
-        holder.uiAmountString ||
-        null,
+    const owners =
+      new Set();
 
-      percent:
-        holderPercentage(
-          amount,
+    const percentages =
+      [];
+
+    for (
+      let i = 0;
+      i < accounts.length;
+      i++
+    ) {
+
+      const owner =
+        parsed?.value?.[i]
+          ?.data?.parsed
+          ?.info?.owner;
+
+      if (owner) {
+        owners.add(owner);
+      }
+
+      percentages.push(
+        holderPct(
+          accounts[i]
+            ?.amount,
           totalSupply
         )
-    });
-  }
+      );
+    }
 
-  const largest =
-    num(
-      holders[0]
-        ?.percent
-    );
-
-  const top5 =
-    holders
-      .slice(
-        0,
-        5
-      )
-      .reduce(
-        (
-          total,
-          h
-        ) =>
-          total +
-          num(
-            h.percent
-          ),
-        0
+    const largest =
+      num(
+        percentages[0]
       );
 
-  const top10 =
-    holders
-      .reduce(
-        (
-          total,
-          h
-        ) =>
-          total +
-          num(
-            h.percent
-          ),
-        0
+    const top5 =
+      percentages
+        .slice(0, 5)
+        .reduce(
+          (a, b) =>
+            a + b,
+          0
+        );
+
+    const top10 =
+      percentages
+        .reduce(
+          (a, b) =>
+            a + b,
+          0
+        );
+
+    const result =
+      whaleScore({
+        largest,
+        top10,
+        owners:
+          owners.size
+      });
+
+    const smart =
+      calculateSmartScore(
+        token.securityScore,
+        token.dexScore,
+        result.score
       );
 
-  const previous =
-    num(
-      token.top10Pct
+    const finalDecision =
+      smartDecision(
+        smart,
+        result.decision
+      );
+
+    await FreshToken
+      .updateOne(
+        { mint },
+        {
+          $set: {
+            whaleStatus:
+              "DONE",
+
+            whaleChecked:
+              true,
+
+            whaleScore:
+              result.score,
+
+            whaleDecision:
+              result.decision,
+
+            largestHolderPct:
+              Number(
+                largest.toFixed(2)
+              ),
+
+            top5Pct:
+              Number(
+                top5.toFixed(2)
+              ),
+
+            top10Pct:
+              Number(
+                top10.toFixed(2)
+              ),
+
+            whaleUniqueOwners:
+              owners.size,
+
+            whaleFlags:
+              result.flags,
+
+            smartScore:
+              smart,
+
+            finalDecision
+          }
+        }
+      );
+
+    state.whaleScanned++;
+
+    log(
+      `🐋 ${mint} | Whale ${result.score} ${result.decision} | Smart ${smart} | ${finalDecision}`
     );
 
-  const change =
-    token.whaleChecked
-      ?
-      Number(
-        (
-          top10 -
-          previous
-        ).toFixed(
-          2
-        )
-      )
-      :
-      0;
+  } catch (err) {
 
-  let trend =
-    "STABLE";
-
-  if (
-    change >=
-    2
-  ) {
-
-    trend =
-      "ACCUMULATION";
-
-  } else if (
-    change <=
-    -2
-  ) {
-
-    trend =
-      "DISTRIBUTION";
+    errLog(
+      `Whale ${mint}`,
+      err
+    );
   }
+}
 
-  const result =
-    calculateWhaleScore({
-      largest,
-      top10,
+// ======================================================
+// DEX ANALYSIS
+// ======================================================
 
-      uniqueOwners:
-        owners.size,
+async function analyzeDex(
+  mint,
+  pair
+) {
 
-      change
-    });
+  state.dex =
+    "scanning";
 
-  const smartScore =
-    calculateSmartScore(
-      token.securityScore,
-      token.dexScore,
-      result.score
-    );
+  try {
 
-  const finalDecision =
-    smartDecision(
-      smartScore,
-      result.decision
-    );
+    const dexScore =
+      calculateDexScore(
+        pair
+      );
 
-  await FreshToken
-    .updateOne(
-      {
-        mint
-      },
-      {
-        $set: {
+    const liquidity =
+      num(
+        pair?.liquidity?.usd
+      );
 
-          whaleStatus:
-            "DONE",
+    const volumeM5 =
+      num(
+        pair?.volume?.m5
+      );
 
-          whaleChecked:
-            true,
+    const volumeH1 =
+      num(
+        pair?.volume?.h1
+      );
 
-          whaleCheckedAt:
-            new Date(),
+    const buys =
+      num(
+        pair?.txns?.m5?.buys
+      );
 
-          whaleScore:
-            result.score,
+    const sells =
+      num(
+        pair?.txns?.m5?.sells
+      );
 
-          whaleDecision:
-            result.decision,
+    const priceChangeM5 =
+      num(
+        pair?.priceChange?.m5
+      );
 
-          largestHolderPct:
-            Number(
-              largest
-                .toFixed(
-                  2
-                )
-            ),
+    const priceChangeH1 =
+      num(
+        pair?.priceChange?.h1
+      );
 
-          top5Pct:
-            Number(
-              top5
-                .toFixed(
-                  2
-                )
-            ),
+    const dexDecision =
+      (
+        liquidity >=
+          PAPER.minLiquidityUsd &&
+        dexScore >= 60 &&
+        sells > 0
+      )
+        ? "PASS"
+        : "WATCH";
 
-          previousTop10Pct:
-            token.whaleChecked
-              ?
-              previous
-              :
+    const token =
+      await FreshToken
+        .findOne({ mint })
+        .lean();
+
+    const preWhale =
+      Math.round(
+        num(
+          token?.securityScore
+        ) *
+        0.60 +
+        dexScore *
+        0.40
+      );
+
+    await FreshToken
+      .updateOne(
+        { mint },
+        {
+          $set: {
+            dexChecked:
+              true,
+
+            dexId:
+              pair.dexId ||
               null,
 
-          top10Pct:
-            Number(
-              top10
-                .toFixed(
-                  2
-                )
-            ),
+            pairAddress:
+              pair.pairAddress ||
+              null,
 
-          top10ChangePct:
-            change,
+            pairCreatedAt:
+              num(
+                pair.pairCreatedAt
+              ),
 
-          whaleTrend:
-            trend,
+            priceUsd:
+              num(
+                pair.priceUsd
+              ),
 
-          whaleUniqueOwners:
-            owners.size,
+            liquidityUsd:
+              liquidity,
 
-          whaleHolders:
-            holders,
+            volumeM5,
+            volumeH1,
 
-          whaleFlags:
-            result.flags,
+            buysM5:
+              buys,
 
-          whaleLastError:
-            null,
+            sellsM5:
+              sells,
 
-          smartScore,
+            priceChangeM5,
+            priceChangeH1,
 
-          finalScore:
-            smartScore,
+            dexScore,
 
-          finalDecision
+            dexDecision,
+
+            preWhaleScore:
+              preWhale,
+
+            finalDecision:
+              dexDecision ===
+                "PASS" &&
+              preWhale >= 70
+                ?
+                "CANDIDATE_PENDING_WHALE"
+                :
+                "WATCH"
+          }
+        }
+      );
+
+    state.dexScanned++;
+
+    if (
+      dexDecision ===
+        "PASS" &&
+      preWhale >= 70
+    ) {
+
+      queueWhale(mint);
+    }
+
+  } catch (err) {
+
+    errLog(
+      `DEX ${mint}`,
+      err
+    );
+
+  } finally {
+
+    state.dex =
+      "idle";
+  }
+}
+
+// ======================================================
+// DISCOVERY - NO GLOBAL WEBSOCKET
+// ======================================================
+
+async function discoveryFeed() {
+
+  const endpoints = [
+    "https://api.dexscreener.com/token-profiles/latest/v1",
+    "https://api.dexscreener.com/token-boosts/latest/v1",
+    "https://api.dexscreener.com/token-boosts/top/v1"
+  ];
+
+  const map =
+    new Map();
+
+  for (
+    const url
+    of endpoints
+  ) {
+
+    try {
+
+      const data =
+        await httpsJson(url);
+
+      if (
+        !Array.isArray(data)
+      ) continue;
+
+      for (
+        const item
+        of data
+      ) {
+
+        if (
+          item?.chainId !==
+          "solana"
+        ) continue;
+
+        const mint =
+          item?.tokenAddress;
+
+        if (!mint) continue;
+
+        if (
+          !map.has(mint)
+        ) {
+          map.set(
+            mint,
+            item
+          );
+        }
+
+        if (
+          map.size >=
+          DISCOVERY.rawLimit
+        ) {
+          break;
         }
       }
+
+    } catch (err) {
+
+      state.dexErrors++;
+    }
+
+    await sleep(500);
+  }
+
+  return [
+    ...map.values()
+  ];
+}
+
+async function runDiscovery() {
+
+  if (
+    discoveryBusy ||
+    shuttingDown ||
+    !DISCOVERY.enabled
+  ) return;
+
+  discoveryBusy = true;
+
+  state.discovery =
+    "scanning";
+
+  state.discoveryCycles++;
+
+  try {
+
+    const profiles =
+      await discoveryFeed();
+
+    let processed = 0;
+
+    for (
+      const profile
+      of profiles
+    ) {
+
+      if (
+        processed >=
+        DISCOVERY.processPerCycle
+      ) break;
+
+      const mint =
+        profile.tokenAddress;
+
+      if (!mint) continue;
+
+      const pairs =
+        await fetchPairs(mint);
+
+      const pair =
+        bestPool(pairs);
+
+      if (!pair) continue;
+
+      const liquidity =
+        num(
+          pair?.liquidity?.usd
+        );
+
+      const volumeH1 =
+        num(
+          pair?.volume?.h1
+        );
+
+      if (
+        liquidity <
+          DISCOVERY.minLiquidityUsd ||
+        volumeH1 <
+          DISCOVERY.minVolumeH1Usd
+      ) {
+        continue;
+      }
+
+      const ageHours =
+        pairAgeHours(pair);
+
+      const origin =
+        ageHours <=
+          DISCOVERY.freshAgeHours
+          ? "FRESH"
+          : "ESTABLISHED";
+
+      let token =
+        await FreshToken
+          .findOne({ mint })
+          .lean();
+
+      if (!token) {
+
+        await FreshToken.create({
+          mint,
+          origin,
+          discoveredBy:
+            "DEX_DISCOVERY",
+          pairCreatedAt:
+            num(
+              pair.pairCreatedAt
+            ),
+          paperOnly:
+            true
+        });
+
+        state.discovered++;
+
+        if (
+          origin === "FRESH"
+        ) {
+          state.fresh++;
+        } else {
+          state.established++;
+        }
+
+        state.lastMint =
+          mint;
+
+        log(
+          `🔎 ${origin} ${mint} | Liq $${liquidity.toFixed(0)} | H1 $${volumeH1.toFixed(0)}`
+        );
+
+        const passed =
+          await securityScan(
+            mint
+          );
+
+        if (
+          passed
+        ) {
+
+          await analyzeDex(
+            mint,
+            pair
+          );
+        }
+
+      } else {
+
+        // تحديث بيانات السوق بدون RPC
+        await analyzeDex(
+          mint,
+          pair
+        );
+      }
+
+      processed++;
+
+      // يدي فرصة للشبكة
+      await sleep(1200);
+    }
+
+  } catch (err) {
+
+    errLog(
+      "Discovery",
+      err
     );
 
-  state.whaleScanned++;
+  } finally {
+
+    discoveryBusy = false;
+
+    state.discovery =
+      "idle";
+  }
+}
+
+function startDiscovery() {
+
+  runDiscovery()
+    .catch(
+      err =>
+        errLog(
+          "Discovery startup",
+          err
+        )
+    );
+
+  discoveryTimer =
+    setInterval(
+      () => {
+
+        runDiscovery()
+          .catch(
+            err =>
+              errLog(
+                "Discovery interval",
+                err
+              )
+          );
+
+      },
+      DISCOVERY.scanMs
+    );
 
   log(
-    `🧠 SMART ${mint} | Security ${num(token.securityScore)} | DEX ${num(token.dexScore)} | Whale ${result.score} | FINAL ${smartScore}/100 | ${finalDecision}`
-  );
-
-  if (
-    finalDecision ===
-    "APPROVED_CANDIDATE"
-  ) {
-
-    queuePaperEntry(
-      mint,
-      "APPROVAL_EVENT"
-    )
-      .catch(
-        err =>
-          errLog(
-            "Paper entry trigger",
-            err
-          )
-      );
-  }
-
-  if (
-    attempts <
-    3
-  ) {
-
-    scheduleWhaleSnapshot(
-      mint
-    );
-  }
-}
-
-// ======================================================
-// WHALE RETRY
-// ======================================================
-
-function scheduleWhaleRetry(
-  mint
-) {
-
-  const key =
-    `retry:${mint}`;
-
-  if (
-    whaleRecheck.has(
-      key
-    )
-  ) {
-    return;
-  }
-
-  const timer =
-    setTimeout(
-      () => {
-
-        whaleRecheck
-          .delete(
-            key
-          );
-
-        queueWhale(
-          mint
-        );
-      },
-      60000
-    );
-
-  whaleRecheck.set(
-    key,
-    timer
-  );
-}
-
-function scheduleWhaleSnapshot(
-  mint
-) {
-
-  const key =
-    `snapshot:${mint}`;
-
-  if (
-    whaleRecheck.has(
-      key
-    )
-  ) {
-    return;
-  }
-
-  const timer =
-    setTimeout(
-      () => {
-
-        whaleRecheck
-          .delete(
-            key
-          );
-
-        queueWhale(
-          mint
-        );
-      },
-      180000
-    );
-
-  whaleRecheck.set(
-    key,
-    timer
+    "🔎 Network-safe Fresh + Established Discovery ONLINE"
   );
 }
 
@@ -3130,9 +2145,7 @@ async function ensurePaperAccount() {
           PAPER.accountKey
       });
 
-  if (
-    !account
-  ) {
+  if (!account) {
 
     account =
       await PaperAccount
@@ -3146,38 +2159,31 @@ async function ensurePaperAccount() {
           cashBalanceUsd:
             PAPER.startingBalanceUsd,
 
-          realizedPnlUsd:
-            0,
-
-          totalTrades:
-            0,
-
-          wins:
-            0,
-
-          losses:
-            0,
-
-          breakeven:
-            0,
-
-          bestTradePct:
-            0,
-
-          worstTradePct:
-            0
+          realizedPnlUsd: 0,
+          totalTrades: 0,
+          wins: 0,
+          losses: 0,
+          breakeven: 0,
+          bestTradePct: 0,
+          worstTradePct: 0
         });
 
     log(
-      `🧪 Paper account created with $${PAPER.startingBalanceUsd}`
+      `🧪 New paper test $${PAPER.startingBalanceUsd}`
     );
   }
 
   return account;
 }
 
-async function getPaperSummary() {
+// ======================================================
+// END PART 1
+// ======================================================
+// ======================================================
+// PAPER ENTRY + OPPORTUNITY ENGINE
+// ======================================================
 
+async function getPaperSummary() {
   const account =
     await ensurePaperAccount();
 
@@ -3192,41 +2198,38 @@ async function getPaperSummary() {
       })
       .lean();
 
-  let openValue =
-    0;
-
-  let unrealizedPnl =
-    0;
+  let openValue = 0;
+  let unrealizedPnl = 0;
 
   for (
-    const t
+    const trade
     of openTrades
   ) {
 
     const current =
       num(
-        t.currentPrice ||
-        t.entryPrice
+        trade.currentPrice ||
+        trade.entryPrice
       );
 
-    const marketValue =
+    const value =
       num(
-        t.quantity
+        trade.quantity
       ) *
       current;
 
     openValue +=
-      marketValue;
+      value;
 
     unrealizedPnl +=
       (
         current -
         num(
-          t.entryPrice
+          trade.entryPrice
         )
       ) *
       num(
-        t.quantity
+        trade.quantity
       );
   }
 
@@ -3244,35 +2247,43 @@ async function getPaperSummary() {
   };
 }
 
-// ======================================================
-// PAPER ENTRY
-// ======================================================
+async function recentMintTrades(
+  mint
+) {
 
-async function getRecentMintTrades(mint) {
   const since =
     new Date(
       Date.now() -
-      24 * 60 * 60 * 1000
+      24 *
+      60 *
+      60 *
+      1000
     );
 
   return PaperTrade
     .find({
       mint,
-      testRun: PAPER.testRun,
+
+      testRun:
+        PAPER.testRun,
+
       openedAt: {
-        $gte: since
+        $gte:
+          since
       }
     })
     .sort({
-      openedAt: -1
+      openedAt:
+        -1
     })
     .lean();
 }
 
-async function evaluatePaperEntry(
+function entryFilter(
   token,
   pair
 ) {
+
   const marketPrice =
     num(
       pair?.priceUsd
@@ -3288,17 +2299,12 @@ async function evaluatePaperEntry(
       pair?.volume?.m5
     );
 
-  const volumeH1 =
-    num(
-      pair?.volume?.h1
-    );
-
-  const buysM5 =
+  const buys =
     num(
       pair?.txns?.m5?.buys
     );
 
-  const sellsM5 =
+  const sells =
     num(
       pair?.txns?.m5?.sells
     );
@@ -3308,94 +2314,26 @@ async function evaluatePaperEntry(
       pair?.priceChange?.m5
     );
 
-  const priceChangeH1 =
-    num(
-      pair?.priceChange?.h1
-    );
-
   const buySellRatio =
-    sellsM5 > 0
-      ? buysM5 / sellsM5
-      : buysM5 > 0
-        ? buysM5
-        : 0;
-
-  if (
-    marketPrice <= 0
-  ) {
-    return {
-      ok: false,
-      reason: "INVALID_PRICE"
-    };
-  }
-
-  if (
-    liquidity <
-    PAPER.minLiquidityUsd
-  ) {
-    return {
-      ok: false,
-      reason: "LOW_LIQUIDITY"
-    };
-  }
-
-  if (
-    volumeM5 <
-    PAPER.minVolumeM5
-  ) {
-    return {
-      ok: false,
-      reason: "LOW_VOLUME_M5"
-    };
-  }
-
-  if (
-    buysM5 <
-    PAPER.minBuysM5
-  ) {
-    return {
-      ok: false,
-      reason: "LOW_BUYS_M5"
-    };
-  }
-
-  if (
-    buySellRatio <
-    PAPER.minBuySellRatio
-  ) {
-    return {
-      ok: false,
-      reason: "WEAK_BUY_SELL_RATIO"
-    };
-  }
-
-  if (
-    priceChangeM5 <
-    PAPER.minPriceChangeM5
-  ) {
-    return {
-      ok: false,
-      reason: "M5_TOO_WEAK"
-    };
-  }
-
-  if (
-    priceChangeM5 >
-    PAPER.maxPriceChangeM5
-  ) {
-    return {
-      ok: false,
-      reason: "M5_OVEREXTENDED"
-    };
-  }
+    sells > 0
+      ?
+      buys / sells
+      :
+      buys > 0
+        ?
+        buys
+        :
+        0;
 
   if (
     token.finalDecision !==
     "APPROVED_CANDIDATE"
   ) {
+
     return {
       ok: false,
-      reason: "NOT_APPROVED"
+      reason:
+        "NOT_APPROVED"
     };
   }
 
@@ -3403,34 +2341,120 @@ async function evaluatePaperEntry(
     token.whaleDecision !==
     "SAFE"
   ) {
+
     return {
       ok: false,
-      reason: "WHALE_NOT_SAFE"
+      reason:
+        "WHALE_NOT_SAFE"
+    };
+  }
+
+  if (
+    marketPrice <= 0
+  ) {
+
+    return {
+      ok: false,
+      reason:
+        "INVALID_PRICE"
+    };
+  }
+
+  if (
+    liquidity <
+    PAPER.minLiquidityUsd
+  ) {
+
+    return {
+      ok: false,
+      reason:
+        "LOW_LIQUIDITY"
+    };
+  }
+
+  if (
+    volumeM5 <
+    PAPER.minVolumeM5
+  ) {
+
+    return {
+      ok: false,
+      reason:
+        "LOW_VOLUME_M5"
+    };
+  }
+
+  if (
+    buys <
+    PAPER.minBuysM5
+  ) {
+
+    return {
+      ok: false,
+      reason:
+        "LOW_BUYS"
+    };
+  }
+
+  if (
+    buySellRatio <
+    PAPER.minBuySellRatio
+  ) {
+
+    return {
+      ok: false,
+      reason:
+        "WEAK_BUY_RATIO"
+    };
+  }
+
+  if (
+    priceChangeM5 <
+    PAPER.minPriceChangeM5
+  ) {
+
+    return {
+      ok: false,
+      reason:
+        "M5_TOO_WEAK"
+    };
+  }
+
+  if (
+    priceChangeM5 >
+    PAPER.maxPriceChangeM5
+  ) {
+
+    return {
+      ok: false,
+      reason:
+        "M5_OVEREXTENDED"
     };
   }
 
   return {
     ok: true,
+
     marketPrice,
     liquidity,
     volumeM5,
-    volumeH1,
-    buysM5,
-    sellsM5,
+    buys,
+    sells,
     buySellRatio,
-    priceChangeM5,
-    priceChangeH1
+    priceChangeM5
   };
 }
 
 async function queuePaperEntry(
   mint,
-  trigger = "UNKNOWN"
+  trigger =
+    "OPPORTUNITY"
 ) {
 
   if (
     !PAPER.enabled ||
-    LIVE_TRADING
+    LIVE_TRADING ||
+    shuttingDown
   ) {
     return;
   }
@@ -3455,8 +2479,10 @@ async function queuePaperEntry(
       await PaperTrade
         .findOne({
           mint,
+
           testRun:
             PAPER.testRun,
+
           status:
             "OPEN"
         })
@@ -3473,6 +2499,7 @@ async function queuePaperEntry(
         .countDocuments({
           testRun:
             PAPER.testRun,
+
           status:
             "OPEN"
         });
@@ -3481,8 +2508,10 @@ async function queuePaperEntry(
       openCount >=
       PAPER.maxOpenTrades
     ) {
+
       state.paperEntrySkips++;
-      state.paperLastSkip =
+
+      state.lastSkip =
         "MAX_OPEN_TRADES";
 
       return;
@@ -3496,67 +2525,62 @@ async function queuePaperEntry(
         .lean();
 
     if (
-      !token ||
-      token.finalDecision !==
-      "APPROVED_CANDIDATE"
+      !token
     ) {
       return;
     }
 
-    // ----------------------------------------------
-    // COOLDOWN + MAX ENTRIES / 24H
-    // ----------------------------------------------
-
-    const recentTrades =
-      await getRecentMintTrades(
+    const history =
+      await recentMintTrades(
         mint
       );
 
     if (
-      recentTrades.length >=
+      history.length >=
       PAPER.maxEntriesPerMint24h
     ) {
+
       state.paperEntrySkips++;
-      state.paperLastSkip =
-        "MAX_MINT_ENTRIES_24H";
+
+      state.lastSkip =
+        "MAX_ENTRIES_24H";
 
       return;
     }
 
     const lastTrade =
-      recentTrades[0];
+      history[0];
 
     if (
       lastTrade
     ) {
-      const referenceTime =
+
+      const reference =
         new Date(
           lastTrade.closedAt ||
           lastTrade.openedAt
         ).getTime();
 
-      const elapsedMinutes =
+      const minutes =
         (
           Date.now() -
-          referenceTime
+          reference
         ) /
         60000;
 
       if (
-        elapsedMinutes <
+        minutes <
         PAPER.cooldownMinutes
       ) {
+
         state.paperEntrySkips++;
-        state.paperLastSkip =
+
+        state.lastSkip =
           "COOLDOWN";
 
         return;
       }
     }
-
-    // ----------------------------------------------
-    // LIVE DEX REFRESH
-    // ----------------------------------------------
 
     const pairs =
       await fetchPairs(
@@ -3571,28 +2595,32 @@ async function queuePaperEntry(
     if (
       !pair
     ) {
+
       state.paperEntrySkips++;
-      state.paperLastSkip =
+
+      state.lastSkip =
         "NO_PAIR";
 
       return;
     }
 
-    const entryCheck =
-      await evaluatePaperEntry(
+    const check =
+      entryFilter(
         token,
         pair
       );
 
     if (
-      !entryCheck.ok
+      !check.ok
     ) {
+
       state.paperEntrySkips++;
-      state.paperLastSkip =
-        entryCheck.reason;
+
+      state.lastSkip =
+        check.reason;
 
       log(
-        `🧪 ENTRY FILTER ${mint} | ${entryCheck.reason}`
+        `🧪 ENTRY FILTER ${mint} | ${check.reason}`
       );
 
       return;
@@ -3613,15 +2641,17 @@ async function queuePaperEntry(
       allocatedUsd <
       1
     ) {
+
       state.paperEntrySkips++;
-      state.paperLastSkip =
-        "INSUFFICIENT_VIRTUAL_CASH";
+
+      state.lastSkip =
+        "LOW_CASH";
 
       return;
     }
 
     const entryPrice =
-      entryCheck.marketPrice *
+      check.marketPrice *
       (
         1 +
         PAPER.assumedSlippagePct /
@@ -3635,7 +2665,7 @@ async function queuePaperEntry(
         100
       );
 
-    const capitalForTokens =
+    const capital =
       Math.max(
         0,
         allocatedUsd -
@@ -3643,7 +2673,7 @@ async function queuePaperEntry(
       );
 
     const quantity =
-      capitalForTokens /
+      capital /
       entryPrice;
 
     const hardStopPrice =
@@ -3662,47 +2692,35 @@ async function queuePaperEntry(
         100
       );
 
-    const source =
-      token.origin ||
-      "FRESH";
-
     await PaperTrade.create({
       mint,
 
       testRun:
         PAPER.testRun,
 
-      source,
+      source:
+        token.origin ||
+        "UNKNOWN",
 
       entryTrigger:
         trigger,
-
-      pairAddress:
-        pair.pairAddress ||
-        token.pairAddress ||
-        null,
-
-      dexId:
-        pair.dexId ||
-        token.dexId ||
-        null,
 
       status:
         "OPEN",
 
       marketEntryPrice:
-        entryCheck.marketPrice,
+        check.marketPrice,
 
       entryPrice,
 
       currentPrice:
-        entryCheck.marketPrice,
+        check.marketPrice,
 
       highestPrice:
-        entryCheck.marketPrice,
+        check.marketPrice,
 
       lowestPrice:
-        entryCheck.marketPrice,
+        check.marketPrice,
 
       allocatedUsd,
       quantity,
@@ -3729,29 +2747,23 @@ async function queuePaperEntry(
       smartScore:
         token.smartScore,
 
-      whaleDecision:
-        token.whaleDecision,
-
       liquidityAtEntry:
-        entryCheck.liquidity,
+        check.liquidity,
 
       volumeM5AtEntry:
-        entryCheck.volumeM5,
+        check.volumeM5,
 
       buysM5AtEntry:
-        entryCheck.buysM5,
+        check.buys,
 
       sellsM5AtEntry:
-        entryCheck.sellsM5,
+        check.sells,
 
       buySellRatioAtEntry:
-        entryCheck.buySellRatio,
+        check.buySellRatio,
 
       priceChangeM5AtEntry:
-        entryCheck.priceChangeM5,
-
-      priceChangeH1AtEntry:
-        entryCheck.priceChangeH1,
+        check.priceChangeM5,
 
       lastPriceCheckAt:
         new Date()
@@ -3771,7 +2783,7 @@ async function queuePaperEntry(
     state.paperOpened++;
 
     log(
-      `🧪 PAPER BUY ${mint} | ${source} | ${trigger} | $${allocatedUsd.toFixed(2)} | Entry=${entryPrice} | M5=${entryCheck.priceChangeM5.toFixed(2)}% | B/S=${entryCheck.buySellRatio.toFixed(2)}`
+      `🧪 PAPER BUY ${mint} | ${token.origin} | $${allocatedUsd.toFixed(2)} | M5 ${check.priceChangeM5.toFixed(2)}% | B/S ${check.buySellRatio.toFixed(2)}`
     );
 
   } catch (err) {
@@ -3815,28 +2827,28 @@ async function closePaperTrade(
       100
     );
 
-  const grossProceeds =
+  const gross =
     num(
       trade.quantity
     ) *
     exitPrice;
 
-  const exitFeeUsd =
-    grossProceeds *
+  const exitFee =
+    gross *
     (
       PAPER.assumedFeePct /
       100
     );
 
-  const netProceeds =
+  const net =
     Math.max(
       0,
-      grossProceeds -
-      exitFeeUsd
+      gross -
+      exitFee
     );
 
-  const netPnlUsd =
-    netProceeds -
+  const pnlUsd =
+    net -
     num(
       trade.allocatedUsd
     );
@@ -3846,11 +2858,9 @@ async function closePaperTrade(
       trade.allocatedUsd
     ) > 0
       ?
-      (
-        netPnlUsd /
-        num(
-          trade.allocatedUsd
-        )
+      pnlUsd /
+      num(
+        trade.allocatedUsd
       ) *
       100
       :
@@ -3875,16 +2885,10 @@ async function closePaperTrade(
     marketPrice;
 
   trade.exitFeeUsd =
-    exitFeeUsd;
-
-  trade.grossPnlUsd =
-    grossProceeds -
-    num(
-      trade.allocatedUsd
-    );
+    exitFee;
 
   trade.netPnlUsd =
-    netPnlUsd;
+    pnlUsd;
 
   trade.pnlPct =
     pnlPct;
@@ -3898,13 +2902,13 @@ async function closePaperTrade(
     num(
       account.cashBalanceUsd
     ) +
-    netProceeds;
+    net;
 
   account.realizedPnlUsd =
     num(
       account.realizedPnlUsd
     ) +
-    netPnlUsd;
+    pnlUsd;
 
   account.totalTrades =
     num(
@@ -3916,6 +2920,7 @@ async function closePaperTrade(
     pnlPct >
     0.05
   ) {
+
     account.wins =
       num(
         account.wins
@@ -3926,6 +2931,7 @@ async function closePaperTrade(
     pnlPct <
     -0.05
   ) {
+
     account.losses =
       num(
         account.losses
@@ -3933,6 +2939,7 @@ async function closePaperTrade(
       1;
 
   } else {
+
     account.breakeven =
       num(
         account.breakeven
@@ -3961,7 +2968,7 @@ async function closePaperTrade(
   state.paperClosed++;
 
   log(
-    `🧪 PAPER SELL ${trade.mint} | ${trade.source || "UNKNOWN"} | ${reason} | PnL ${pnlPct.toFixed(2)}% | $${netPnlUsd.toFixed(2)}`
+    `🧪 PAPER SELL ${trade.mint} | ${reason} | ${pnlPct.toFixed(2)}% | $${pnlUsd.toFixed(2)}`
   );
 }
 
@@ -3972,12 +2979,14 @@ async function closePaperTrade(
 async function monitorPaperTrades() {
 
   if (
-    !PAPER.enabled ||
-    shuttingDown
+    paperBusy ||
+    shuttingDown ||
+    !PAPER.enabled
   ) {
     return;
   }
 
+  paperBusy = true;
   state.paper =
     "monitoring";
 
@@ -3988,6 +2997,7 @@ async function monitorPaperTrades() {
         .find({
           testRun:
             PAPER.testRun,
+
           status:
             "OPEN"
         });
@@ -4036,7 +3046,9 @@ async function monitorPaperTrades() {
           );
 
         const lowest =
-          trade.lowestPrice
+          num(
+            trade.lowestPrice
+          ) > 0
             ?
             Math.min(
               num(
@@ -4047,7 +3059,7 @@ async function monitorPaperTrades() {
             :
             marketPrice;
 
-        const runupPct =
+        const runup =
           pctChange(
             highest,
             num(
@@ -4055,7 +3067,7 @@ async function monitorPaperTrades() {
             )
           );
 
-        const drawdownPct =
+        const drawdown =
           pctChange(
             lowest,
             num(
@@ -4068,16 +3080,17 @@ async function monitorPaperTrades() {
             trade.trailingActive
           );
 
-        let trailingStopPrice =
+        let trailingStop =
           num(
             trade.trailingStopPrice
           );
 
         if (
           !trailingActive &&
-          runupPct >=
+          runup >=
           PAPER.trailingActivationPct
         ) {
+
           trailingActive =
             true;
         }
@@ -4086,7 +3099,7 @@ async function monitorPaperTrades() {
           trailingActive
         ) {
 
-          const candidateStop =
+          const candidate =
             highest *
             (
               1 -
@@ -4094,11 +3107,11 @@ async function monitorPaperTrades() {
               100
             );
 
-          trailingStopPrice =
+          trailingStop =
             Math.max(
-              trailingStopPrice ||
+              trailingStop ||
               0,
-              candidateStop
+              candidate
             );
         }
 
@@ -4112,16 +3125,16 @@ async function monitorPaperTrades() {
           lowest;
 
         trade.maxRunupPct =
-          runupPct;
+          runup;
 
         trade.maxDrawdownPct =
-          drawdownPct;
+          drawdown;
 
         trade.trailingActive =
           trailingActive;
 
         trade.trailingStopPrice =
-          trailingStopPrice ||
+          trailingStop ||
           null;
 
         trade.lastPriceCheckAt =
@@ -4164,7 +3177,7 @@ async function monitorPaperTrades() {
           await closePaperTrade(
             trade,
             marketPrice,
-            "TAKE_PROFIT_100"
+            "TAKE_PROFIT"
           );
 
           continue;
@@ -4172,9 +3185,9 @@ async function monitorPaperTrades() {
 
         if (
           trailingActive &&
-          trailingStopPrice > 0 &&
+          trailingStop > 0 &&
           marketPrice <=
-          trailingStopPrice
+          trailingStop
         ) {
 
           await closePaperTrade(
@@ -4209,7 +3222,7 @@ async function monitorPaperTrades() {
       }
 
       await sleep(
-        600
+        500
       );
     }
 
@@ -4222,6 +3235,9 @@ async function monitorPaperTrades() {
 
   } finally {
 
+    paperBusy =
+      false;
+
     state.paper =
       "idle";
   }
@@ -4231,12 +3247,11 @@ async function monitorPaperTrades() {
 // CONTINUOUS OPPORTUNITY ENGINE
 // ======================================================
 
-async function scanApprovedOpportunities() {
+async function scanOpportunities() {
 
   if (
     opportunityBusy ||
-    shuttingDown ||
-    !PAPER.enabled
+    shuttingDown
   ) {
     return;
   }
@@ -4253,6 +3268,7 @@ async function scanApprovedOpportunities() {
         .countDocuments({
           testRun:
             PAPER.testRun,
+
           status:
             "OPEN"
         });
@@ -4284,7 +3300,7 @@ async function scanApprovedOpportunities() {
           liquidityUsd: -1
         })
         .limit(
-          PAPER.opportunityBatch
+          12
         )
         .lean();
 
@@ -4293,17 +3309,18 @@ async function scanApprovedOpportunities() {
       of tokens
     ) {
 
-      const currentOpen =
+      const count =
         await PaperTrade
           .countDocuments({
             testRun:
               PAPER.testRun,
+
             status:
               "OPEN"
           });
 
       if (
-        currentOpen >=
+        count >=
         PAPER.maxOpenTrades
       ) {
         break;
@@ -4315,14 +3332,14 @@ async function scanApprovedOpportunities() {
       );
 
       await sleep(
-        350
+        400
       );
     }
 
   } catch (err) {
 
     errLog(
-      "Opportunity Engine",
+      "Opportunity",
       err
     );
 
@@ -4335,19 +3352,11 @@ async function scanApprovedOpportunities() {
 
 function startOpportunityEngine() {
 
-  if (
-    opportunityTimer
-  ) {
-    clearInterval(
-      opportunityTimer
-    );
-  }
-
   opportunityTimer =
     setInterval(
       () => {
 
-        scanApprovedOpportunities()
+        scanOpportunities()
           .catch(
             err =>
               errLog(
@@ -4360,417 +3369,24 @@ function startOpportunityEngine() {
       PAPER.opportunityMs
     );
 
-  scanApprovedOpportunities()
-    .catch(
-      err =>
-        errLog(
-          "Opportunity startup",
-          err
-        )
-    );
-
-  log(
-    "🎯 Continuous Opportunity Engine ONLINE"
-  );
-}
-
-// ======================================================
-// ESTABLISHED / OLD COIN DISCOVERY
-// ======================================================
-
-async function fetchEstablishedProfiles() {
-
-  const endpoints = [
-    "https://api.dexscreener.com/token-profiles/latest/v1",
-    "https://api.dexscreener.com/token-boosts/top/v1",
-    "https://api.dexscreener.com/token-boosts/latest/v1"
-  ];
-
-  const results =
-    [];
-
-  for (
-    const url
-    of endpoints
-  ) {
-
-    try {
-
-      const data =
-        await httpsJson(
-          url
-        );
-
-      if (
-        Array.isArray(
-          data
-        )
-      ) {
-        results.push(
-          ...data
-        );
-      }
-
-    } catch (err) {
-
-      errLog(
-        "Established discovery",
-        err
-      );
-    }
-
-    await sleep(
-      400
-    );
-  }
-
-  const unique =
-    new Map();
-
-  for (
-    const item
-    of results
-  ) {
-
-    if (
-      item?.chainId !==
-      "solana"
-    ) {
-      continue;
-    }
-
-    const mint =
-      item?.tokenAddress;
-
-    if (
-      !mint
-    ) {
-      continue;
-    }
-
-    if (
-      !unique.has(
-        mint
-      )
-    ) {
-
-      unique.set(
-        mint,
-        item
-      );
-    }
-
-    if (
-      unique.size >=
-      MARKET_SCANNER.externalRawLimit
-    ) {
-      break;
-    }
-  }
-
-  return [
-    ...unique.values()
-  ];
-}
-
-async function precheckEstablishedMint(
-  mint
-) {
-
-  try {
-
-    const pairs =
-      await fetchPairs(
-        mint
-      );
-
-    const pair =
-      bestPool(
-        pairs
-      );
-
-    if (
-      !pair
-    ) {
-      return null;
-    }
-
-    const liquidity =
-      num(
-        pair?.liquidity?.usd
-      );
-
-    const volumeH1 =
-      num(
-        pair?.volume?.h1
-      );
-
-    if (
-      liquidity <
-      MARKET_SCANNER.minLiquidityUsd
-    ) {
-      return null;
-    }
-
-    if (
-      volumeH1 <
-      MARKET_SCANNER.minVolumeH1Usd
-    ) {
-      return null;
-    }
-
-    return {
-      mint,
-      pair,
-      liquidity,
-      volumeH1
-    };
-
-  } catch {
-
-    return null;
-  }
-}
-
-async function scanEstablishedMarket() {
-
-  if (
-    !MARKET_SCANNER.enabled ||
-    marketScannerBusy ||
-    shuttingDown
-  ) {
-    return;
-  }
-
-  marketScannerBusy =
-    true;
-
-  try {
-
-    log(
-      "🌐 Established Market Scanner cycle"
-    );
-
-    const profiles =
-      await fetchEstablishedProfiles();
-
-    let added =
-      0;
-
-    for (
-      const profile
-      of profiles
-    ) {
-
-      if (
-        added >=
-        MARKET_SCANNER.maxNewEstablishedPerCycle
-      ) {
-        break;
-      }
-
-      const mint =
-        profile.tokenAddress;
-
-      const exists =
-        await FreshToken
-          .findOne({
-            mint
-          })
-          .select(
-            "_id"
-          )
-          .lean();
-
-      if (
-        exists
-      ) {
-        continue;
-      }
-
-      const pre =
-        await precheckEstablishedMint(
-          mint
-        );
-
-      if (
-        !pre
-      ) {
-        continue;
-      }
-
-      await FreshToken.create({
-        mint,
-
-        signature:
-          null,
-
-        program:
-          "ESTABLISHED_DISCOVERY",
-
-        origin:
-          "ESTABLISHED",
-
-        discoveredBy:
-          "DEXSCREENER_MARKET",
-
-        establishedDiscoveredAt:
-          new Date(),
-
-        paperOnly:
-          true
-      });
-
-      state.establishedDiscovered++;
-
-      added++;
-
-      log(
-        `🏛️ Established candidate ${mint} | Liquidity $${pre.liquidity.toFixed(0)} | H1 Vol $${pre.volumeH1.toFixed(0)}`
-      );
-
-      await securityScan(
-        mint
-      );
-
-      await sleep(
-        1200
-      );
-    }
-
-    // ----------------------------------------------
-    // RE-SCAN OLDER TOKENS ALREADY IN OUR DATABASE
-    // ----------------------------------------------
-
-    const oldCutoff =
-      new Date(
-        Date.now() -
-        MARKET_SCANNER.oldAgeMinutes *
-        60000
-      );
-
-    const oldTokens =
-      await FreshToken
-        .find({
-          createdAt: {
-            $lte:
-              oldCutoff
-          },
-
-          securityDecision:
-            "PASS",
-
-          $or: [
-            {
-              dexDecision:
-                "PASS"
-            },
-            {
-              finalDecision:
-                "APPROVED_CANDIDATE"
-            },
-            {
-              finalDecision:
-                "WATCH"
-            },
-            {
-              finalDecision:
-                "WAITING_DEX"
-            }
-          ]
-        })
-        .sort({
-          updatedAt: 1
-        })
-        .limit(
-          MARKET_SCANNER.maxDbRescansPerCycle
-        )
-        .select(
-          "mint"
-        )
-        .lean();
-
-    for (
-      const token
-      of oldTokens
-    ) {
-
-      await dexScan(
-        token.mint
-      );
-
-      state.establishedScanned++;
-
-      await sleep(
-        1200
-      );
-    }
-
-  } catch (err) {
-
-    errLog(
-      "Established Market Scanner",
-      err
-    );
-
-  } finally {
-
-    marketScannerBusy =
-      false;
-  }
-}
-
-function startMarketScanner() {
-
-  if (
-    !MARKET_SCANNER.enabled
-  ) {
-    return;
-  }
-
-  if (
-    marketScannerTimer
-  ) {
-    clearInterval(
-      marketScannerTimer
-    );
-  }
-
-  marketScannerTimer =
-    setInterval(
-      () => {
-
-        scanEstablishedMarket()
-          .catch(
-            err =>
-              errLog(
-                "Market scanner interval",
-                err
-              )
-          );
-
-      },
-      MARKET_SCANNER.scanMs
-    );
-
   setTimeout(
     () => {
 
-      scanEstablishedMarket()
+      scanOpportunities()
         .catch(
           err =>
             errLog(
-              "Market scanner startup",
+              "Opportunity startup",
               err
             )
         );
 
     },
-    15000
+    10000
   );
 
   log(
-    "🏛️ Established/Old Coin Scanner ONLINE"
+    "🎯 Opportunity Engine ONLINE"
   );
 }
 
@@ -4793,15 +3409,7 @@ function startPaperEngine() {
   state.paper =
     "online";
 
-  if (
-    paperMonitorTimer
-  ) {
-    clearInterval(
-      paperMonitorTimer
-    );
-  }
-
-  paperMonitorTimer =
+  paperTimer =
     setInterval(
       () => {
 
@@ -4818,667 +3426,29 @@ function startPaperEngine() {
       PAPER.monitorMs
     );
 
-  monitorPaperTrades()
-    .catch(
-      err =>
-        errLog(
-          "Paper startup monitor",
-          err
-        )
-    );
+  setTimeout(
+    () => {
 
-  log(
-    "🧪 Paper Trading Engine ONLINE | NO REAL ORDERS"
-  );
-}
-
-// ======================================================
-// HUNTER
-// ======================================================
-
-function findMint(
-  instructions
-) {
-
-  if (
-    !Array.isArray(
-      instructions
-    )
-  ) {
-    return null;
-  }
-
-  for (
-    const ix
-    of instructions
-  ) {
-
-    const type =
-      ix?.parsed?.type;
-
-    if (
-      type ===
-        "initializeMint" ||
-      type ===
-        "initializeMint2"
-    ) {
-
-      return (
-        ix?.parsed
-          ?.info
-          ?.mint ||
-        null
-      );
-    }
-  }
-
-  return null;
-}
-
-function allowHunterTransaction() {
-
-  const now =
-    Date.now();
-
-  if (
-    now -
-    hunterMinuteWindow >=
-    60000
-  ) {
-
-    hunterMinuteWindow =
-      now;
-
-    hunterMinuteCount =
-      0;
-  }
-
-  if (
-    hunterMinuteCount >=
-    HUNTER_MAX_TX_PER_MINUTE
-  ) {
-
-    state.hunterThrottled++;
-
-    return false;
-  }
-
-  hunterMinuteCount++;
-
-  return true;
-}
-
-async function processLogs(
-  event,
-  program
-) {
-
-  lastWsHeartbeat =
-    Date.now();
-
-  state.websocket =
-    "online";
-
-  if (
-    !event ||
-    event.err
-  ) {
-    return;
-  }
-
-  const relevant =
-    (
-      event.logs ||
-      []
-    ).some(
-      line =>
-        line.includes(
-          "Instruction: InitializeMint"
-        ) ||
-        line.includes(
-          "Instruction: InitializeMint2"
-        )
-    );
-
-  if (
-    !relevant
-  ) {
-    return;
-  }
-
-  if (
-    !allowHunterTransaction()
-  ) {
-    return;
-  }
-
-  if (
-    rpcQueue.length >=
-    RPC_SOFT_LIMIT
-  ) {
-
-    state.rpcDropped++;
-
-    return;
-  }
-
-  const signature =
-    event.signature;
-
-  if (
-    !signature ||
-    processing.has(
-      signature
-    )
-  ) {
-    return;
-  }
-
-  processing.add(
-    signature
-  );
-
-  try {
-
-    let tx =
-      null;
-
-    for (
-      let i = 0;
-      i < 3;
-      i++
-    ) {
-
-      tx =
-        await rpcCall(
-          () =>
-            connection
-              .getParsedTransaction(
-                signature,
-                {
-                  commitment:
-                    "confirmed",
-
-                  maxSupportedTransactionVersion:
-                    0
-                }
-              ),
-          2,
-          "HUNTER_TX"
-        )
+      monitorPaperTrades()
         .catch(
-          () => null
+          err =>
+            errLog(
+              "Paper startup",
+              err
+            )
         );
 
-      if (
-        tx
-      ) {
-        break;
-      }
-
-      await sleep(
-        700 +
-        i * 700
-      );
-    }
-
-    if (
-      !tx
-    ) {
-      return;
-    }
-
-    let mint =
-      findMint(
-        tx.transaction
-          .message
-          .instructions
-      );
-
-    if (
-      !mint &&
-      tx.meta
-        ?.innerInstructions
-    ) {
-
-      for (
-        const group
-        of tx.meta
-          .innerInstructions
-      ) {
-
-        mint =
-          findMint(
-            group.instructions
-          );
-
-        if (
-          mint
-        ) {
-          break;
-        }
-      }
-    }
-
-    if (
-      !mint
-    ) {
-      return;
-    }
-
-    state.detected++;
-
-    state.lastMint =
-      mint;
-
-    let token =
-      await FreshToken
-        .findOne({
-          mint
-        })
-        .lean();
-
-    if (
-      !token
-    ) {
-
-      await FreshToken.create({
-        mint,
-        signature,
-        program,
-
-        origin:
-          "FRESH",
-
-        discoveredBy:
-          "SOLANA_HUNTER",
-
-        paperOnly:
-          true
-      });
-
-      log(
-        "🆕 Fresh Mint",
-        mint
-      );
-
-      token =
-        await FreshToken
-          .findOne({
-            mint
-          })
-          .lean();
-    }
-
-    if (
-      !token
-        .securityChecked
-    ) {
-
-      await securityScan(
-        mint
-      );
-    }
-
-  } catch (err) {
-
-    if (
-      !String(
-        err?.message
-      ).includes(
-        "RPC_QUEUE_BUSY"
-      )
-    ) {
-
-      errLog(
-        "Hunter processing",
-        err
-      );
-    }
-
-  } finally {
-
-    processing.delete(
-      signature
-    );
-  }
-}
-
-// ======================================================
-// WEBSOCKET
-// ======================================================
-
-async function removeHunterSubscriptions() {
-
-  try {
-
-    if (
-      tokenSub !==
-      null
-    ) {
-
-      await connection
-        .removeOnLogsListener(
-          tokenSub
-        );
-
-      tokenSub =
-        null;
-    }
-
-  } catch {}
-
-  try {
-
-    if (
-      token2022Sub !==
-      null
-    ) {
-
-      await connection
-        .removeOnLogsListener(
-          token2022Sub
-        );
-
-      token2022Sub =
-        null;
-    }
-
-  } catch {}
-
-  try {
-
-    if (
-      slotSub !==
-      null
-    ) {
-
-      await connection
-        .removeSlotChangeListener(
-          slotSub
-        );
-
-      slotSub =
-        null;
-    }
-
-  } catch {}
-}
-
-async function startHunter() {
-
-  if (
-    hunterRestarting
-  ) {
-    return;
-  }
-
-  try {
-
-    tokenSub =
-      connection.onLogs(
-        TOKEN_PROGRAM_ID,
-
-        event =>
-          processLogs(
-            event,
-            "SPL_TOKEN"
-          )
-            .catch(
-              err =>
-                errLog(
-                  "SPL Hunter",
-                  err
-                )
-            ),
-
-        "confirmed"
-      );
-
-    token2022Sub =
-      connection.onLogs(
-        TOKEN_2022_PROGRAM_ID,
-
-        event =>
-          processLogs(
-            event,
-            "TOKEN_2022"
-          )
-            .catch(
-              err =>
-                errLog(
-                  "Token2022 Hunter",
-                  err
-                )
-            ),
-
-        "confirmed"
-      );
-
-    slotSub =
-      connection
-        .onSlotChange(
-          () => {
-
-            lastWsHeartbeat =
-              Date.now();
-
-            state.websocket =
-              "online";
-          }
-        );
-
-    state.hunter =
-      "running";
-
-    state.websocket =
-      "online";
-
-    lastWsHeartbeat =
-      Date.now();
-
-    log(
-      "🔎 Fresh Hunter + WebSocket running"
-    );
-
-  } catch (err) {
-
-    state.hunter =
-      "error";
-
-    state.websocket =
-      "error";
-
-    errLog(
-      "Hunter startup",
-      err
-    );
-  }
-}
-
-async function restartHunter(
-  reason
-) {
-
-  if (
-    hunterRestarting ||
-    shuttingDown
-  ) {
-    return;
-  }
-
-  hunterRestarting =
-    true;
-
-  state.websocket =
-    "reconnecting";
-
-  log(
-    `🔄 WebSocket restart: ${reason}`
+    },
+    5000
   );
 
-  try {
-
-    await removeHunterSubscriptions();
-
-    await sleep(
-      5000
-    );
-
-    await startHunter();
-
-    log(
-      "✅ WebSocket reconnected"
-    );
-
-  } catch (err) {
-
-    errLog(
-      "WebSocket reconnect",
-      err
-    );
-
-  } finally {
-
-    hunterRestarting =
-      false;
-  }
-}
-
-setInterval(
-  () => {
-
-    if (
-      shuttingDown
-    ) {
-      return;
-    }
-
-    const silentFor =
-      Date.now() -
-      lastWsHeartbeat;
-
-    if (
-      silentFor >
-      60000
-    ) {
-
-      restartHunter(
-        "heartbeat timeout"
-      );
-    }
-
-  },
-  30000
-);
-
-// ======================================================
-// RECOVERY
-// ======================================================
-
-async function recoverPending() {
-
-  if (
-    mongoose.connection
-      .readyState !==
-    1
-  ) {
-    return;
-  }
-
-  try {
-
-    const whales =
-      await FreshToken
-        .find({
-          finalDecision:
-            "CANDIDATE_PENDING_WHALE",
-
-          $or: [
-            {
-              whaleChecked: {
-                $ne: true
-              }
-            },
-            {
-              whaleStatus:
-                "RETRY"
-            }
-          ]
-        })
-        .sort({
-          preWhaleScore:
-            -1
-        })
-        .limit(
-          10
-        )
-        .select(
-          "mint"
-        )
-        .lean();
-
-    log(
-      `🐋 Whale recovery ${whales.length}`
-    );
-
-    for (
-      const token
-      of whales
-    ) {
-
-      queueWhale(
-        token.mint
-      );
-    }
-
-    await sleep(
-      5000
-    );
-
-    const security =
-      await FreshToken
-        .find({
-          securityChecked:
-            false
-        })
-        .sort({
-          detectedAt:
-            -1
-        })
-        .limit(
-          5
-        )
-        .select(
-          "mint"
-        )
-        .lean();
-
-    for (
-      const token
-      of security
-    ) {
-
-      await securityScan(
-        token.mint
-      );
-
-      await sleep(
-        1800
-      );
-    }
-
-  } catch (err) {
-
-    errLog(
-      "Recovery",
-      err
-    );
-  }
+  log(
+    "🧪 Paper Engine ONLINE"
+  );
 }
 
 // ======================================================
-// TELEGRAM COMMANDS
+// TELEGRAM
 // ======================================================
 
 function registerTelegramCommands() {
@@ -5486,16 +3456,15 @@ function registerTelegramCommands() {
   bot.start(
     ctx =>
       ctx.reply(
-        "🧪 LOMY V4.6.1\n\n" +
-        "🔎 Fresh Hunter ON\n" +
-        "🏛️ Established Coin Scanner ON\n" +
-        "🛡 Security ON\n" +
-        "💧 DEX ON\n" +
-        "🐋 Whale Engine ON\n" +
-        "🧠 Smart Score ON\n" +
-        "🎯 Opportunity Engine ON\n" +
-        "🧪 Paper Trading ON\n\n" +
-        "🔒 LIVE BUY/SELL OFF"
+        `🤖 LOMY ${VERSION}\n\n` +
+        `🔎 Fresh + Established Discovery ON\n` +
+        `🛡 Security ON\n` +
+        `💧 DEX ON\n` +
+        `🐋 Whale Engine ON\n` +
+        `🎯 Opportunity Engine ON\n` +
+        `🧪 Paper Trading ON\n\n` +
+        `🌐 Global Token WebSocket OFF\n` +
+        `🔒 LIVE TRADING OFF`
       )
   );
 
@@ -5503,34 +3472,29 @@ function registerTelegramCommands() {
     "status",
     ctx =>
       ctx.reply(
-
-        `🧪 LOMY V4.6.1 STATUS\n\n` +
+        `🤖 LOMY ${VERSION} STATUS\n\n` +
 
         `🌐 Server: ${state.server}\n` +
         `🗄 Database: ${state.database}\n` +
         `👛 Wallet: ${state.wallet}\n` +
         `⚡ Solana: ${state.solana}\n` +
-        `📡 Telegram: ${state.telegram}\n` +
-        `🔌 WebSocket: ${state.websocket}\n\n` +
+        `📡 Telegram: ${state.telegram}\n\n` +
 
-        `🔎 Fresh Hunter: ${state.hunter}\n` +
-        `🏛️ Established Scanner: ${MARKET_SCANNER.enabled ? "ON" : "OFF"}\n` +
+        `🔎 Discovery: ${state.discovery}\n` +
         `🛡 Security: ${state.security}\n` +
         `💧 DEX: ${state.dex}\n` +
         `🐋 Whales: ${state.whales}\n` +
         `🧪 Paper: ${state.paper}\n\n` +
 
-        `Fresh Detected: ${state.detected}\n` +
-        `Established Found: ${state.establishedDiscovered}\n` +
-        `Old DB Rescans: ${state.establishedScanned}\n` +
-        `Opportunity Cycles: ${state.opportunityCycles}\n\n` +
+        `Discovered: ${state.discovered}\n` +
+        `Fresh: ${state.fresh}\n` +
+        `Established: ${state.established}\n\n` +
 
         `RPC Queue: ${rpcQueue.length}\n` +
         `RPC 429: ${state.rpc429}\n` +
         `RPC Retries: ${state.rpcRetries}\n` +
         `RPC Dropped: ${state.rpcDropped}\n` +
-        `RPC Delay: ${Math.round(rpcDelay)}ms\n` +
-        `Hunter Throttled: ${state.hunterThrottled}\n\n` +
+        `RPC Delay: ${Math.round(rpcDelay)}ms\n\n` +
 
         `🔒 LIVE TRADING OFF`
       )
@@ -5540,12 +3504,11 @@ function registerTelegramCommands() {
     "network",
     ctx =>
       ctx.reply(
-
-        `🌐 NETWORK STATUS\n\n` +
+        `🌐 NETWORK SAFE STATUS\n\n` +
 
         `⚡ Solana: ${state.solana}\n` +
-        `🔌 WebSocket: ${state.websocket}\n` +
-        `📡 Telegram: ${state.telegram}\n\n` +
+        `📡 Telegram: ${state.telegram}\n` +
+        `🔌 Token WebSocket: DISABLED ✅\n\n` +
 
         `RPC Queue: ${rpcQueue.length}\n` +
         `RPC 429: ${state.rpc429}\n` +
@@ -5553,9 +3516,182 @@ function registerTelegramCommands() {
         `RPC Dropped: ${state.rpcDropped}\n` +
         `RPC Delay: ${Math.round(rpcDelay)}ms\n\n` +
 
-        `🐋 Whale Queue: ${whaleQueue.length}\n` +
-        `DEX Errors: ${state.dexNetworkErrors}`
+        `DEX Errors: ${state.dexErrors}\n` +
+        `Errors: ${state.errors}`
       )
+  );
+
+  bot.command(
+    "paper",
+    async ctx => {
+
+      const summary =
+        await getPaperSummary();
+
+      const a =
+        summary.account;
+
+      const total =
+        num(
+          a.totalTrades
+        );
+
+      const winRate =
+        total > 0
+          ?
+          num(
+            a.wins
+          ) /
+          total *
+          100
+          :
+          0;
+
+      await ctx.reply(
+        `🧪 PAPER ACCOUNT ${VERSION}\n\n` +
+
+        `Starting: $${num(a.startingBalanceUsd).toFixed(2)}\n` +
+        `Cash: $${num(a.cashBalanceUsd).toFixed(2)}\n` +
+        `Open Value: $${summary.openValue.toFixed(2)}\n` +
+        `Equity: $${summary.equity.toFixed(2)}\n` +
+        `Realized PnL: $${num(a.realizedPnlUsd).toFixed(2)}\n` +
+        `Unrealized PnL: $${summary.unrealizedPnl.toFixed(2)}\n\n` +
+
+        `Open Trades: ${summary.openTrades.length}/${PAPER.maxOpenTrades}\n` +
+        `Closed Trades: ${total}\n` +
+        `Wins: ${num(a.wins)}\n` +
+        `Losses: ${num(a.losses)}\n` +
+        `Win Rate: ${winRate.toFixed(1)}%\n\n` +
+
+        `Entry Attempts: ${state.paperEntryAttempts}\n` +
+        `Entry Skips: ${state.paperEntrySkips}\n` +
+        `Last Skip: ${state.lastSkip || "NONE"}\n\n` +
+
+        `🔒 NO REAL MONEY USED`
+      );
+    }
+  );
+
+  bot.command(
+    "positions",
+    async ctx => {
+
+      const trades =
+        await PaperTrade
+          .find({
+            testRun:
+              PAPER.testRun,
+
+            status:
+              "OPEN"
+          })
+          .sort({
+            openedAt:
+              -1
+          })
+          .lean();
+
+      if (
+        !trades.length
+      ) {
+
+        return ctx.reply(
+          "🧪 لا توجد Paper Positions مفتوحة حالياً."
+        );
+      }
+
+      let text =
+        `🧪 OPEN POSITIONS (${trades.length})\n`;
+
+      for (
+        let i = 0;
+        i < trades.length;
+        i++
+      ) {
+
+        const t =
+          trades[i];
+
+        const current =
+          num(
+            t.currentPrice ||
+            t.entryPrice
+          );
+
+        text +=
+          `\n━━━━━━━━━━━━━━\n` +
+          `${i + 1}) ${t.mint}\n` +
+          `Source: ${t.source}\n` +
+          `Entry: ${num(t.entryPrice)}\n` +
+          `Current: ${current}\n` +
+          `PnL: ${pctChange(current, num(t.entryPrice)).toFixed(2)}%\n` +
+          `SL: ${num(t.hardStopPrice)}\n` +
+          `Trail: ${t.trailingActive ? num(t.trailingStopPrice) : "OFF"}\n`;
+      }
+
+      await ctx.reply(
+        text
+      );
+    }
+  );
+
+  bot.command(
+    "trades",
+    async ctx => {
+
+      const trades =
+        await PaperTrade
+          .find({
+            testRun:
+              PAPER.testRun,
+
+            status:
+              "CLOSED"
+          })
+          .sort({
+            closedAt:
+              -1
+          })
+          .limit(
+            10
+          )
+          .lean();
+
+      if (
+        !trades.length
+      ) {
+
+        return ctx.reply(
+          "📚 لا توجد صفقات مغلقة حتى الآن."
+        );
+      }
+
+      let text =
+        `📚 LAST TRADES (${trades.length})\n`;
+
+      for (
+        let i = 0;
+        i < trades.length;
+        i++
+      ) {
+
+        const t =
+          trades[i];
+
+        text +=
+          `\n━━━━━━━━━━━━━━\n` +
+          `${i + 1}) ${t.mint}\n` +
+          `Source: ${t.source}\n` +
+          `Result: ${num(t.pnlPct).toFixed(2)}% | $${num(t.netPnlUsd).toFixed(2)}\n` +
+          `Exit: ${t.exitReason}\n` +
+          `Runup: ${num(t.maxRunupPct).toFixed(2)}%\n` +
+          `Drawdown: ${num(t.maxDrawdownPct).toFixed(2)}%\n`;
+      }
+
+      await ctx.reply(
+        text
+      );
+    }
   );
 
   bot.command(
@@ -5569,8 +3705,11 @@ function registerTelegramCommands() {
               "APPROVED_CANDIDATE"
           })
           .sort({
-            smartScore: -1,
-            liquidityUsd: -1
+            smartScore:
+              -1,
+
+            liquidityUsd:
+              -1
           })
           .limit(
             10
@@ -5591,8 +3730,7 @@ function registerTelegramCommands() {
 
       for (
         let i = 0;
-        i <
-        tokens.length;
+        i < tokens.length;
         i++
       ) {
 
@@ -5600,211 +3738,14 @@ function registerTelegramCommands() {
           tokens[i];
 
         text +=
-          `\n━━━━━━━━━━━━━━\n${i + 1}) ${t.mint}\n` +
-          `📂 Source: ${t.origin || "FRESH"}\n` +
+          `\n━━━━━━━━━━━━━━\n` +
+          `${i + 1}) ${t.mint}\n` +
+          `Source: ${t.origin}\n` +
           `🧠 Smart: ${num(t.smartScore)}/100\n` +
           `🛡 Security: ${num(t.securityScore)}/100\n` +
           `💧 DEX: ${num(t.dexScore)}/100\n` +
           `🐋 Whale: ${num(t.whaleScore)}/100 ${t.whaleDecision}\n` +
           `💵 Liquidity: $${num(t.liquidityUsd).toFixed(0)}\n`;
-      }
-
-      text +=
-        "\n🧪 PAPER ONLY";
-
-      await ctx.reply(
-        text
-      );
-    }
-  );
-
-  bot.command(
-    "paper",
-    async ctx => {
-
-      const s =
-        await getPaperSummary();
-
-      const a =
-        s.account;
-
-      const winRate =
-        num(
-          a.totalTrades
-        ) > 0
-          ?
-          (
-            num(
-              a.wins
-            ) /
-            num(
-              a.totalTrades
-            )
-          ) *
-          100
-          :
-          0;
-
-      await ctx.reply(
-
-        `🧪 PAPER ACCOUNT ${PAPER.testRun}\n\n` +
-
-        `Starting: $${num(a.startingBalanceUsd).toFixed(2)}\n` +
-        `Cash: $${num(a.cashBalanceUsd).toFixed(2)}\n` +
-        `Open Value: $${s.openValue.toFixed(2)}\n` +
-        `Equity: $${s.equity.toFixed(2)}\n` +
-        `Realized PnL: $${num(a.realizedPnlUsd).toFixed(2)}\n` +
-        `Unrealized PnL: $${s.unrealizedPnl.toFixed(2)}\n\n` +
-
-        `Open Trades: ${s.openTrades.length}/${PAPER.maxOpenTrades}\n` +
-        `Closed Trades: ${num(a.totalTrades)}\n` +
-        `Wins: ${num(a.wins)}\n` +
-        `Losses: ${num(a.losses)}\n` +
-        `Win Rate: ${winRate.toFixed(1)}%\n\n` +
-
-        `Entry Attempts: ${state.paperEntryAttempts}\n` +
-        `Entry Skips: ${state.paperEntrySkips}\n` +
-        `Last Skip: ${state.paperLastSkip || "NONE"}\n\n` +
-
-        `🔒 NO REAL MONEY USED`
-      );
-    }
-  );
-
-  bot.command(
-    "positions",
-    async ctx => {
-
-      const trades =
-        await PaperTrade
-          .find({
-            testRun:
-              PAPER.testRun,
-            status:
-              "OPEN"
-          })
-          .sort({
-            openedAt: -1
-          })
-          .limit(
-            10
-          )
-          .lean();
-
-      if (
-        !trades.length
-      ) {
-
-        return ctx.reply(
-          "🧪 لا توجد Paper Positions مفتوحة حالياً."
-        );
-      }
-
-      let text =
-        `🧪 OPEN PAPER POSITIONS (${trades.length})\n`;
-
-      for (
-        let i = 0;
-        i <
-        trades.length;
-        i++
-      ) {
-
-        const t =
-          trades[i];
-
-        const current =
-          num(
-            t.currentPrice ||
-            t.entryPrice
-          );
-
-        const pnlPct =
-          pctChange(
-            current,
-            num(
-              t.entryPrice
-            )
-          );
-
-        text +=
-          `\n━━━━━━━━━━━━━━\n${i + 1}) ${t.mint}\n` +
-          `Source: ${t.source || "UNKNOWN"}\n` +
-          `Trigger: ${t.entryTrigger || "UNKNOWN"}\n` +
-          `Entry: ${num(t.entryPrice)}\n` +
-          `Current: ${current}\n` +
-          `PnL: ${pnlPct.toFixed(2)}%\n` +
-          `High: ${num(t.highestPrice)}\n` +
-          `SL: ${num(t.hardStopPrice)}\n` +
-          `Trail: ${
-            t.trailingActive
-              ? num(
-                  t.trailingStopPrice
-                )
-              : "OFF"
-          }\n` +
-          `TP: ${num(t.takeProfitPrice)}\n`;
-      }
-
-      text +=
-        "\n🔒 PAPER ONLY";
-
-      await ctx.reply(
-        text
-      );
-    }
-  );
-
-  bot.command(
-    "trades",
-    async ctx => {
-
-      const trades =
-        await PaperTrade
-          .find({
-            testRun:
-              PAPER.testRun,
-            status:
-              "CLOSED"
-          })
-          .sort({
-            closedAt: -1
-          })
-          .limit(
-            10
-          )
-          .lean();
-
-      if (
-        !trades.length
-      ) {
-
-        return ctx.reply(
-          "📚 لا توجد Paper Trades مغلقة في الاختبار الجديد حتى الآن."
-        );
-      }
-
-      let text =
-        `📚 LAST PAPER TRADES (${trades.length})\n`;
-
-      for (
-        let i = 0;
-        i <
-        trades.length;
-        i++
-      ) {
-
-        const t =
-          trades[i];
-
-        text +=
-          `\n━━━━━━━━━━━━━━\n${i + 1}) ${t.mint}\n` +
-          `Source: ${t.source || "UNKNOWN"}\n` +
-          `Trigger: ${t.entryTrigger || "UNKNOWN"}\n` +
-          `Result: ${num(t.pnlPct).toFixed(2)}% | $${num(t.netPnlUsd).toFixed(2)}\n` +
-          `Exit: ${t.exitReason}\n` +
-          `Runup: ${num(t.maxRunupPct).toFixed(2)}%\n` +
-          `Drawdown: ${num(t.maxDrawdownPct).toFixed(2)}%\n`;
       }
 
       await ctx.reply(
@@ -5828,12 +3769,10 @@ function registerTelegramCommands() {
       const winRate =
         total > 0
           ?
-          (
-            num(
-              a.wins
-            ) /
-            total
-          ) *
+          num(
+            a.wins
+          ) /
+          total *
           100
           :
           0;
@@ -5843,80 +3782,76 @@ function registerTelegramCommands() {
           a.startingBalanceUsd
         ) > 0
           ?
-          (
-            num(
-              a.realizedPnlUsd
-            ) /
-            num(
-              a.startingBalanceUsd
-            )
+          num(
+            a.realizedPnlUsd
+          ) /
+          num(
+            a.startingBalanceUsd
           ) *
           100
           :
           0;
 
       const sourceStats =
-        await PaperTrade.aggregate([
-          {
-            $match: {
-              testRun:
-                PAPER.testRun,
-              status:
-                "CLOSED"
-            }
-          },
-          {
-            $group: {
-              _id:
-                "$source",
+        await PaperTrade
+          .aggregate([
+            {
+              $match: {
+                testRun:
+                  PAPER.testRun,
 
-              trades: {
-                $sum: 1
-              },
+                status:
+                  "CLOSED"
+              }
+            },
+            {
+              $group: {
+                _id:
+                  "$source",
 
-              pnl: {
-                $sum:
-                  "$netPnlUsd"
-              },
+                trades: {
+                  $sum: 1
+                },
 
-              avgPct: {
-                $avg:
-                  "$pnlPct"
+                pnl: {
+                  $sum:
+                    "$netPnlUsd"
+                },
+
+                avgPct: {
+                  $avg:
+                    "$pnlPct"
+                }
               }
             }
-          }
-        ]);
+          ]);
 
-      let sourceText =
+      let sources =
         "";
 
       for (
-        const x
+        const s
         of sourceStats
       ) {
 
-        sourceText +=
-          `\n${x._id || "UNKNOWN"}: ${x.trades} trades | $${num(x.pnl).toFixed(2)} | Avg ${num(x.avgPct).toFixed(2)}%`;
+        sources +=
+          `\n${s._id || "UNKNOWN"}: ${s.trades} trades | $${num(s.pnl).toFixed(2)} | Avg ${num(s.avgPct).toFixed(2)}%`;
       }
 
       await ctx.reply(
-
-        `📈 PAPER PERFORMANCE ${PAPER.testRun}\n\n` +
+        `📈 PAPER PERFORMANCE ${VERSION}\n\n` +
 
         `Trades: ${total}\n` +
         `Wins: ${num(a.wins)}\n` +
         `Losses: ${num(a.losses)}\n` +
-        `Breakeven: ${num(a.breakeven)}\n` +
         `Win Rate: ${winRate.toFixed(1)}%\n\n` +
 
-        `Realized PnL: $${num(a.realizedPnlUsd).toFixed(2)}\n` +
-        `Return on $${num(a.startingBalanceUsd).toFixed(2)}: ${returnPct.toFixed(2)}%\n` +
-        `Best Trade: ${num(a.bestTradePct).toFixed(2)}%\n` +
-        `Worst Trade: ${num(a.worstTradePct).toFixed(2)}%\n` +
+        `PnL: $${num(a.realizedPnlUsd).toFixed(2)}\n` +
+        `Return: ${returnPct.toFixed(2)}%\n` +
+        `Best: ${num(a.bestTradePct).toFixed(2)}%\n` +
+        `Worst: ${num(a.worstTradePct).toFixed(2)}%\n\n` +
 
-        `\n📂 BY SOURCE:${sourceText || "\nNo closed trades yet."}\n\n` +
-
-        `🧪 TEST DATA ONLY`
+        `📂 BY SOURCE:${sources || "\nNo trades yet."}`
       );
     }
   );
@@ -5930,8 +3865,8 @@ function registerTelegramCommands() {
         approved,
         fresh,
         established,
-        paperOpen,
-        paperClosed
+        open,
+        closed
       ] =
       await Promise.all([
 
@@ -5960,6 +3895,7 @@ function registerTelegramCommands() {
           .countDocuments({
             testRun:
               PAPER.testRun,
+
             status:
               "OPEN"
           }),
@@ -5968,32 +3904,29 @@ function registerTelegramCommands() {
           .countDocuments({
             testRun:
               PAPER.testRun,
+
             status:
               "CLOSED"
           })
       ]);
 
       await ctx.reply(
+        `📊 LOMY ${VERSION} STATS\n\n` +
 
-        `📊 LOMY V4.6.1 STATS\n\n` +
+        `Known Tokens: ${total}\n` +
+        `Fresh: ${fresh}\n` +
+        `Established: ${established}\n` +
+        `Approved: ${approved}\n\n` +
 
-        `Total Known Tokens: ${total}\n` +
-        `🆕 Fresh: ${fresh}\n` +
-        `🏛️ Established: ${established}\n` +
-        `✅ Approved: ${approved}\n\n` +
+        `Paper Open: ${open}\n` +
+        `Paper Closed: ${closed}\n\n` +
 
-        `🧪 Paper Open: ${paperOpen}\n` +
-        `📚 Paper Closed: ${paperClosed}\n` +
-        `🎯 Entry Attempts: ${state.paperEntryAttempts}\n` +
-        `⏭ Entry Skips: ${state.paperEntrySkips}\n\n` +
-
-        `Established Found: ${state.establishedDiscovered}\n` +
-        `Old DB Rescans: ${state.establishedScanned}\n` +
+        `Discovery Cycles: ${state.discoveryCycles}\n` +
         `Opportunity Cycles: ${state.opportunityCycles}\n\n` +
 
         `RPC 429: ${state.rpc429}\n` +
         `RPC Dropped: ${state.rpcDropped}\n` +
-        `Hunter Throttled: ${state.hunterThrottled}\n` +
+        `DEX Errors: ${state.dexErrors}\n` +
         `Errors: ${state.errors}\n\n` +
 
         `🔒 LIVE TRADING OFF`
@@ -6028,9 +3961,7 @@ function registerTelegramCommands() {
           );
 
         await ctx.reply(
-
-          `💰 Wallet balance: ${(balance / LAMPORTS_PER_SOL).toFixed(6)} SOL\n` +
-          `🔒 Paper Engine does not spend it.`
+          `💰 Wallet: ${(balance / LAMPORTS_PER_SOL).toFixed(6)} SOL\n🔒 Paper Engine does not spend it.`
         );
 
       } catch {
@@ -6050,10 +3981,6 @@ function registerTelegramCommands() {
       )
   );
 }
-
-// ======================================================
-// TELEGRAM ENGINE
-// ======================================================
 
 async function startTelegram() {
 
@@ -6089,16 +4016,12 @@ async function startTelegram() {
 
     try {
 
-      log(
-        "📡 Connecting Telegram via IPv4..."
-      );
-
       const me =
         await bot.telegram
           .getMe();
 
       log(
-        `✅ Telegram API reached: @${me.username || "BOT"}`
+        `✅ Telegram @${me.username || "BOT"}`
       );
 
       state.telegram =
@@ -6114,18 +4037,12 @@ async function startTelegram() {
             state.telegram =
               "error";
 
-            state.telegramRetries++;
-
             errLog(
               "Telegram polling",
               err
             );
           }
         );
-
-      log(
-        "✅ Telegram online"
-      );
 
       return;
 
@@ -6134,36 +4051,8 @@ async function startTelegram() {
       state.telegram =
         "retrying";
 
-      state.telegramRetries++;
-
-      console.error(
-        new Date().toISOString(),
-        "⚠️ Telegram connection failed",
-        {
-          message:
-            err?.message ||
-            null,
-
-          code:
-            err?.code ||
-            null,
-
-          errno:
-            err?.errno ||
-            null,
-
-          type:
-            err?.type ||
-            null,
-
-          cause:
-            err?.cause?.message ||
-            null,
-
-          causeCode:
-            err?.cause?.code ||
-            null
-        }
+      log(
+        "⚠️ Telegram retry..."
       );
 
       await sleep(
@@ -6183,67 +4072,36 @@ async function shutdown(
 
   if (
     shuttingDown
-  ) {
-    return;
-  }
+  ) return;
 
   shuttingDown =
     true;
 
   log(
-    `⚠️ ${signal} safe shutdown`
+    `⚠️ ${signal} shutdown`
   );
 
-  try {
-
-    await removeHunterSubscriptions();
-
-  } catch {}
-
-  for (
-    const timer
-    of dexRecheck.values()
+  if (
+    paperTimer
   ) {
-
-    clearTimeout(
-      timer
-    );
-  }
-
-  for (
-    const timer
-    of whaleRecheck.values()
-  ) {
-
-    clearTimeout(
-      timer
+    clearInterval(
+      paperTimer
     );
   }
 
   if (
-    paperMonitorTimer
+    discoveryTimer
   ) {
-
     clearInterval(
-      paperMonitorTimer
+      discoveryTimer
     );
   }
 
   if (
     opportunityTimer
   ) {
-
     clearInterval(
       opportunityTimer
-    );
-  }
-
-  if (
-    marketScannerTimer
-  ) {
-
-    clearInterval(
-      marketScannerTimer
     );
   }
 
@@ -6252,7 +4110,6 @@ async function shutdown(
     if (
       bot
     ) {
-
       bot.stop(
         signal
       );
@@ -6278,24 +4135,18 @@ async function shutdown(
 
     server.close(
       () =>
-        process.exit(
-          0
-        )
+        process.exit(0)
     );
 
     setTimeout(
       () =>
-        process.exit(
-          0
-        ),
+        process.exit(0),
       5000
     );
 
   } else {
 
-    process.exit(
-      0
-    );
+    process.exit(0);
   }
 }
 
@@ -6309,16 +4160,7 @@ process.on(
 
     errLog(
       "Unhandled rejection",
-
-      reason instanceof Error
-        ?
-        reason
-        :
-        new Error(
-          String(
-            reason
-          )
-        )
+      reason
     );
   }
 );
@@ -6357,25 +4199,28 @@ process.once(
 async function main() {
 
   console.log("");
-
   console.log(
     "================================"
   );
 
   console.log(
-    "🚀 LOMY SOLANA HUNTER V4.6.1"
+    `🚀 LOMY ${VERSION}`
   );
 
   console.log(
-    "🔎 FRESH TOKEN HUNTER"
+    "🌐 NETWORK SAFE ENGINE"
   );
 
   console.log(
-    "🏛️ ESTABLISHED / OLD COIN SCANNER"
+    "🔎 FRESH + ESTABLISHED DISCOVERY"
   );
 
   console.log(
-    "🧠 SMART SCORE ENGINE"
+    "🛡 SECURITY ENGINE"
+  );
+
+  console.log(
+    "💧 DEX ENGINE"
   );
 
   console.log(
@@ -6383,7 +4228,7 @@ async function main() {
   );
 
   console.log(
-    "🎯 CONTINUOUS OPPORTUNITY ENGINE"
+    "🎯 OPPORTUNITY ENGINE"
   );
 
   console.log(
@@ -6391,27 +4236,7 @@ async function main() {
   );
 
   console.log(
-    `💵 NEW TEST START: $${PAPER.startingBalanceUsd}`
-  );
-
-  console.log(
-    `🧪 TEST RUN: ${PAPER.testRun}`
-  );
-
-  console.log(
-    `🛑 SL: ${PAPER.hardStopPct}% | 🎯 TP: ${PAPER.takeProfitPct}%`
-  );
-
-  console.log(
-    `📈 TRAIL ON: +${PAPER.trailingActivationPct}% | DISTANCE: ${PAPER.trailingDistancePct}%`
-  );
-
-  console.log(
-    `🏛️ OLD COIN SCAN: EVERY ${MARKET_SCANNER.scanMs / 60000} MIN`
-  );
-
-  console.log(
-    `🎯 OPPORTUNITY RESCAN: EVERY ${PAPER.opportunityMs / 1000} SEC`
+    "🔌 GLOBAL TOKEN WEBSOCKET DISABLED"
   );
 
   console.log(
@@ -6430,52 +4255,37 @@ async function main() {
 
   await testSolana();
 
-  await migrateOldSmartScores();
-
   await ensurePaperAccount();
 
   startTelegram()
     .catch(
       err =>
         errLog(
-          "Telegram background",
+          "Telegram",
           err
         )
     );
-
-  if (
-    state.solana ===
-    "connected"
-  ) {
-
-    await startHunter();
-  }
 
   startPaperEngine();
 
   startOpportunityEngine();
 
-  startMarketScanner();
-
-  recoverPending()
-    .catch(
-      err =>
-        errLog(
-          "Recovery",
-          err
-        )
-    );
+  startDiscovery();
 
   log(
-    "✅ LOMY V4.6.1 STARTED"
+    `✅ LOMY ${VERSION} STARTED`
   );
 
   log(
-    "🔎 FRESH + 🏛️ ESTABLISHED MARKET ACTIVE"
+    "🔎 FRESH + ESTABLISHED SCANNER ACTIVE"
   );
 
   log(
-    "🧪 NEW PAPER TEST ACTIVE"
+    "🌐 NETWORK SAFE MODE ACTIVE"
+  );
+
+  log(
+    "🧪 PAPER TEST ACTIVE"
   );
 
   log(
