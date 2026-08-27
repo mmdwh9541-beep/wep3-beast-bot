@@ -18,10 +18,6 @@ const bs58 = require("bs58");
 const app = express();
 app.use(express.json());
 
-// ======================================================
-// CONFIG
-// ======================================================
-
 const PORT = Number(process.env.PORT) || 10000;
 
 const RPC_URL =
@@ -32,9 +28,14 @@ const WHALE_RPC_URL =
   process.env.WHALE_RPC_URL ||
   RPC_URL;
 
-const MONGODB_URI = process.env.MONGODB_URI;
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const BOT_PRIVATE_KEY = process.env.BOT_PRIVATE_KEY;
+const MONGODB_URI =
+  process.env.MONGODB_URI;
+
+const TELEGRAM_TOKEN =
+  process.env.TELEGRAM_TOKEN;
+
+const BOT_PRIVATE_KEY =
+  process.env.BOT_PRIVATE_KEY;
 
 const VERSION = "V4.6.2";
 const MODE = "PAPER";
@@ -49,6 +50,7 @@ const SCORE = {
 
 const PAPER = {
   enabled: true,
+
   testRun: "V4.6.2",
   accountKey: "v462-main",
 
@@ -85,7 +87,6 @@ const PAPER = {
 const DISCOVERY = {
   enabled: true,
 
-  // بدل WebSocket firehose
   scanMs: 120000,
 
   rawLimit: 40,
@@ -94,39 +95,35 @@ const DISCOVERY = {
   minLiquidityUsd: 5000,
   minVolumeH1Usd: 2500,
 
-  // العملة تعتبر Fresh لو عمر الـ Pair أقل من 6 ساعات
   freshAgeHours: 6
 };
 
-// ======================================================
-// SOLANA / TELEGRAM
-// ======================================================
+const connection =
+  new Connection(
+    RPC_URL,
+    {
+      commitment: "confirmed",
+      confirmTransactionInitialTimeout:
+        30000
+    }
+  );
 
-const connection = new Connection(
-  RPC_URL,
-  {
-    commitment: "confirmed",
-    confirmTransactionInitialTimeout: 30000
-  }
-);
+const whaleConnection =
+  new Connection(
+    WHALE_RPC_URL,
+    {
+      commitment: "confirmed",
+      confirmTransactionInitialTimeout:
+        30000
+    }
+  );
 
-const whaleConnection = new Connection(
-  WHALE_RPC_URL,
-  {
-    commitment: "confirmed",
-    confirmTransactionInitialTimeout: 30000
-  }
-);
-
-const telegramAgent = new https.Agent({
-  keepAlive: true,
-  family: 4,
-  timeout: 30000
-});
-
-// ======================================================
-// GLOBAL STATE
-// ======================================================
+const telegramAgent =
+  new https.Agent({
+    keepAlive: true,
+    family: 4,
+    timeout: 30000
+  });
 
 let wallet = null;
 let bot = null;
@@ -142,12 +139,15 @@ let discoveryBusy = false;
 let opportunityBusy = false;
 let paperBusy = false;
 
-const paperOpening = new Set();
-
-const whaleQueued = new Set();
-const whaleQueue = [];
-
 let whaleWorkerBusy = false;
+
+const paperOpening =
+  new Set();
+
+const whaleQueued =
+  new Set();
+
+const whaleQueue = [];
 
 const state = {
   server: "starting",
@@ -190,10 +190,6 @@ const state = {
   lastMint: null
 };
 
-// ======================================================
-// HELPERS
-// ======================================================
-
 function log(...args) {
   console.log(
     new Date().toISOString(),
@@ -201,7 +197,10 @@ function log(...args) {
   );
 }
 
-function errLog(name, err) {
+function errLog(
+  name,
+  err
+) {
   state.errors++;
 
   console.error(
@@ -215,12 +214,16 @@ function errLog(name, err) {
 function sleep(ms) {
   return new Promise(
     resolve =>
-      setTimeout(resolve, ms)
+      setTimeout(
+        resolve,
+        ms
+      )
   );
 }
 
 function num(v) {
-  const n = Number(v);
+  const n =
+    Number(v);
 
   return Number.isFinite(n)
     ? n
@@ -258,11 +261,15 @@ function is429(err) {
   return (
     s.includes("429") ||
     s.includes("rate limit") ||
-    s.includes("too many requests")
+    s.includes(
+      "too many requests"
+    )
   );
 }
 
-function pairAgeHours(pair) {
+function pairAgeHours(
+  pair
+) {
   const created =
     num(
       pair?.pairCreatedAt
@@ -280,10 +287,6 @@ function pairAgeHours(pair) {
   ) /
   3600000;
 }
-
-// ======================================================
-// NETWORK-SAFE RPC
-// ======================================================
 
 const rpcQueue = [];
 
@@ -362,8 +365,11 @@ async function runRpcQueue() {
       const job =
         rpcQueue.shift();
 
-      let lastError = null;
-      let success = false;
+      let lastError =
+        null;
+
+      let success =
+        false;
 
       for (
         let attempt = 1;
@@ -386,7 +392,9 @@ async function runRpcQueue() {
             result
           );
 
-          success = true;
+          success =
+            true;
+
           break;
 
         } catch (err) {
@@ -445,15 +453,14 @@ async function runRpcQueue() {
 
   } finally {
 
-    rpcBusy = false;
+    rpcBusy =
+      false;
   }
 }
 
-// ======================================================
-// HTTPS JSON
-// ======================================================
-
-function httpsJson(url) {
+function httpsJson(
+  url
+) {
   return new Promise(
     (
       resolve,
@@ -490,7 +497,8 @@ function httpsJson(url) {
             res.on(
               "data",
               chunk => {
-                body += chunk;
+                body +=
+                  chunk;
               }
             );
 
@@ -499,10 +507,11 @@ function httpsJson(url) {
               () => {
 
                 if (
-                  res.statusCode < 200 ||
-                  res.statusCode >= 300
+                  res.statusCode <
+                    200 ||
+                  res.statusCode >=
+                    300
                 ) {
-
                   return reject(
                     new Error(
                       `HTTP ${res.statusCode}`
@@ -511,15 +520,12 @@ function httpsJson(url) {
                 }
 
                 try {
-
                   resolve(
                     JSON.parse(
                       body
                     )
                   );
-
                 } catch {
-
                   reject(
                     new Error(
                       "INVALID_JSON"
@@ -548,10 +554,6 @@ function httpsJson(url) {
     }
   );
 }
-
-// ======================================================
-// DATABASE
-// ======================================================
 
 const tokenSchema =
   new mongoose.Schema(
@@ -700,7 +702,6 @@ const tokenSchema =
         default: true
       }
     },
-
     {
       timestamps: true
     }
@@ -843,7 +844,6 @@ const paperTradeSchema =
       lastPriceCheckAt:
         Date
     },
-
     {
       timestamps: true
     }
@@ -898,51 +898,52 @@ const paperAccountSchema =
         default: 0
       }
     },
-
     {
       timestamps: true
     }
   );
 
 const FreshToken =
-  mongoose.models.FreshToken ||
+  mongoose.models
+    .FreshToken ||
   mongoose.model(
     "FreshToken",
     tokenSchema
   );
 
 const PaperTrade =
-  mongoose.models.PaperTrade ||
+  mongoose.models
+    .PaperTrade ||
   mongoose.model(
     "PaperTrade",
     paperTradeSchema
   );
 
 const PaperAccount =
-  mongoose.models.PaperAccount ||
+  mongoose.models
+    .PaperAccount ||
   mongoose.model(
     "PaperAccount",
     paperAccountSchema
   );
 
-// ======================================================
-// SERVER / DB
-// ======================================================
-
 app.get(
   "/",
-  (req, res) => {
-
+  (
+    req,
+    res
+  ) =>
     res.send(
       "✅ LOMY V4.6.2 NETWORK SAFE | PAPER ONLY"
-    );
-  }
+    )
 );
 
 app.get(
   "/health",
-  (req, res) => {
-
+  (
+    req,
+    res
+  ) =>
     res.json({
       ...state,
 
@@ -967,12 +968,10 @@ app.get(
         Math.floor(
           process.uptime()
         )
-    });
-  }
+    })
 );
 
 async function startServer() {
-
   return new Promise(
     (
       resolve,
@@ -1005,7 +1004,6 @@ async function startServer() {
 }
 
 async function connectDatabase() {
-
   try {
 
     if (
@@ -1046,12 +1044,7 @@ async function connectDatabase() {
   }
 }
 
-// ======================================================
-// WALLET
-// ======================================================
-
 async function loadWallet() {
-
   try {
 
     if (
@@ -1135,7 +1128,6 @@ async function loadWallet() {
 }
 
 async function testSolana() {
-
   if (
     !wallet
   ) {
@@ -1181,12 +1173,9 @@ async function testSolana() {
   }
 }
 
-// ======================================================
-// DEX
-// ======================================================
-
-async function fetchPairs(mint) {
-
+async function fetchPairs(
+  mint
+) {
   const url =
     "https://api.dexscreener.com/token-pairs/v1/solana/" +
     encodeURIComponent(
@@ -1206,7 +1195,7 @@ async function fetchPairs(mint) {
       ? data
       : [];
 
-  } catch (err) {
+  } catch {
 
     state.dexErrors++;
 
@@ -1214,8 +1203,9 @@ async function fetchPairs(mint) {
   }
 }
 
-function bestPool(pairs) {
-
+function bestPool(
+  pairs
+) {
   return [
     ...pairs
   ]
@@ -1225,7 +1215,10 @@ function bestPool(pairs) {
         "solana"
     )
     .sort(
-      (a, b) =>
+      (
+        a,
+        b
+      ) =>
         num(
           b?.liquidity
             ?.usd
@@ -1238,31 +1231,39 @@ function bestPool(pairs) {
     null;
 }
 
-function calculateDexScore(pair) {
-
+function calculateDexScore(
+  pair
+) {
   const liquidity =
     num(
-      pair?.liquidity?.usd
+      pair?.liquidity
+        ?.usd
     );
 
   const volumeM5 =
     num(
-      pair?.volume?.m5
+      pair?.volume
+        ?.m5
     );
 
   const volumeH1 =
     num(
-      pair?.volume?.h1
+      pair?.volume
+        ?.h1
     );
 
   const buys =
     num(
-      pair?.txns?.m5?.buys
+      pair?.txns
+        ?.m5
+        ?.buys
     );
 
   const sells =
     num(
-      pair?.txns?.m5?.sells
+      pair?.txns
+        ?.m5
+        ?.sells
     );
 
   let score = 0;
@@ -1271,12 +1272,10 @@ function calculateDexScore(pair) {
     liquidity >= 50000
   ) {
     score += 40;
-
   } else if (
     liquidity >= 10000
   ) {
     score += 35;
-
   } else if (
     liquidity >= 5000
   ) {
@@ -1287,7 +1286,6 @@ function calculateDexScore(pair) {
     volumeM5 >= 1000
   ) {
     score += 20;
-
   } else if (
     volumeM5 >= 300
   ) {
@@ -1301,18 +1299,15 @@ function calculateDexScore(pair) {
   }
 
   if (
-    buys +
-    sells >=
+    buys + sells >=
     10
   ) {
     score += 15;
   }
 
   if (
-    buys >
-      sells &&
-    sells >
-      0
+    buys > sells &&
+    sells > 0
   ) {
     score += 15;
   }
@@ -1323,27 +1318,20 @@ function calculateDexScore(pair) {
   );
 }
 
-// ======================================================
-// SMART SCORE
-// ======================================================
-
 function calculateSmartScore(
   security,
   dex,
   whale
 ) {
-
   return Math.round(
     num(
       security
     ) *
       SCORE.security +
-
     num(
       dex
     ) *
       SCORE.dex +
-
     num(
       whale
     ) *
@@ -1355,7 +1343,6 @@ function smartDecision(
   score,
   whaleDecision
 ) {
-
   if (
     whaleDecision ===
     "DANGER"
@@ -1376,19 +1363,15 @@ function smartDecision(
     score >=
       SCORE.approval
   ) {
-
     return "APPROVED_CANDIDATE";
   }
 
   return "WATCH_SCORE";
 }
 
-// ======================================================
-// SECURITY
-// ======================================================
-
-async function securityScan(mint) {
-
+async function securityScan(
+  mint
+) {
   state.security =
     "scanning";
 
@@ -1498,7 +1481,6 @@ async function securityScan(mint) {
         },
         {
           $set: {
-
             securityChecked:
               true,
 
@@ -1547,15 +1529,10 @@ async function securityScan(mint) {
   }
 }
 
-// ======================================================
-// WHALE SCORE
-// ======================================================
-
 function holderPct(
   amount,
   totalSupply
 ) {
-
   try {
 
     const a =
@@ -1571,8 +1548,7 @@ function holderPct(
       );
 
     if (
-      s <=
-      0n
+      s <= 0n
     ) {
       return 0;
     }
@@ -1589,24 +1565,22 @@ function holderPct(
     );
 
   } catch {
-
     return 0;
   }
 }
 
-function whaleScore(data) {
-
+function whaleScore(
+  data
+) {
   let score =
     100;
 
-  const flags =
-    [];
+  const flags = [];
 
   if (
     data.largest >=
     25
   ) {
-
     score -= 45;
 
     flags.push(
@@ -1617,7 +1591,6 @@ function whaleScore(data) {
     data.largest >=
     15
   ) {
-
     score -= 30;
 
     flags.push(
@@ -1628,15 +1601,12 @@ function whaleScore(data) {
     data.largest >=
     10
   ) {
-
     score -= 15;
   }
 
   if (
-    data.top10 >=
-    80
+    data.top10 >= 80
   ) {
-
     score -= 40;
 
     flags.push(
@@ -1647,7 +1617,6 @@ function whaleScore(data) {
     data.top10 >=
     60
   ) {
-
     score -= 25;
 
     flags.push(
@@ -1658,15 +1627,12 @@ function whaleScore(data) {
     data.top10 >=
     45
   ) {
-
     score -= 10;
   }
 
   if (
-    data.owners <
-    5
+    data.owners < 5
   ) {
-
     score -= 15;
   }
 
@@ -1694,12 +1660,9 @@ function whaleScore(data) {
   };
 }
 
-// ======================================================
-// WHALE QUEUE
-// ======================================================
-
-function queueWhale(mint) {
-
+function queueWhale(
+  mint
+) {
   if (
     whaleQueued.has(
       mint
@@ -1727,7 +1690,6 @@ function queueWhale(mint) {
 }
 
 async function runWhaleWorker() {
-
   if (
     whaleWorkerBusy
   ) {
@@ -1754,7 +1716,6 @@ async function runWhaleWorker() {
         mint
       );
 
-      // مهم جدًا لتجنب 429
       await sleep(
         4000
       );
@@ -1770,12 +1731,74 @@ async function runWhaleWorker() {
   }
 }
 
-// ======================================================
-// WHALE ENGINE
-// ======================================================
+async function getWhaleOwnersBatched(
+  publicKeys
+) {
+  const BATCH_SIZE = 5;
 
-async function whaleScan(mint) {
+  const allAccounts = [];
 
+  for (
+    let start = 0;
+    start <
+      publicKeys.length;
+    start +=
+      BATCH_SIZE
+  ) {
+
+    const batch =
+      publicKeys.slice(
+        start,
+        start +
+          BATCH_SIZE
+      );
+
+    const batchNumber =
+      Math.floor(
+        start /
+        BATCH_SIZE
+      ) + 1;
+
+    log(
+      `🐋 Whale owners batch ${batchNumber} | ${batch.length} accounts`
+    );
+
+    const response =
+      await rpcCall(
+        () =>
+          whaleConnection
+            .getMultipleParsedAccounts(
+              batch,
+              "confirmed"
+            ),
+        0,
+        `WHALE_OWNERS_BATCH_${batchNumber}`
+      );
+
+    allAccounts.push(
+      ...(
+        response?.value ||
+        []
+      )
+    );
+
+    if (
+      start +
+        BATCH_SIZE <
+      publicKeys.length
+    ) {
+      await sleep(
+        750
+      );
+    }
+  }
+
+  return allAccounts;
+}
+
+async function whaleScan(
+  mint
+) {
   state.whales =
     "scanning";
 
@@ -1817,6 +1840,15 @@ async function whaleScan(mint) {
         "0"
       );
 
+    if (
+      totalSupply ===
+      "0"
+    ) {
+      throw new Error(
+        "TOKEN_SUPPLY_ZERO"
+      );
+    }
+
     const largestResponse =
       await rpcCall(
         () =>
@@ -1844,24 +1876,22 @@ async function whaleScan(mint) {
     if (
       !accounts.length
     ) {
-      return;
+      throw new Error(
+        "NO_HOLDER_ACCOUNTS"
+      );
     }
 
-    const parsed =
-      await rpcCall(
-        () =>
-          whaleConnection
-            .getMultipleParsedAccounts(
-              accounts.map(
-                x =>
-                  new PublicKey(
-                    x.address
-                  )
-              ),
-              "confirmed"
-            ),
-        0,
-        "WHALE_OWNERS"
+    const publicKeys =
+      accounts.map(
+        x =>
+          new PublicKey(
+            x.address
+          )
+      );
+
+    const parsedAccounts =
+      await getWhaleOwnersBatched(
+        publicKeys
       );
 
     const owners =
@@ -1872,13 +1902,13 @@ async function whaleScan(mint) {
 
     for (
       let i = 0;
-      i < accounts.length;
+      i <
+      accounts.length;
       i++
     ) {
 
       const owner =
-        parsed
-          ?.value
+        parsedAccounts
           ?.[i]
           ?.data
           ?.parsed
@@ -1924,6 +1954,10 @@ async function whaleScan(mint) {
 
     const top10 =
       percentages
+        .slice(
+          0,
+          10
+        )
         .reduce(
           (
             a,
@@ -1962,7 +1996,6 @@ async function whaleScan(mint) {
         },
         {
           $set: {
-
             whaleStatus:
               "DONE",
 
@@ -2025,15 +2058,10 @@ async function whaleScan(mint) {
   }
 }
 
-// ======================================================
-// DEX ANALYSIS
-// ======================================================
-
 async function analyzeDex(
   mint,
   pair
 ) {
-
   state.dex =
     "scanning";
 
@@ -2046,37 +2074,46 @@ async function analyzeDex(
 
     const liquidity =
       num(
-        pair?.liquidity?.usd
+        pair?.liquidity
+          ?.usd
       );
 
     const volumeM5 =
       num(
-        pair?.volume?.m5
+        pair?.volume
+          ?.m5
       );
 
     const volumeH1 =
       num(
-        pair?.volume?.h1
+        pair?.volume
+          ?.h1
       );
 
     const buys =
       num(
-        pair?.txns?.m5?.buys
+        pair?.txns
+          ?.m5
+          ?.buys
       );
 
     const sells =
       num(
-        pair?.txns?.m5?.sells
+        pair?.txns
+          ?.m5
+          ?.sells
       );
 
     const priceChangeM5 =
       num(
-        pair?.priceChange?.m5
+        pair?.priceChange
+          ?.m5
       );
 
     const priceChangeH1 =
       num(
-        pair?.priceChange?.h1
+        pair?.priceChange
+          ?.h1
       );
 
     const dexDecision =
@@ -2101,12 +2138,12 @@ async function analyzeDex(
     const preWhale =
       Math.round(
         num(
-          token?.securityScore
+          token
+            ?.securityScore
         ) *
-        0.60 +
-
+          0.60 +
         dexScore *
-        0.40
+          0.40
       );
 
     await FreshToken
@@ -2116,7 +2153,6 @@ async function analyzeDex(
         },
         {
           $set: {
-
             dexChecked:
               true,
 
@@ -2130,7 +2166,8 @@ async function analyzeDex(
 
             pairCreatedAt:
               num(
-                pair.pairCreatedAt
+                pair
+                  .pairCreatedAt
               ),
 
             priceUsd:
@@ -2154,7 +2191,6 @@ async function analyzeDex(
             priceChangeH1,
 
             dexScore,
-
             dexDecision,
 
             preWhaleScore:
@@ -2181,7 +2217,6 @@ async function analyzeDex(
       preWhale >=
         70
     ) {
-
       queueWhale(
         mint
       );
@@ -2201,12 +2236,7 @@ async function analyzeDex(
   }
 }
 
-// ======================================================
-// DISCOVERY - NO GLOBAL WEBSOCKET
-// ======================================================
-
 async function discoveryFeed() {
-
   const endpoints = [
     "https://api.dexscreener.com/token-profiles/latest/v1",
     "https://api.dexscreener.com/token-boosts/latest/v1",
@@ -2262,7 +2292,6 @@ async function discoveryFeed() {
             mint
           )
         ) {
-
           map.set(
             mint,
             item
@@ -2277,7 +2306,7 @@ async function discoveryFeed() {
         }
       }
 
-    } catch (err) {
+    } catch {
 
       state.dexErrors++;
     }
@@ -2293,7 +2322,6 @@ async function discoveryFeed() {
 }
 
 async function runDiscovery() {
-
   if (
     discoveryBusy ||
     shuttingDown ||
@@ -2357,12 +2385,14 @@ async function runDiscovery() {
 
       const liquidity =
         num(
-          pair?.liquidity?.usd
+          pair?.liquidity
+            ?.usd
         );
 
       const volumeH1 =
         num(
-          pair?.volume?.h1
+          pair?.volume
+            ?.h1
         );
 
       if (
@@ -2374,16 +2404,15 @@ async function runDiscovery() {
         continue;
       }
 
-      const ageHours =
+      const origin =
         pairAgeHours(
           pair
-        );
-
-      const origin =
-        ageHours <=
+        ) <=
           DISCOVERY.freshAgeHours
-          ? "FRESH"
-          : "ESTABLISHED";
+          ?
+          "FRESH"
+          :
+          "ESTABLISHED";
 
       let token =
         await FreshToken
@@ -2396,22 +2425,24 @@ async function runDiscovery() {
         !token
       ) {
 
-        await FreshToken.create({
-          mint,
+        await FreshToken
+          .create({
+            mint,
 
-          origin,
+            origin,
 
-          discoveredBy:
-            "DEX_DISCOVERY",
+            discoveredBy:
+              "DEX_DISCOVERY",
 
-          pairCreatedAt:
-            num(
-              pair.pairCreatedAt
-            ),
+            pairCreatedAt:
+              num(
+                pair
+                  .pairCreatedAt
+              ),
 
-          paperOnly:
-            true
-        });
+            paperOnly:
+              true
+          });
 
         state.discovered++;
 
@@ -2419,11 +2450,8 @@ async function runDiscovery() {
           origin ===
           "FRESH"
         ) {
-
           state.fresh++;
-
         } else {
-
           state.established++;
         }
 
@@ -2442,7 +2470,6 @@ async function runDiscovery() {
         if (
           passed
         ) {
-
           await analyzeDex(
             mint,
             pair
@@ -2451,7 +2478,6 @@ async function runDiscovery() {
 
       } else {
 
-        // تحديث بيانات السوق بدون RPC
         await analyzeDex(
           mint,
           pair
@@ -2483,7 +2509,6 @@ async function runDiscovery() {
 }
 
 function startDiscovery() {
-
   runDiscovery()
     .catch(
       err =>
@@ -2495,8 +2520,7 @@ function startDiscovery() {
 
   discoveryTimer =
     setInterval(
-      () => {
-
+      () =>
         runDiscovery()
           .catch(
             err =>
@@ -2504,9 +2528,7 @@ function startDiscovery() {
                 "Discovery interval",
                 err
               )
-          );
-
-      },
+          ),
       DISCOVERY.scanMs
     );
 
@@ -2515,12 +2537,7 @@ function startDiscovery() {
   );
 }
 
-// ======================================================
-// PAPER ACCOUNT
-// ======================================================
-
 async function ensurePaperAccount() {
-
   let account =
     await PaperAccount
       .findOne({
@@ -2574,12 +2591,7 @@ async function ensurePaperAccount() {
   return account;
 }
 
-// ======================================================
-// PAPER ENTRY + OPPORTUNITY ENGINE
-// ======================================================
-
 async function getPaperSummary() {
-
   const account =
     await ensurePaperAccount();
 
@@ -2646,7 +2658,6 @@ async function getPaperSummary() {
 async function recentMintTrades(
   mint
 ) {
-
   const since =
     new Date(
       Date.now() -
@@ -2679,7 +2690,6 @@ function entryFilter(
   token,
   pair
 ) {
-
   const marketPrice =
     num(
       pair?.priceUsd
@@ -2687,33 +2697,41 @@ function entryFilter(
 
   const liquidity =
     num(
-      pair?.liquidity?.usd
+      pair?.liquidity
+        ?.usd
     );
 
   const volumeM5 =
     num(
-      pair?.volume?.m5
+      pair?.volume
+        ?.m5
     );
 
   const buys =
     num(
-      pair?.txns?.m5?.buys
+      pair?.txns
+        ?.m5
+        ?.buys
     );
 
   const sells =
     num(
-      pair?.txns?.m5?.sells
+      pair?.txns
+        ?.m5
+        ?.sells
     );
 
   const priceChangeM5 =
     num(
-      pair?.priceChange?.m5
+      pair?.priceChange
+        ?.m5
     );
 
   const buySellRatio =
     sells > 0
       ?
-      buys / sells
+      buys /
+      sells
       :
       buys > 0
         ?
@@ -2725,7 +2743,6 @@ function entryFilter(
     token.finalDecision !==
     "APPROVED_CANDIDATE"
   ) {
-
     return {
       ok: false,
       reason:
@@ -2737,7 +2754,6 @@ function entryFilter(
     token.whaleDecision !==
     "SAFE"
   ) {
-
     return {
       ok: false,
       reason:
@@ -2746,10 +2762,8 @@ function entryFilter(
   }
 
   if (
-    marketPrice <=
-    0
+    marketPrice <= 0
   ) {
-
     return {
       ok: false,
       reason:
@@ -2761,7 +2775,6 @@ function entryFilter(
     liquidity <
     PAPER.minLiquidityUsd
   ) {
-
     return {
       ok: false,
       reason:
@@ -2773,7 +2786,6 @@ function entryFilter(
     volumeM5 <
     PAPER.minVolumeM5
   ) {
-
     return {
       ok: false,
       reason:
@@ -2785,7 +2797,6 @@ function entryFilter(
     buys <
     PAPER.minBuysM5
   ) {
-
     return {
       ok: false,
       reason:
@@ -2797,7 +2808,6 @@ function entryFilter(
     buySellRatio <
     PAPER.minBuySellRatio
   ) {
-
     return {
       ok: false,
       reason:
@@ -2809,7 +2819,6 @@ function entryFilter(
     priceChangeM5 <
     PAPER.minPriceChangeM5
   ) {
-
     return {
       ok: false,
       reason:
@@ -2821,7 +2830,6 @@ function entryFilter(
     priceChangeM5 >
     PAPER.maxPriceChangeM5
   ) {
-
     return {
       ok: false,
       reason:
@@ -2831,7 +2839,6 @@ function entryFilter(
 
   return {
     ok: true,
-
     marketPrice,
     liquidity,
     volumeM5,
@@ -2847,7 +2854,6 @@ async function queuePaperEntry(
   trigger =
     "OPPORTUNITY"
 ) {
-
   if (
     !PAPER.enabled ||
     LIVE_TRADING ||
@@ -2905,7 +2911,6 @@ async function queuePaperEntry(
       openCount >=
       PAPER.maxOpenTrades
     ) {
-
       state.paperEntrySkips++;
 
       state.lastSkip =
@@ -2936,7 +2941,6 @@ async function queuePaperEntry(
       history.length >=
       PAPER.maxEntriesPerMint24h
     ) {
-
       state.paperEntrySkips++;
 
       state.lastSkip =
@@ -2969,7 +2973,6 @@ async function queuePaperEntry(
         minutes <
         PAPER.cooldownMinutes
       ) {
-
         state.paperEntrySkips++;
 
         state.lastSkip =
@@ -2979,20 +2982,16 @@ async function queuePaperEntry(
       }
     }
 
-    const pairs =
-      await fetchPairs(
-        mint
-      );
-
     const pair =
       bestPool(
-        pairs
+        await fetchPairs(
+          mint
+        )
       );
 
     if (
       !pair
     ) {
-
       state.paperEntrySkips++;
 
       state.lastSkip =
@@ -3010,7 +3009,6 @@ async function queuePaperEntry(
     if (
       !check.ok
     ) {
-
       state.paperEntrySkips++;
 
       state.lastSkip =
@@ -3035,10 +3033,8 @@ async function queuePaperEntry(
       );
 
     if (
-      allocatedUsd <
-      1
+      allocatedUsd < 1
     ) {
-
       state.paperEntrySkips++;
 
       state.lastSkip =
@@ -3089,82 +3085,86 @@ async function queuePaperEntry(
         100
       );
 
-    await PaperTrade.create({
-      mint,
+    await PaperTrade
+      .create({
+        mint,
 
-      testRun:
-        PAPER.testRun,
+        testRun:
+          PAPER.testRun,
 
-      source:
-        token.origin ||
-        "UNKNOWN",
+        source:
+          token.origin ||
+          "UNKNOWN",
 
-      entryTrigger:
-        trigger,
+        entryTrigger:
+          trigger,
 
-      status:
-        "OPEN",
+        status:
+          "OPEN",
 
-      marketEntryPrice:
-        check.marketPrice,
+        marketEntryPrice:
+          check.marketPrice,
 
-      entryPrice,
+        entryPrice,
 
-      currentPrice:
-        check.marketPrice,
+        currentPrice:
+          check.marketPrice,
 
-      highestPrice:
-        check.marketPrice,
+        highestPrice:
+          check.marketPrice,
 
-      lowestPrice:
-        check.marketPrice,
+        lowestPrice:
+          check.marketPrice,
 
-      allocatedUsd,
-      quantity,
-      entryFeeUsd,
+        allocatedUsd,
 
-      hardStopPrice,
-      takeProfitPrice,
+        quantity,
 
-      trailingActive:
-        false,
+        entryFeeUsd,
 
-      trailingStopPrice:
-        null,
+        hardStopPrice,
 
-      securityScore:
-        token.securityScore,
+        takeProfitPrice,
 
-      dexScore:
-        token.dexScore,
+        trailingActive:
+          false,
 
-      whaleScore:
-        token.whaleScore,
+        trailingStopPrice:
+          null,
 
-      smartScore:
-        token.smartScore,
+        securityScore:
+          token.securityScore,
 
-      liquidityAtEntry:
-        check.liquidity,
+        dexScore:
+          token.dexScore,
 
-      volumeM5AtEntry:
-        check.volumeM5,
+        whaleScore:
+          token.whaleScore,
 
-      buysM5AtEntry:
-        check.buys,
+        smartScore:
+          token.smartScore,
 
-      sellsM5AtEntry:
-        check.sells,
+        liquidityAtEntry:
+          check.liquidity,
 
-      buySellRatioAtEntry:
-        check.buySellRatio,
+        volumeM5AtEntry:
+          check.volumeM5,
 
-      priceChangeM5AtEntry:
-        check.priceChangeM5,
+        buysM5AtEntry:
+          check.buys,
 
-      lastPriceCheckAt:
-        new Date()
-    });
+        sellsM5AtEntry:
+          check.sells,
+
+        buySellRatioAtEntry:
+          check.buySellRatio,
+
+        priceChangeM5AtEntry:
+          check.priceChangeM5,
+
+        lastPriceCheckAt:
+          new Date()
+      });
 
     account.cashBalanceUsd =
       Math.max(
@@ -3198,20 +3198,15 @@ async function queuePaperEntry(
   }
 }
 
-// ======================================================
-// PAPER EXIT
-// ======================================================
-
 async function closePaperTrade(
   trade,
   marketPrice,
   reason
 ) {
-
   if (
     !trade ||
     trade.status !==
-    "OPEN"
+      "OPEN"
   ) {
     return;
   }
@@ -3317,7 +3312,6 @@ async function closePaperTrade(
     pnlPct >
     0.05
   ) {
-
     account.wins =
       num(
         account.wins
@@ -3328,7 +3322,6 @@ async function closePaperTrade(
     pnlPct <
     -0.05
   ) {
-
     account.losses =
       num(
         account.losses
@@ -3336,7 +3329,6 @@ async function closePaperTrade(
       1;
 
   } else {
-
     account.breakeven =
       num(
         account.breakeven
@@ -3369,12 +3361,7 @@ async function closePaperTrade(
   );
 }
 
-// ======================================================
-// PAPER MONITOR
-// ======================================================
-
 async function monitorPaperTrades() {
-
   if (
     paperBusy ||
     shuttingDown ||
@@ -3408,14 +3395,11 @@ async function monitorPaperTrades() {
 
       try {
 
-        const pairs =
-          await fetchPairs(
-            trade.mint
-          );
-
         const pair =
           bestPool(
-            pairs
+            await fetchPairs(
+              trade.mint
+            )
           );
 
         if (
@@ -3489,7 +3473,6 @@ async function monitorPaperTrades() {
           runup >=
           PAPER.trailingActivationPct
         ) {
-
           trailingActive =
             true;
         }
@@ -3509,7 +3492,7 @@ async function monitorPaperTrades() {
           trailingStop =
             Math.max(
               trailingStop ||
-              0,
+                0,
               candidate
             );
         }
@@ -3584,10 +3567,9 @@ async function monitorPaperTrades() {
 
         if (
           trailingActive &&
-          trailingStop >
-            0 &&
+          trailingStop > 0 &&
           marketPrice <=
-            trailingStop
+          trailingStop
         ) {
 
           await closePaperTrade(
@@ -3643,12 +3625,7 @@ async function monitorPaperTrades() {
   }
 }
 
-// ======================================================
-// CONTINUOUS OPPORTUNITY ENGINE
-// ======================================================
-
 async function scanOpportunities() {
-
   if (
     opportunityBusy ||
     shuttingDown
@@ -3756,11 +3733,9 @@ async function scanOpportunities() {
 }
 
 function startOpportunityEngine() {
-
   opportunityTimer =
     setInterval(
-      () => {
-
+      () =>
         scanOpportunities()
           .catch(
             err =>
@@ -3768,15 +3743,12 @@ function startOpportunityEngine() {
                 "Opportunity interval",
                 err
               )
-          );
-
-      },
+          ),
       PAPER.opportunityMs
     );
 
   setTimeout(
-    () => {
-
+    () =>
       scanOpportunities()
         .catch(
           err =>
@@ -3784,9 +3756,7 @@ function startOpportunityEngine() {
               "Opportunity startup",
               err
             )
-        );
-
-    },
+        ),
     10000
   );
 
@@ -3795,16 +3765,10 @@ function startOpportunityEngine() {
   );
 }
 
-// ======================================================
-// PAPER ENGINE
-// ======================================================
-
 function startPaperEngine() {
-
   if (
     !PAPER.enabled
   ) {
-
     state.paper =
       "disabled";
 
@@ -3816,8 +3780,7 @@ function startPaperEngine() {
 
   paperTimer =
     setInterval(
-      () => {
-
+      () =>
         monitorPaperTrades()
           .catch(
             err =>
@@ -3825,15 +3788,12 @@ function startPaperEngine() {
                 "Paper interval",
                 err
               )
-          );
-
-      },
+          ),
       PAPER.monitorMs
     );
 
   setTimeout(
-    () => {
-
+    () =>
       monitorPaperTrades()
         .catch(
           err =>
@@ -3841,9 +3801,7 @@ function startPaperEngine() {
               "Paper startup",
               err
             )
-        );
-
-    },
+        ),
     5000
   );
 
@@ -3852,12 +3810,7 @@ function startPaperEngine() {
   );
 }
 
-// ======================================================
-// TELEGRAM
-// ======================================================
-
 function registerTelegramCommands() {
-
   bot.start(
     ctx =>
       ctx.reply(
@@ -3956,20 +3909,31 @@ function registerTelegramCommands() {
         `🧪 PAPER ACCOUNT ${VERSION}\n\n` +
 
         `Starting: $${num(a.startingBalanceUsd).toFixed(2)}\n` +
+
         `Cash: $${num(a.cashBalanceUsd).toFixed(2)}\n` +
+
         `Open Value: $${summary.openValue.toFixed(2)}\n` +
+
         `Equity: $${summary.equity.toFixed(2)}\n` +
+
         `Realized PnL: $${num(a.realizedPnlUsd).toFixed(2)}\n` +
+
         `Unrealized PnL: $${summary.unrealizedPnl.toFixed(2)}\n\n` +
 
         `Open Trades: ${summary.openTrades.length}/${PAPER.maxOpenTrades}\n` +
+
         `Closed Trades: ${total}\n` +
+
         `Wins: ${num(a.wins)}\n` +
+
         `Losses: ${num(a.losses)}\n` +
+
         `Win Rate: ${winRate.toFixed(1)}%\n\n` +
 
         `Entry Attempts: ${state.paperEntryAttempts}\n` +
+
         `Entry Skips: ${state.paperEntrySkips}\n` +
+
         `Last Skip: ${state.lastSkip || "NONE"}\n\n` +
 
         `🔒 NO REAL MONEY USED`
@@ -3999,7 +3963,6 @@ function registerTelegramCommands() {
       if (
         !trades.length
       ) {
-
         return ctx.reply(
           "🧪 لا توجد Paper Positions مفتوحة حالياً."
         );
@@ -4010,7 +3973,8 @@ function registerTelegramCommands() {
 
       for (
         let i = 0;
-        i < trades.length;
+        i <
+        trades.length;
         i++
       ) {
 
@@ -4080,7 +4044,6 @@ function registerTelegramCommands() {
       if (
         !trades.length
       ) {
-
         return ctx.reply(
           "📚 لا توجد صفقات مغلقة حتى الآن."
         );
@@ -4091,7 +4054,8 @@ function registerTelegramCommands() {
 
       for (
         let i = 0;
-        i < trades.length;
+        i <
+        trades.length;
         i++
       ) {
 
@@ -4145,7 +4109,6 @@ function registerTelegramCommands() {
       if (
         !tokens.length
       ) {
-
         return ctx.reply(
           "🎯 لا توجد Approved Candidates حالياً."
         );
@@ -4156,7 +4119,8 @@ function registerTelegramCommands() {
 
       for (
         let i = 0;
-        i < tokens.length;
+        i <
+        tokens.length;
         i++
       ) {
 
@@ -4267,7 +4231,6 @@ function registerTelegramCommands() {
         const s
         of sourceStats
       ) {
-
         sources +=
           `\n${s._id || "UNKNOWN"}: ${s.trades} trades | $${num(s.pnl).toFixed(2)} | Avg ${num(s.avgPct).toFixed(2)}%`;
       }
@@ -4291,7 +4254,10 @@ function registerTelegramCommands() {
 
         `Worst: ${num(a.worstTradePct).toFixed(2)}%\n\n` +
 
-        `📂 BY SOURCE:${sources || "\nNo trades yet."}`
+        `📂 BY SOURCE:${
+          sources ||
+          "\nNo trades yet."
+        }`
       );
     }
   );
@@ -4308,47 +4274,46 @@ function registerTelegramCommands() {
         open,
         closed
       ] =
-      await Promise.all([
+        await Promise.all([
+          FreshToken
+            .countDocuments(),
 
-        FreshToken
-          .countDocuments(),
+          FreshToken
+            .countDocuments({
+              finalDecision:
+                "APPROVED_CANDIDATE"
+            }),
 
-        FreshToken
-          .countDocuments({
-            finalDecision:
-              "APPROVED_CANDIDATE"
-          }),
+          FreshToken
+            .countDocuments({
+              origin:
+                "FRESH"
+            }),
 
-        FreshToken
-          .countDocuments({
-            origin:
-              "FRESH"
-          }),
+          FreshToken
+            .countDocuments({
+              origin:
+                "ESTABLISHED"
+            }),
 
-        FreshToken
-          .countDocuments({
-            origin:
-              "ESTABLISHED"
-          }),
+          PaperTrade
+            .countDocuments({
+              testRun:
+                PAPER.testRun,
 
-        PaperTrade
-          .countDocuments({
-            testRun:
-              PAPER.testRun,
+              status:
+                "OPEN"
+            }),
 
-            status:
-              "OPEN"
-          }),
+          PaperTrade
+            .countDocuments({
+              testRun:
+                PAPER.testRun,
 
-        PaperTrade
-          .countDocuments({
-            testRun:
-              PAPER.testRun,
-
-            status:
-              "CLOSED"
-          })
-      ]);
+              status:
+                "CLOSED"
+            })
+        ]);
 
       await ctx.reply(
         `📊 LOMY ${VERSION} STATS\n\n` +
@@ -4389,7 +4354,6 @@ function registerTelegramCommands() {
       if (
         !wallet
       ) {
-
         return ctx.reply(
           "❌ Wallet unavailable"
         );
@@ -4409,7 +4373,8 @@ function registerTelegramCommands() {
           );
 
         await ctx.reply(
-          `💰 Wallet: ${(balance / LAMPORTS_PER_SOL).toFixed(6)} SOL\n🔒 Paper Engine does not spend it.`
+          `💰 Wallet: ${(balance / LAMPORTS_PER_SOL).toFixed(6)} SOL\n` +
+          `🔒 Paper Engine does not spend it.`
         );
 
       } catch {
@@ -4431,11 +4396,9 @@ function registerTelegramCommands() {
 }
 
 async function startTelegram() {
-
   if (
     !TELEGRAM_TOKEN
   ) {
-
     state.telegram =
       "missing_config";
 
@@ -4494,7 +4457,7 @@ async function startTelegram() {
 
       return;
 
-    } catch (err) {
+    } catch {
 
       state.telegram =
         "retrying";
@@ -4510,14 +4473,9 @@ async function startTelegram() {
   }
 }
 
-// ======================================================
-// SHUTDOWN
-// ======================================================
-
 async function shutdown(
   signal
 ) {
-
   if (
     shuttingDown
   ) {
@@ -4534,7 +4492,6 @@ async function shutdown(
   if (
     paperTimer
   ) {
-
     clearInterval(
       paperTimer
     );
@@ -4543,7 +4500,6 @@ async function shutdown(
   if (
     discoveryTimer
   ) {
-
     clearInterval(
       discoveryTimer
     );
@@ -4552,41 +4508,34 @@ async function shutdown(
   if (
     opportunityTimer
   ) {
-
     clearInterval(
       opportunityTimer
     );
   }
 
   try {
-
     if (
       bot
     ) {
-
       bot.stop(
         signal
       );
     }
-
   } catch {}
 
   try {
-
-    telegramAgent.destroy();
-
+    telegramAgent
+      .destroy();
   } catch {}
 
   try {
-
-    await mongoose.disconnect();
-
+    await mongoose
+      .disconnect();
   } catch {}
 
   if (
     server
   ) {
-
     server.close(
       () =>
         process.exit(
@@ -4601,39 +4550,29 @@ async function shutdown(
         ),
       5000
     );
-
   } else {
-
     process.exit(
       0
     );
   }
 }
 
-// ======================================================
-// ERRORS
-// ======================================================
-
 process.on(
   "unhandledRejection",
-  reason => {
-
+  reason =>
     errLog(
       "Unhandled rejection",
       reason
-    );
-  }
+    )
 );
 
 process.on(
   "uncaughtException",
-  err => {
-
+  err =>
     errLog(
       "Uncaught exception",
       err
-    );
-  }
+    )
 );
 
 process.once(
@@ -4652,14 +4591,8 @@ process.once(
     )
 );
 
-// ======================================================
-// MAIN
-// ======================================================
-
 async function main() {
-
   console.log("");
-
   console.log(
     "================================"
   );
@@ -4685,7 +4618,7 @@ async function main() {
   );
 
   console.log(
-    "🐋 WHALE ENGINE"
+    "🐋 WHALE ENGINE - QUICKNODE 5+5 SAFE"
   );
 
   console.log(
