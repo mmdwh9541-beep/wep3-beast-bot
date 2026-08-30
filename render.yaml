@@ -1,19 +1,22 @@
 services:
   - type: web
-    name: ultra-trading-bot
+    name: lomy-forex-bot
     env: node
     buildCommand: npm install
     startCommand: node index.js
+
     envVars:
       - key: NODE_VERSION
-        value: 18.17.0
-      - key: TELEGRAM_TOKEN
+        value: 20
+
+      - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: BOT_PRIVATE_KEY
+
+      - key: TWELVE_DATA_API_KEY
         sync: false
+
       - key: MONGODB_URI
         sync: false
-      - key: RPC_URL
-        sync: false
+
       - key: PORT
         value: 10000
