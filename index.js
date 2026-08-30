@@ -1,9 +1,11 @@
 'use strict';
 
 /**
- * LOMY FOREX V1.0.1 — PAPER TEST
- * Core: Ultra-Fast Scalp Engine V5.1
- * 30 Forex pairs | 1m CLOSED candles | PAPER ONLY
+ * LOMY FOREX V1.1.0 — PAPER ONLY
+ * Timeframe: 15m CLOSED candles
+ * Instruments: 30 FX pairs + XAUUSD
+ * Primary signal: Ultra-Fast Scalp Engine V5.1
+ * Retest + Auto Fibonacci: lightweight confluence only
  */
 
 const express = require('express');
@@ -11,13 +13,10 @@ const axios = require('axios');
 const mongoose = require('mongoose');
 const { Telegraf } = require('telegraf');
 
-// ============================================================
-// CONFIG
-// ============================================================
-
-const VERSION = 'LOMY FOREX V1.0.1';
+const VERSION = 'LOMY FOREX V1.1.0';
 const MODE = 'PAPER';
 const LIVE_TRADING = false;
+const TIMEFRAME = '15m';
 
 const PORT = Number(process.env.PORT || 10000);
 const MONGODB_URI = process.env.MONGODB_URI || '';
@@ -25,231 +24,135 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY || '';
 
 const BIQUOTE_BASE = 'https://biquote.io';
-const HTTP_TIMEOUT_MS = 12000;
-const HISTORY_LIMIT = 80;
+const HTTP_TIMEOUT_MS = 10000;
+const HISTORY_LIMIT = 120;
 const OHLC_CONCURRENCY = 4;
-
 const CLOCK_CHECK_MS = 2000;
-const SCAN_AFTER_SECOND = 3;
 const QUOTE_POLL_MS = 3000;
-
 const HEARTBEAT_MS = 5 * 60 * 1000;
+const SCAN_AFTER_SECOND = 4;
 
-// ============================================================
-// 30 FOREX PAIRS
-// ============================================================
-
-const PAIRS = [
-  'EURUSD',
-  'GBPUSD',
-  'USDJPY',
-  'USDCHF',
-  'AUDUSD',
-  'NZDUSD',
-  'USDCAD',
-
-  'EURGBP',
-  'EURJPY',
-  'EURCHF',
-  'EURAUD',
-  'EURNZD',
-  'EURCAD',
-
-  'GBPJPY',
-  'GBPCHF',
-  'GBPAUD',
-  'GBPNZD',
-  'GBPCAD',
-
-  'AUDJPY',
-  'AUDCHF',
-  'AUDNZD',
-  'AUDCAD',
-
-  'NZDJPY',
-  'NZDCHF',
-  'NZDCAD',
-
-  'CADJPY',
-  'CADCHF',
-  'CHFJPY',
-
-  'GBPSGD',
-  'EURSGD'
+const INSTRUMENTS = [
+  'EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'NZDUSD', 'USDCAD',
+  'EURGBP', 'EURJPY', 'EURCHF', 'EURAUD', 'EURNZD', 'EURCAD',
+  'GBPJPY', 'GBPCHF', 'GBPAUD', 'GBPNZD', 'GBPCAD',
+  'AUDJPY', 'AUDCHF', 'AUDNZD', 'AUDCAD',
+  'NZDJPY', 'NZDCHF', 'NZDCAD',
+  'CADJPY', 'CADCHF', 'CHFJPY',
+  'GBPSGD', 'EURSGD',
+  'XAUUSD'
 ];
-
-// ============================================================
-// ULTRA-FAST SCALP ENGINE V5.1
-// ============================================================
 
 const STRATEGY = Object.freeze({
   cmoLen: 9,
-
   cmoBuyThresh: 30,
   cmoSellThresh: -30,
-
   volLen: 10,
   volMult: 1.3,
-
   srLen: 20,
-
   fastEmaLen: 9,
   slowEmaLen: 21,
-
   atrLen: 14,
   atrMargin: 0.20,
-
   riskReward: 2.0,
-
   bodyRatioMin: 0.50
 });
 
-// ============================================================
-// PAPER ACCOUNT
-// ============================================================
+const QUALITY = Object.freeze({
+  structureLookback: 8,
+  fibLookback: 40,
+  fibToleranceAtr: 0.20,
+  maxChaseAtr: 0.50
+});
 
 const PAPER = Object.freeze({
   startingBalance: 1000,
-
   riskPctPerTrade: 0.50,
-
-  maxOpenTrades: 30,
-
-  accountKey: 'lomy-forex-v101-main'
+  maxOpenTrades: 31,
+  accountKey: 'lomy-forex-v110-15m-main'
 });
-
-// ============================================================
-// STATE
-// ============================================================
 
 const state = {
   startedAt: new Date(),
-
   mongoReady: false,
   telegramReady: false,
   marketReady: false,
-
   initializing: true,
 
   scanRunning: false,
   quoteRunning: false,
 
-  lastGlobalScanMinute: null,
-
+  lastGlobalScanSlot: null,
   lastSignalScanAt: null,
   lastQuotePollAt: null,
-
   lastMarketError: null,
 
   totalSignalScans: 0,
   totalQuotePolls: 0,
-
   rawSignals: 0,
   executedSignals: 0,
   skippedSignals: 0,
 
+  pairState: new Map(),
   latestQuotes: new Map(),
-
-  openTrades: new Map(),
-
-  pairState: new Map()
+  openTrades: new Map()
 };
 
-// ============================================================
-// PAIR STATE
-// ============================================================
-
-for (const symbol of PAIRS) {
+for (const symbol of INSTRUMENTS) {
   state.pairState.set(symbol, {
     bars: [],
-
     lastClosedBarTime: null,
-
     lastSignal: 0,
-
     lastAnalysis: null,
-
     initialized: false,
-
     errors: 0
   });
 }
 
-// ============================================================
-// HELPERS
-// ============================================================
+const nowIso = () => new Date().toISOString();
 
 function n(value, fallback = NaN) {
-  const number = Number(value);
-
-  return Number.isFinite(number)
-    ? number
-    : fallback;
+  const x = Number(value);
+  return Number.isFinite(x) ? x : fallback;
 }
 
 function safeError(err) {
-  const data = err?.response?.data;
-
-  if (typeof data === 'string') {
-    return data.slice(0, 300);
-  }
-
   return (
-    data?.message ||
-    data?.status ||
+    err?.response?.data?.message ||
+    err?.response?.data?.status ||
     err?.message ||
     String(err)
   );
 }
 
 function fmtPrice(value, symbol = '') {
-  const number = Number(value);
+  if (!Number.isFinite(value)) return 'n/a';
 
-  if (!Number.isFinite(number)) {
-    return 'n/a';
+  if (symbol === 'XAUUSD') {
+    return value.toFixed(2);
   }
 
-  return number.toFixed(
-    symbol.endsWith('JPY')
-      ? 3
-      : 5
-  );
+  if (symbol.endsWith('JPY')) {
+    return value.toFixed(3);
+  }
+
+  return value.toFixed(5);
 }
 
 function fmtMoney(value) {
-  const number = Number(value);
-
-  return Number.isFinite(number)
-    ? `$${number.toFixed(2)}`
-    : '$0.00';
+  const x = Number(value);
+  return Number.isFinite(x) ? `$${x.toFixed(2)}` : '$0.00';
 }
 
 function fmtPct(value) {
-  const number = Number(value);
-
-  return Number.isFinite(number)
-    ? `${number.toFixed(2)}%`
-    : '0.00%';
+  const x = Number(value);
+  return Number.isFinite(x) ? `${x.toFixed(2)}%` : '0.00%';
 }
 
 function barTimeMs(bar) {
-  const time =
-    new Date(bar.openTime).getTime();
-
-  return Number.isFinite(time)
-    ? time
-    : 0;
+  const value = new Date(bar?.openTime).getTime();
+  return Number.isFinite(value) ? value : 0;
 }
-
-function minuteKey(date = new Date()) {
-  return date
-    .toISOString()
-    .slice(0, 16);
-}
-
-// ============================================================
-// NORMALIZE BARS
-// ============================================================
 
 function normalizeBars(rawBars) {
   if (!Array.isArray(rawBars)) {
@@ -264,46 +167,31 @@ function normalizeBars(rawBars) {
         bar.timestamp ||
         bar.time,
 
-      open:
-        n(bar.open),
+      open: n(bar.open),
+      high: n(bar.high),
+      low: n(bar.low),
+      close: n(bar.close),
 
-      high:
-        n(bar.high),
+      // Forex / Gold:
+      // Prefer tickVolume.
+      volume: n(
+        bar.tickVolume,
+        n(bar.volume, 0)
+      ),
 
-      low:
-        n(bar.low),
-
-      close:
-        n(bar.close),
-
-      volume:
-        n(
-          bar.tickVolume,
-          n(bar.volume, 0)
-        ),
-
-      isOpen:
-        bar.isOpen === true
+      isOpen: Boolean(bar.isOpen)
     }))
-    .filter((bar) =>
-      Boolean(bar.openTime) &&
-      [
-        bar.open,
-        bar.high,
-        bar.low,
-        bar.close
-      ].every(Number.isFinite)
-    )
-    .sort(
-      (a, b) =>
-        barTimeMs(a) -
-        barTimeMs(b)
-    );
+    .filter((bar) => {
+      return (
+        bar.openTime &&
+        [bar.open, bar.high, bar.low, bar.close]
+          .every(Number.isFinite)
+      );
+    })
+    .sort((a, b) => {
+      return barTimeMs(a) - barTimeMs(b);
+    });
 }
-
-// ============================================================
-// MERGE CLOSED BARS
-// ============================================================
 
 function mergeClosedBars(
   existing,
@@ -313,137 +201,79 @@ function mergeClosedBars(
   const map = new Map();
 
   for (const bar of existing || []) {
-    map.set(
-      bar.openTime,
-      bar
-    );
+    map.set(bar.openTime, bar);
   }
 
   for (const bar of incoming || []) {
     if (!bar.isOpen) {
-      map.set(
-        bar.openTime,
-        bar
-      );
+      map.set(bar.openTime, bar);
     }
   }
 
   return [...map.values()]
-    .sort(
-      (a, b) =>
-        barTimeMs(a) -
-        barTimeMs(b)
-    )
+    .sort((a, b) => {
+      return barTimeMs(a) - barTimeMs(b);
+    })
     .slice(-maxBars);
 }
 
-// ============================================================
-// CONCURRENCY
-// ============================================================
+function utc15mSlot(date = new Date()) {
+  const minute = date.getUTCMinutes();
+  const slotMinute = minute - (minute % 15);
 
-async function mapWithConcurrency(
-  items,
-  concurrency,
-  callback
-) {
-  const results =
-    new Array(items.length);
-
-  let cursor = 0;
-
-  async function worker() {
-    while (true) {
-      const index = cursor++;
-
-      if (index >= items.length) {
-        return;
-      }
-
-      try {
-        results[index] =
-          await callback(
-            items[index],
-            index
-          );
-      } catch (error) {
-        results[index] = {
-          error
-        };
-      }
-    }
-  }
-
-  await Promise.all(
-    Array.from(
-      {
-        length:
-          Math.min(
-            concurrency,
-            items.length
-          )
-      },
-      () => worker()
-    )
+  return (
+    `${date.getUTCFullYear()}-` +
+    `${String(date.getUTCMonth() + 1).padStart(2, '0')}-` +
+    `${String(date.getUTCDate()).padStart(2, '0')}T` +
+    `${String(date.getUTCHours()).padStart(2, '0')}:` +
+    `${String(slotMinute).padStart(2, '0')}`
   );
-
-  return results;
 }
 
 // ============================================================
-// SMA
+// V5.1 INDICATORS
 // ============================================================
 
 function sma(values, length) {
-  if (
-    !Array.isArray(values) ||
-    values.length < length
-  ) {
+  if (!Array.isArray(values)) {
     return NaN;
   }
 
-  const window =
-    values.slice(-length);
+  if (values.length < length) {
+    return NaN;
+  }
 
-  const total =
-    window.reduce(
-      (sum, value) =>
-        sum + value,
+  const slice = values.slice(-length);
+
+  return (
+    slice.reduce(
+      (sum, value) => sum + value,
       0
-    );
-
-  return total / length;
+    ) / length
+  );
 }
 
-// ============================================================
-// EMA
-// ============================================================
-
 function emaSeries(values, length) {
-  if (
-    !Array.isArray(values) ||
-    values.length < length
-  ) {
+  if (!Array.isArray(values)) {
     return [];
   }
 
-  const output =
+  if (values.length < length) {
+    return [];
+  }
+
+  const result =
     Array(values.length).fill(NaN);
 
   let seed = 0;
 
-  for (
-    let i = 0;
-    i < length;
-    i++
-  ) {
+  for (let i = 0; i < length; i++) {
     seed += values[i];
   }
 
-  let previous =
-    seed / length;
+  let previous = seed / length;
 
-  output[length - 1] =
-    previous;
+  result[length - 1] = previous;
 
   const alpha =
     2 / (length + 1);
@@ -457,42 +287,34 @@ function emaSeries(values, length) {
       values[i] * alpha +
       previous * (1 - alpha);
 
-    output[i] =
-      previous;
+    result[i] = previous;
   }
 
-  return output;
+  return result;
 }
 
-// ============================================================
-// RMA
-// ============================================================
-
 function rmaSeries(values, length) {
-  if (
-    !Array.isArray(values) ||
-    values.length < length
-  ) {
+  if (!Array.isArray(values)) {
     return [];
   }
 
-  const output =
+  if (values.length < length) {
+    return [];
+  }
+
+  const result =
     Array(values.length).fill(NaN);
 
   let seed = 0;
 
-  for (
-    let i = 0;
-    i < length;
-    i++
-  ) {
+  for (let i = 0; i < length; i++) {
     seed += values[i];
   }
 
   let previous =
     seed / length;
 
-  output[length - 1] =
+  result[length - 1] =
     previous;
 
   const alpha =
@@ -507,61 +329,40 @@ function rmaSeries(values, length) {
       alpha * values[i] +
       (1 - alpha) * previous;
 
-    output[i] =
-      previous;
+    result[i] = previous;
   }
 
-  return output;
+  return result;
 }
 
-// ============================================================
-// ATR
-// ============================================================
-
 function atrValue(bars, length) {
-  if (
-    !Array.isArray(bars) ||
-    bars.length < length + 1
-  ) {
+  if (!Array.isArray(bars)) {
     return NaN;
   }
 
-  const trueRanges = [];
-
-  for (
-    let i = 0;
-    i < bars.length;
-    i++
-  ) {
-    if (i === 0) {
-      trueRanges.push(
-        bars[i].high -
-        bars[i].low
-      );
-
-      continue;
-    }
-
-    const previousClose =
-      bars[i - 1].close;
-
-    trueRanges.push(
-      Math.max(
-        bars[i].high -
-          bars[i].low,
-
-        Math.abs(
-          bars[i].high -
-          previousClose
-        ),
-
-        Math.abs(
-          bars[i].low -
-          previousClose
-        )
-      )
-    );
+  if (bars.length < length + 1) {
+    return NaN;
   }
+
+  const trueRanges =
+    bars.map((bar, index) => {
+      if (index === 0) {
+        return bar.high - bar.low;
+      }
+
+      const previousClose =
+        bars[index - 1].close;
+
+      return Math.max(
+        bar.high - bar.low,
+        Math.abs(
+          bar.high - previousClose
+        ),
+        Math.abs(
+          bar.low - previousClose
+        )
+      );
+    });
 
   const rma =
     rmaSeries(
@@ -574,17 +375,14 @@ function atrValue(bars, length) {
   ];
 }
 
-// ============================================================
-// CMO
-// ============================================================
+function cmoValue(closes, length) {
+  if (!Array.isArray(closes)) {
+    return NaN;
+  }
 
-function cmoValue(
-  closes,
-  length
-) {
   if (
-    !Array.isArray(closes) ||
-    closes.length < length + 1
+    closes.length <
+    length + 1
   ) {
     return NaN;
   }
@@ -600,16 +398,14 @@ function cmoValue(
     i < closes.length;
     i++
   ) {
-    const difference =
+    const diff =
       closes[i] -
       closes[i - 1];
 
-    if (difference > 0) {
-      gains +=
-        difference;
-    } else if (difference < 0) {
-      losses +=
-        -difference;
+    if (diff > 0) {
+      gains += diff;
+    } else if (diff < 0) {
+      losses += -diff;
     }
   }
 
@@ -628,7 +424,7 @@ function cmoValue(
 }
 
 // ============================================================
-// V5.1 SIGNAL ENGINE
+// ULTRA-FAST SCALP ENGINE V5.1
 // ============================================================
 
 function analyzeV51(bars) {
@@ -656,21 +452,17 @@ function analyzeV51(bars) {
 
   const closes =
     bars.map(
-      (bar) =>
-        bar.close
+      (bar) => bar.close
     );
 
   const volumes =
-    bars.map(
-      (bar) =>
-        Number.isFinite(bar.volume)
-          ? bar.volume
-          : 0
-    );
-
-  // ==========================================================
-  // CANDLE
-  // ==========================================================
+    bars.map((bar) => {
+      return Number.isFinite(
+        bar.volume
+      )
+        ? bar.volume
+        : 0;
+    });
 
   const candleBody =
     Math.abs(
@@ -688,40 +480,37 @@ function analyzeV51(bars) {
         candleRange
       : 0;
 
-  const strongBull =
+  const bullishCandle =
     current.close >
-      current.open &&
+    current.open;
+
+  const bearishCandle =
+    current.close <
+    current.open;
+
+  const strongBull =
+    bullishCandle &&
     bodyRatio >=
       STRATEGY.bodyRatioMin;
 
   const strongBear =
-    current.close <
-      current.open &&
+    bearishCandle &&
     bodyRatio >=
       STRATEGY.bodyRatioMin;
 
-  // ==========================================================
-  // VOLUME
-  // ==========================================================
-
-  const volumeAverage =
+  // Pine:
+  // volAvg = ta.sma(volume, 10)
+  const volAvg =
     sma(
       volumes,
       STRATEGY.volLen
     );
 
   const highVolume =
-    Number.isFinite(
-      volumeAverage
-    ) &&
-    volumeAverage > 0 &&
+    Number.isFinite(volAvg) &&
     current.volume >
-      volumeAverage *
+      volAvg *
       STRATEGY.volMult;
-
-  // ==========================================================
-  // CMO
-  // ==========================================================
 
   const cmo =
     cmoValue(
@@ -738,10 +527,6 @@ function analyzeV51(bars) {
     Number.isFinite(cmo) &&
     cmo <
       STRATEGY.cmoSellThresh;
-
-  // ==========================================================
-  // EMA
-  // ==========================================================
 
   const fastSeries =
     emaSeries(
@@ -768,18 +553,12 @@ function analyzeV51(bars) {
   const bullTrend =
     Number.isFinite(fastEMA) &&
     Number.isFinite(slowEMA) &&
-    fastEMA >
-      slowEMA;
+    fastEMA > slowEMA;
 
   const bearTrend =
     Number.isFinite(fastEMA) &&
     Number.isFinite(slowEMA) &&
-    fastEMA <
-      slowEMA;
-
-  // ==========================================================
-  // ATR
-  // ==========================================================
+    fastEMA < slowEMA;
 
   const atr =
     atrValue(
@@ -787,10 +566,9 @@ function analyzeV51(bars) {
       STRATEGY.atrLen
     );
 
-  // ==========================================================
-  // SUPPORT / RESISTANCE
-  // ==========================================================
-
+  // Pine:
+  // support = lowest(low[1],20)
+  // resistance = highest(high[1],20)
   const srWindow =
     previousBars.slice(
       -STRATEGY.srLen
@@ -800,8 +578,7 @@ function analyzeV51(bars) {
     srWindow.length
       ? Math.min(
           ...srWindow.map(
-            (bar) =>
-              bar.low
+            (bar) => bar.low
           )
         )
       : NaN;
@@ -810,15 +587,10 @@ function analyzeV51(bars) {
     srWindow.length
       ? Math.max(
           ...srWindow.map(
-            (bar) =>
-              bar.high
+            (bar) => bar.high
           )
         )
       : NaN;
-
-  // ==========================================================
-  // EXACT V5.1 CONDITIONS
-  // ==========================================================
 
   const rawBuy =
     strongBull &&
@@ -833,47 +605,34 @@ function analyzeV51(bars) {
     bearTrend;
 
   return {
-    time:
-      current.openTime,
-
-    close:
-      current.close,
+    time: current.openTime,
+    close: current.close,
 
     bodyRatio,
 
     volume:
       current.volume,
 
-    volAvg:
-      volumeAverage,
-
+    volAvg,
     highVolume,
 
     cmo,
 
     fastEMA,
-
     slowEMA,
 
     bullTrend,
-
     bearTrend,
 
     atr,
 
     support,
-
     resistance,
 
     rawBuy,
-
     rawSell
   };
 }
-
-// ============================================================
-// HISTORICAL LAST SIGNAL
-// ============================================================
 
 function deriveLastSignalFromHistory(
   bars
@@ -917,7 +676,276 @@ function deriveLastSignalFromHistory(
 }
 
 // ============================================================
-// DATABASE SCHEMAS
+// RETEST + AUTO FIBONACCI
+// QUALITY SCORE ONLY
+// ============================================================
+
+function analyzeQualityTools(
+  bars,
+  direction,
+  analysis
+) {
+  const current =
+    bars[bars.length - 1];
+
+  const prior =
+    bars.slice(0, -1);
+
+  const structureBars =
+    prior.slice(
+      -QUALITY.structureLookback
+    );
+
+  let structureLevel = NaN;
+
+  let breakout = false;
+  let retest = false;
+
+  if (structureBars.length) {
+    if (direction === 'BUY') {
+      structureLevel =
+        Math.max(
+          ...structureBars.map(
+            (bar) => bar.high
+          )
+        );
+
+      breakout =
+        current.close >
+        structureLevel;
+
+      retest =
+        breakout &&
+        current.low <=
+          structureLevel &&
+        current.close >
+          structureLevel;
+    } else {
+      structureLevel =
+        Math.min(
+          ...structureBars.map(
+            (bar) => bar.low
+          )
+        );
+
+      breakout =
+        current.close <
+        structureLevel;
+
+      retest =
+        breakout &&
+        current.high >=
+          structureLevel &&
+        current.close <
+          structureLevel;
+    }
+  }
+
+  const fibBars =
+    prior.slice(
+      -QUALITY.fibLookback
+    );
+
+  let fib = {
+    valid: false,
+
+    swingLow: NaN,
+    swingHigh: NaN,
+
+    level382: NaN,
+    level500: NaN,
+    level618: NaN,
+    level786: NaN,
+
+    ext1272: NaN,
+    ext1618: NaN,
+
+    inGoldenZone: false,
+    nearFib: false
+  };
+
+  if (fibBars.length >= 10) {
+    const swingLow =
+      Math.min(
+        ...fibBars.map(
+          (bar) => bar.low
+        )
+      );
+
+    const swingHigh =
+      Math.max(
+        ...fibBars.map(
+          (bar) => bar.high
+        )
+      );
+
+    const range =
+      swingHigh -
+      swingLow;
+
+    if (range > 0) {
+      let level382;
+      let level500;
+      let level618;
+      let level786;
+
+      let ext1272;
+      let ext1618;
+
+      if (direction === 'BUY') {
+        level382 =
+          swingHigh -
+          range * 0.382;
+
+        level500 =
+          swingHigh -
+          range * 0.500;
+
+        level618 =
+          swingHigh -
+          range * 0.618;
+
+        level786 =
+          swingHigh -
+          range * 0.786;
+
+        ext1272 =
+          swingLow +
+          range * 1.272;
+
+        ext1618 =
+          swingLow +
+          range * 1.618;
+      } else {
+        level382 =
+          swingLow +
+          range * 0.382;
+
+        level500 =
+          swingLow +
+          range * 0.500;
+
+        level618 =
+          swingLow +
+          range * 0.618;
+
+        level786 =
+          swingLow +
+          range * 0.786;
+
+        ext1272 =
+          swingHigh -
+          range * 1.272;
+
+        ext1618 =
+          swingHigh -
+          range * 1.618;
+      }
+
+      const goldenLow =
+        Math.min(
+          level500,
+          level618
+        );
+
+      const goldenHigh =
+        Math.max(
+          level500,
+          level618
+        );
+
+      const tolerance =
+        Number.isFinite(
+          analysis.atr
+        )
+          ? analysis.atr *
+            QUALITY.fibToleranceAtr
+          : 0;
+
+      const levels = [
+        level382,
+        level500,
+        level618,
+        level786
+      ];
+
+      fib = {
+        valid: true,
+
+        swingLow,
+        swingHigh,
+
+        level382,
+        level500,
+        level618,
+        level786,
+
+        ext1272,
+        ext1618,
+
+        inGoldenZone:
+          current.close >=
+            goldenLow -
+              tolerance &&
+          current.close <=
+            goldenHigh +
+              tolerance,
+
+        nearFib:
+          levels.some(
+            (level) => {
+              return (
+                Math.abs(
+                  current.close -
+                  level
+                ) <=
+                tolerance
+              );
+            }
+          )
+      };
+    }
+  }
+
+  let score = 0;
+
+  if (breakout) {
+    score += 1;
+  }
+
+  if (retest) {
+    score += 1;
+  }
+
+  if (fib.inGoldenZone) {
+    score += 2;
+  } else if (fib.nearFib) {
+    score += 1;
+  }
+
+  let label = 'NEUTRAL';
+
+  if (score >= 3) {
+    label = 'STRONG';
+  } else if (score >= 1) {
+    label = 'GOOD';
+  }
+
+  return {
+    score,
+    label,
+
+    breakout,
+    retest,
+
+    structureLevel,
+
+    fib
+  };
+}
+
+// ============================================================
+// DATABASE
 // ============================================================
 
 const paperAccountSchema =
@@ -929,38 +957,20 @@ const paperAccountSchema =
         index: true
       },
 
-      version:
-        String,
+      version: String,
+      mode: String,
 
-      mode:
-        String,
+      startingBalance: Number,
+      balance: Number,
+      realizedPnl: Number,
 
-      startingBalance:
-        Number,
+      totalTrades: Number,
+      wins: Number,
+      losses: Number,
+      breakeven: Number,
 
-      balance:
-        Number,
-
-      realizedPnl:
-        Number,
-
-      totalTrades:
-        Number,
-
-      wins:
-        Number,
-
-      losses:
-        Number,
-
-      breakeven:
-        Number,
-
-      createdAt:
-        Date,
-
-      updatedAt:
-        Date
+      createdAt: Date,
+      updatedAt: Date
     },
     {
       minimize: false
@@ -970,81 +980,56 @@ const paperAccountSchema =
 const forexTradeSchema =
   new mongoose.Schema(
     {
-      version:
-        String,
-
-      mode:
-        String,
+      version: String,
+      mode: String,
+      timeframe: String,
 
       symbol: {
         type: String,
         index: true
       },
 
-      direction:
-        String,
+      direction: String,
 
       status: {
         type: String,
         index: true
       },
 
-      signalTime:
-        Date,
+      signalTime: Date,
+      openedAt: Date,
+      closedAt: Date,
 
-      openedAt:
-        Date,
+      signalEntry: Number,
+      entryPrice: Number,
 
-      closedAt:
-        Date,
+      stopLoss: Number,
+      takeProfit: Number,
 
-      signalEntry:
-        Number,
+      exitPrice: Number,
+      exitReason: String,
 
-      entryPrice:
-        Number,
+      riskDistance: Number,
+      riskAmount: Number,
 
-      stopLoss:
-        Number,
+      pnlR: Number,
+      pnlUsd: Number,
 
-      takeProfit:
-        Number,
+      balanceAfter: Number,
 
-      exitPrice:
-        Number,
+      spreadAtEntry: Number,
+      spreadAtExit: Number,
 
-      exitReason:
-        String,
+      executionMoveAtr: Number,
 
-      riskDistance:
-        Number,
-
-      riskAmount:
-        Number,
-
-      pnlR:
-        Number,
-
-      pnlUsd:
-        Number,
-
-      balanceAfter:
-        Number,
-
-      spreadAtEntry:
-        Number,
-
-      spreadAtExit:
-        Number,
+      quality:
+        mongoose.Schema.Types.Mixed,
 
       signal:
         mongoose.Schema.Types.Mixed,
 
-      createdAt:
-        Date,
-
-      updatedAt:
-        Date
+      createdAt: Date,
+      updatedAt: Date
     },
     {
       minimize: false
@@ -1054,29 +1039,24 @@ const forexTradeSchema =
 const signalLogSchema =
   new mongoose.Schema(
     {
-      version:
-        String,
+      version: String,
+      timeframe: String,
 
-      symbol:
-        String,
+      symbol: String,
+      direction: String,
 
-      direction:
-        String,
+      candleTime: Date,
 
-      candleTime:
-        Date,
-
-      executed:
-        Boolean,
-
-      skipReason:
-        String,
+      executed: Boolean,
+      skipReason: String,
 
       analysis:
         mongoose.Schema.Types.Mixed,
 
-      createdAt:
-        Date
+      quality:
+        mongoose.Schema.Types.Mixed,
+
+      createdAt: Date
     },
     {
       minimize: false
@@ -1092,20 +1072,14 @@ const botStateSchema =
         index: true
       },
 
-      telegramChatId:
-        String,
+      telegramChatId: String,
 
-      updatedAt:
-        Date
+      updatedAt: Date
     },
     {
       minimize: false
     }
   );
-
-// ============================================================
-// MODELS
-// ============================================================
 
 const PaperAccount =
   mongoose.models
@@ -1142,14 +1116,10 @@ const BotState =
 let account = null;
 let lastChatId = null;
 
-// ============================================================
-// MONGODB
-// ============================================================
-
 async function initMongo() {
   if (!MONGODB_URI) {
     console.warn(
-      '⚠️ MONGODB_URI missing'
+      '⚠️ MONGODB_URI missing — persistence OFF'
     );
 
     return;
@@ -1162,8 +1132,7 @@ async function initMongo() {
         serverSelectionTimeoutMS:
           10000,
 
-        maxPoolSize:
-          5
+        maxPoolSize: 5
       }
     );
 
@@ -1175,8 +1144,7 @@ async function initMongo() {
 
     account =
       await PaperAccount.findOne({
-        key:
-          PAPER.accountKey
+        key: PAPER.accountKey
       });
 
     if (!account) {
@@ -1185,11 +1153,8 @@ async function initMongo() {
           key:
             PAPER.accountKey,
 
-          version:
-            VERSION,
-
-          mode:
-            MODE,
+          version: VERSION,
+          mode: MODE,
 
           startingBalance:
             PAPER.startingBalance,
@@ -1197,20 +1162,13 @@ async function initMongo() {
           balance:
             PAPER.startingBalance,
 
-          realizedPnl:
-            0,
+          realizedPnl: 0,
 
-          totalTrades:
-            0,
+          totalTrades: 0,
 
-          wins:
-            0,
-
-          losses:
-            0,
-
-          breakeven:
-            0,
+          wins: 0,
+          losses: 0,
+          breakeven: 0,
 
           createdAt:
             new Date(),
@@ -1220,36 +1178,27 @@ async function initMongo() {
         });
     }
 
-    const savedBotState =
+    const savedState =
       await BotState.findOne({
-        key:
-          'main'
+        key: 'main'
       }).lean();
 
     if (
-      savedBotState
-        ?.telegramChatId
+      savedState?.telegramChatId
     ) {
       lastChatId =
-        savedBotState
-          .telegramChatId;
+        savedState.telegramChatId;
     }
 
     const openTrades =
       await ForexTrade.find({
-        version:
-          VERSION,
-
-        mode:
-          MODE,
-
-        status:
-          'OPEN'
+        version: VERSION,
+        mode: MODE,
+        status: 'OPEN'
       }).lean();
 
     for (
-      const trade
-      of openTrades
+      const trade of openTrades
     ) {
       state.openTrades.set(
         trade.symbol,
@@ -1261,8 +1210,7 @@ async function initMongo() {
       `📂 Restored ${openTrades.length} open PAPER trade(s)`
     );
   } catch (err) {
-    state.mongoReady =
-      false;
+    state.mongoReady = false;
 
     console.error(
       '❌ MongoDB:',
@@ -1271,31 +1219,13 @@ async function initMongo() {
   }
 }
 
-// ============================================================
-// SAVE ACCOUNT
-// ============================================================
-
-async function saveAccount() {
-  if (
-    !state.mongoReady ||
-    !account?.save
-  ) {
-    return;
-  }
-
-  account.updatedAt =
-    new Date();
-
-  await account.save();
-}
-
-// ============================================================
-// REMEMBER TELEGRAM CHAT
-// ============================================================
-
 async function rememberChatId(
   chatId
 ) {
+  if (!chatId) {
+    return;
+  }
+
   lastChatId =
     String(chatId);
 
@@ -1306,8 +1236,7 @@ async function rememberChatId(
   try {
     await BotState.updateOne(
       {
-        key:
-          'main'
+        key: 'main'
       },
       {
         $set: {
@@ -1324,20 +1253,31 @@ async function rememberChatId(
     );
   } catch (err) {
     console.warn(
-      '⚠️ Chat ID save:',
+      'Telegram chat save:',
       safeError(err)
     );
   }
 }
 
-// ============================================================
-// SIGNAL LOG
-// ============================================================
+async function saveAccount() {
+  if (
+    !state.mongoReady ||
+    !account?.save
+  ) {
+    return;
+  }
+
+  account.updatedAt =
+    new Date();
+
+  await account.save();
+}
 
 async function logSignal(
   symbol,
   direction,
   analysis,
+  quality,
   executed,
   skipReason = ''
 ) {
@@ -1347,11 +1287,10 @@ async function logSignal(
 
   try {
     await SignalLog.create({
-      version:
-        VERSION,
+      version: VERSION,
+      timeframe: TIMEFRAME,
 
       symbol,
-
       direction,
 
       candleTime:
@@ -1360,17 +1299,17 @@ async function logSignal(
         ),
 
       executed,
-
       skipReason,
 
       analysis,
+      quality,
 
       createdAt:
         new Date()
     });
   } catch (err) {
     console.warn(
-      '⚠️ Signal log:',
+      'Signal log:',
       safeError(err)
     );
   }
@@ -1383,11 +1322,11 @@ async function logSignal(
 let bot = null;
 
 async function sendTelegram(
-  text,
-  extra = {}
+  text
 ) {
   if (
     !bot ||
+    !state.telegramReady ||
     !lastChatId
   ) {
     return;
@@ -1397,19 +1336,17 @@ async function sendTelegram(
     await bot.telegram.sendMessage(
       lastChatId,
       text,
-      extra
+      {
+        parse_mode: 'HTML'
+      }
     );
   } catch (err) {
     console.warn(
-      '⚠️ Telegram send:',
+      'Telegram send:',
       safeError(err)
     );
   }
 }
-
-// ============================================================
-// TELEGRAM COMMANDS
-// ============================================================
 
 function registerBotCommands() {
   bot.start(
@@ -1422,9 +1359,10 @@ function registerBotCommands() {
         `🤖 ${VERSION}\n\n` +
         `🧪 PAPER ONLY\n` +
         `🔒 Live Trading: OFF\n` +
-        `📡 Pairs: ${PAIRS.length}\n` +
-        `⏱ Entry: 1m CLOSED candle\n` +
-        `🧠 Core: Ultra-Fast Scalp Engine V5.1\n\n` +
+        `📡 Instruments: ${INSTRUMENTS.length} (30 FX + Gold)\n` +
+        `⏱ Entry: ${TIMEFRAME} CLOSED candle\n` +
+        `🧠 Core: Ultra-Fast Scalp Engine V5.1\n` +
+        `📐 Retest + Auto Fibonacci: lightweight score\n\n` +
         `/status\n` +
         `/stats\n` +
         `/balance\n` +
@@ -1443,50 +1381,30 @@ function registerBotCommands() {
       );
 
       const initialized =
-        [...state.pairState.values()]
+        [
+          ...state
+            .pairState
+            .values()
+        ]
           .filter(
-            (pair) =>
-              pair.initialized
+            (item) =>
+              item.initialized
           )
           .length;
 
       await ctx.reply(
         `🤖 ${VERSION}\n\n` +
-
-        `Market: ${
-          state.marketReady
-            ? 'READY'
-            : 'WAIT'
-        }\n` +
-
-        `MongoDB: ${
-          state.mongoReady
-            ? 'OK'
-            : 'OFF'
-        }\n` +
-
-        `Telegram: ${
-          state.telegramReady
-            ? 'OK'
-            : 'OFF'
-        }\n` +
-
-        `Pairs: ${initialized}/${PAIRS.length}\n` +
-
+        `Market: ${state.marketReady ? 'READY' : 'WAIT'}\n` +
+        `MongoDB: ${state.mongoReady ? 'OK' : 'OFF'}\n` +
+        `Telegram: ${state.telegramReady ? 'OK' : 'OFF'}\n` +
+        `Timeframe: ${TIMEFRAME}\n` +
+        `Instruments: ${initialized}/${INSTRUMENTS.length}\n` +
         `Open: ${state.openTrades.size}\n` +
-
         `Scans: ${state.totalSignalScans}\n` +
-
         `Signals: ${state.rawSignals}\n` +
-
         `Executed: ${state.executedSignals}\n` +
-
         `Skipped: ${state.skippedSignals}\n` +
-
-        `Last Error: ${
-          state.lastMarketError ||
-          'none'
-        }`
+        `Last Error: ${state.lastMarketError || 'none'}`
       );
     }
   );
@@ -1498,25 +1416,24 @@ function registerBotCommands() {
         ctx.chat.id
       );
 
-      await ctx.reply(
-        `🧪 PAPER ACCOUNT\n\n` +
-
-        `Starting: ${fmtMoney(
-          PAPER.startingBalance
-        )}\n` +
-
-        `Balance: ${fmtMoney(
+      const balance =
+        Number(
           account?.balance ??
           PAPER.startingBalance
-        )}\n` +
+        );
 
-        `Realized PnL: ${fmtMoney(
+      const pnl =
+        Number(
           account?.realizedPnl ??
           0
-        )}\n` +
+        );
 
+      await ctx.reply(
+        `🧪 PAPER ACCOUNT\n\n` +
+        `Starting: ${fmtMoney(PAPER.startingBalance)}\n` +
+        `Balance: ${fmtMoney(balance)}\n` +
+        `Realized PnL: ${fmtMoney(pnl)}\n` +
         `Open Trades: ${state.openTrades.size}\n\n` +
-
         `🔒 NO REAL MONEY USED`
       );
     }
@@ -1529,16 +1446,25 @@ function registerBotCommands() {
         ctx.chat.id
       );
 
+      const a =
+        account || {
+          totalTrades: 0,
+          wins: 0,
+          losses: 0,
+          breakeven: 0,
+          balance:
+            PAPER.startingBalance,
+          realizedPnl: 0
+        };
+
       const total =
         Number(
-          account?.totalTrades ||
-          0
+          a.totalTrades || 0
         );
 
       const wins =
         Number(
-          account?.wins ||
-          0
+          a.wins || 0
         );
 
       const winRate =
@@ -1550,39 +1476,15 @@ function registerBotCommands() {
           : 0;
 
       await ctx.reply(
-        `📊 ${VERSION}\n\n` +
-
-        `Closed Trades: ${total}\n` +
-
+        `📊 ${VERSION} STATS\n\n` +
+        `Timeframe: ${TIMEFRAME}\n` +
+        `Closed: ${total}\n` +
         `Wins: ${wins}\n` +
-
-        `Losses: ${Number(
-          account?.losses ||
-          0
-        )}\n` +
-
-        `Breakeven: ${Number(
-          account?.breakeven ||
-          0
-        )}\n` +
-
-        `Win Rate: ${fmtPct(
-          winRate
-        )}\n` +
-
-        `PnL: ${fmtMoney(
-          account?.realizedPnl ||
-          0
-        )}\n` +
-
-        `Balance: ${fmtMoney(
-          account?.balance ??
-          PAPER.startingBalance
-        )}\n\n` +
-
-        `Raw Signals: ${state.rawSignals}\n` +
-
-        `Executed: ${state.executedSignals}`
+        `Losses: ${Number(a.losses || 0)}\n` +
+        `Breakeven: ${Number(a.breakeven || 0)}\n` +
+        `Win Rate: ${fmtPct(winRate)}\n` +
+        `Realized PnL: ${fmtMoney(Number(a.realizedPnl || 0))}\n` +
+        `Balance: ${fmtMoney(Number(a.balance || PAPER.startingBalance))}`
       );
     }
   );
@@ -1603,31 +1505,20 @@ function registerBotCommands() {
       }
 
       const rows =
-        [...state.openTrades.values()]
-          .map(
-            (trade) =>
-              `${
-                trade.direction ===
-                'BUY'
-                  ? '🟢'
-                  : '🔴'
-              } ${trade.symbol} ${trade.direction}\n` +
-
-              `Entry ${fmtPrice(
-                trade.entryPrice,
-                trade.symbol
-              )}\n` +
-
-              `SL ${fmtPrice(
-                trade.stopLoss,
-                trade.symbol
-              )}\n` +
-
-              `TP ${fmtPrice(
-                trade.takeProfit,
-                trade.symbol
-              )}`
-          );
+        [
+          ...state
+            .openTrades
+            .values()
+        ].map(
+          (trade) => {
+            return (
+              `${trade.direction === 'BUY' ? '🟢' : '🔴'} ${trade.symbol} ${trade.direction}\n` +
+              `Entry ${fmtPrice(trade.entryPrice, trade.symbol)} | ` +
+              `SL ${fmtPrice(trade.stopLoss, trade.symbol)} | ` +
+              `TP ${fmtPrice(trade.takeProfit, trade.symbol)}`
+            );
+          }
+        );
 
       await ctx.reply(
         rows.join('\n\n')
@@ -1650,15 +1541,11 @@ function registerBotCommands() {
 
       const trades =
         await ForexTrade.find({
-          version:
-            VERSION,
-
-          status:
-            'CLOSED'
+          version: VERSION,
+          status: 'CLOSED'
         })
           .sort({
-            closedAt:
-              -1
+            closedAt: -1
           })
           .limit(10)
           .lean();
@@ -1669,28 +1556,24 @@ function registerBotCommands() {
         );
       }
 
+      const rows =
+        trades.map(
+          (trade) => {
+            const pnl =
+              Number(
+                trade.pnlUsd || 0
+              );
+
+            return (
+              `${pnl > 0 ? '✅' : pnl < 0 ? '❌' : '➖'} ` +
+              `${trade.symbol} ${trade.direction} | ${trade.exitReason}\n` +
+              `PnL ${fmtMoney(pnl)} | ${Number(trade.pnlR || 0).toFixed(2)}R`
+            );
+          }
+        );
+
       await ctx.reply(
-        trades
-          .map(
-            (trade) =>
-              `${
-                trade.pnlUsd > 0
-                  ? '✅'
-                  : trade.pnlUsd < 0
-                  ? '❌'
-                  : '➖'
-              } ${trade.symbol} ${trade.direction}\n` +
-
-              `${trade.exitReason}\n` +
-
-              `PnL ${fmtMoney(
-                trade.pnlUsd
-              )} | ${Number(
-                trade.pnlR ||
-                0
-              ).toFixed(2)}R`
-          )
-          .join('\n\n')
+        rows.join('\n\n')
       );
     }
   );
@@ -1703,19 +1586,17 @@ function registerBotCommands() {
       );
 
       await ctx.reply(
-        `📡 ${PAIRS.length} FOREX PAIRS\n\n` +
-        PAIRS.join(', ')
+        `📡 ${INSTRUMENTS.length} INSTRUMENTS (${TIMEFRAME})\n` +
+        INSTRUMENTS.join(', ')
       );
     }
   );
 }
 
-// ============================================================
-// TELEGRAM INITIALIZATION
-// ============================================================
-
 async function initTelegram() {
-  if (!TELEGRAM_BOT_TOKEN) {
+  if (
+    !TELEGRAM_BOT_TOKEN
+  ) {
     console.warn(
       '⚠️ TELEGRAM_BOT_TOKEN missing'
     );
@@ -1741,30 +1622,26 @@ async function initTelegram() {
       `✅ Telegram authenticated: @${me.username}`
     );
 
-    // Important:
-    // DO NOT await bot.launch().
+    // IMPORTANT:
+    // Do NOT await bot.launch()
+    // otherwise boot can stop here.
     bot.launch({
-      dropPendingUpdates:
-        true
+      dropPendingUpdates: true
     })
-      .then(
-        () => {
-          console.log(
-            'ℹ️ Telegram polling stopped'
-          );
-        }
-      )
-      .catch(
-        (err) => {
-          state.telegramReady =
-            false;
+      .then(() => {
+        console.log(
+          '✅ Telegram polling stopped'
+        );
+      })
+      .catch((err) => {
+        state.telegramReady =
+          false;
 
-          console.error(
-            '❌ Telegram polling:',
-            safeError(err)
-          );
-        }
-      );
+        console.error(
+          '❌ Telegram polling:',
+          safeError(err)
+        );
+      });
 
     console.log(
       '✅ Telegram polling started'
@@ -1781,7 +1658,7 @@ async function initTelegram() {
 }
 
 // ============================================================
-// HTTP CLIENT
+// BIQUOTE
 // ============================================================
 
 const http =
@@ -1794,17 +1671,13 @@ const http =
 
     headers: {
       'User-Agent':
-        'LOMY-Forex-V1-Paper'
+        `${VERSION.replace(/\s+/g, '-')}/paper-test`
     }
   });
 
-// ============================================================
-// OHLC
-// ============================================================
-
 async function fetchOhlc(
   symbol,
-  limit = 3
+  limit = 4
 ) {
   const response =
     await http.get(
@@ -1812,7 +1685,7 @@ async function fetchOhlc(
       {
         params: {
           interval:
-            '1m',
+            TIMEFRAME,
 
           limit
         }
@@ -1827,16 +1700,12 @@ async function fetchOhlc(
 
   if (!bars.length) {
     throw new Error(
-      `${symbol}: no OHLC bars`
+      `${symbol}: no ${TIMEFRAME} OHLC bars`
     );
   }
 
   return bars;
 }
-
-// ============================================================
-// NORMALIZE QUOTE
-// ============================================================
 
 function normalizeQuote(
   symbol,
@@ -1858,38 +1727,18 @@ function normalizeQuote(
   const mid =
     n(
       raw.mid,
-
       Number.isFinite(bid) &&
       Number.isFinite(ask)
-        ? (
-            bid +
-            ask
-          ) / 2
+        ? (bid + ask) / 2
         : NaN
     );
 
-  const fallback =
-    Number.isFinite(mid)
-      ? mid
-      : n(raw.last);
-
-  const finalBid =
-    Number.isFinite(bid) &&
-    bid > 0
-      ? bid
-      : fallback;
-
-  const finalAsk =
-    Number.isFinite(ask) &&
-    ask > 0
-      ? ask
-      : fallback;
-
   if (
-    !Number.isFinite(finalBid) ||
-    !Number.isFinite(finalAsk) ||
-    finalBid <= 0 ||
-    finalAsk <= 0
+    !Number.isFinite(mid) &&
+    !(
+      Number.isFinite(bid) &&
+      Number.isFinite(ask)
+    )
   ) {
     return null;
   }
@@ -1898,183 +1747,42 @@ function normalizeQuote(
     symbol,
 
     bid:
-      finalBid,
+      Number.isFinite(bid)
+        ? bid
+        : mid,
 
     ask:
-      finalAsk,
+      Number.isFinite(ask)
+        ? ask
+        : mid,
 
-    mid:
-      Number.isFinite(mid) &&
-      mid > 0
-        ? mid
-        : (
-            finalBid +
-            finalAsk
-          ) / 2,
+    mid,
 
-    spread:
-      Math.max(
-        0,
-        finalAsk -
-        finalBid
-      ),
-
-    marketState:
-      raw.marketState ||
-      null,
+    timestamp:
+      raw.timestamp ||
+      raw.openTime ||
+      nowIso(),
 
     stale:
-      raw.stale === true,
+      Boolean(raw.stale),
+
+    marketState:
+      String(
+        raw.marketState ||
+        ''
+      ).toLowerCase(),
 
     quoteAgeSeconds:
       n(
         raw.quoteAgeSeconds,
-        NaN
-      ),
-
-    timestamp:
-      raw.timestamp ||
-      raw.time ||
-      null
+        0
+      )
   };
 }
-
-// ============================================================
-// BATCH QUOTES
-// ============================================================
-
-async function fetchLatestQuotes(
-  symbols
-) {
-  if (!symbols?.length) {
-    return new Map();
-  }
-
-  const params =
-    new URLSearchParams();
-
-  for (
-    const symbol
-    of symbols
-  ) {
-    params.append(
-      'symbols',
-      symbol
-    );
-  }
-
-  const response =
-    await http.get(
-      `/api/latest?${params.toString()}`
-    );
-
-  const raw =
-    response.data;
-
-  const output =
-    new Map();
-
-  if (Array.isArray(raw)) {
-    for (
-      const item
-      of raw
-    ) {
-      const symbol =
-        String(
-          item.symbol ||
-          item.name ||
-          ''
-        )
-          .replace('/', '')
-          .toUpperCase();
-
-      if (
-        !symbols.includes(
-          symbol
-        )
-      ) {
-        continue;
-      }
-
-      const quote =
-        normalizeQuote(
-          symbol,
-          item
-        );
-
-      if (quote) {
-        output.set(
-          symbol,
-          quote
-        );
-      }
-    }
-
-    return output;
-  }
-
-  if (
-    raw &&
-    typeof raw === 'object'
-  ) {
-    for (
-      const [key, value]
-      of Object.entries(raw)
-    ) {
-      const symbol =
-        String(
-          value?.symbol ||
-          value?.name ||
-          key
-        )
-          .replace('/', '')
-          .toUpperCase();
-
-      if (
-        !symbols.includes(
-          symbol
-        )
-      ) {
-        continue;
-      }
-
-      const quote =
-        normalizeQuote(
-          symbol,
-          value
-        );
-
-      if (quote) {
-        output.set(
-          symbol,
-          quote
-        );
-      }
-    }
-  }
-
-  return output;
-}
-
-// ============================================================
-// SINGLE FRESH QUOTE
-// ============================================================
 
 async function ensureQuote(
   symbol
 ) {
-  const cached =
-    state.latestQuotes.get(
-      symbol
-    );
-
-  if (
-    cached &&
-    cached.stale !== true
-  ) {
-    return cached;
-  }
-
   try {
     const response =
       await http.get(
@@ -2090,7 +1798,8 @@ async function ensureQuote(
     const quote =
       normalizeQuote(
         symbol,
-        response.data
+        response.data ||
+        {}
       );
 
     if (quote) {
@@ -2101,27 +1810,203 @@ async function ensureQuote(
     }
 
     return quote;
-  } catch (err) {
-    console.warn(
-      `⚠️ ${symbol} quote: ${safeError(err)}`
-    );
-
+  } catch {
     return null;
   }
 }
 
-// ============================================================
-// INITIALIZE MARKET
-// ============================================================
+async function fetchLatestQuotes(
+  symbols
+) {
+  if (!symbols?.length) {
+    return new Map();
+  }
+
+  const params =
+    new URLSearchParams();
+
+  for (
+    const symbol of symbols
+  ) {
+    params.append(
+      'symbols',
+      symbol
+    );
+  }
+
+  const response =
+    await http.get(
+      `/api/latest?${params.toString()}`
+    );
+
+  const raw =
+    response.data;
+
+  let entries = [];
+
+  if (Array.isArray(raw)) {
+    entries =
+      raw.map(
+        (quote) => [
+          String(
+            quote.symbol ||
+            quote.name ||
+            ''
+          )
+            .replace('/', '')
+            .toUpperCase(),
+
+          quote
+        ]
+      );
+  } else if (
+    Array.isArray(raw?.items)
+  ) {
+    entries =
+      raw.items.map(
+        (quote) => [
+          String(
+            quote.symbol ||
+            quote.name ||
+            ''
+          )
+            .replace('/', '')
+            .toUpperCase(),
+
+          quote
+        ]
+      );
+  } else if (
+    Array.isArray(raw?.data)
+  ) {
+    entries =
+      raw.data.map(
+        (quote) => [
+          String(
+            quote.symbol ||
+            quote.name ||
+            ''
+          )
+            .replace('/', '')
+            .toUpperCase(),
+
+          quote
+        ]
+      );
+  } else if (
+    raw &&
+    typeof raw === 'object'
+  ) {
+    entries =
+      Object.entries(raw);
+  }
+
+  const result =
+    new Map();
+
+  for (
+    const [
+      rawSymbol,
+      quote
+    ] of entries
+  ) {
+    const symbol =
+      String(
+        rawSymbol ||
+        quote?.symbol ||
+        quote?.name ||
+        ''
+      )
+        .replace('/', '')
+        .toUpperCase();
+
+    if (
+      !symbols.includes(
+        symbol
+      )
+    ) {
+      continue;
+    }
+
+    const normalized =
+      normalizeQuote(
+        symbol,
+        quote
+      );
+
+    if (normalized) {
+      result.set(
+        symbol,
+        normalized
+      );
+    }
+  }
+
+  return result;
+}
+
+async function mapWithConcurrency(
+  items,
+  concurrency,
+  fn
+) {
+  const results =
+    new Array(
+      items.length
+    );
+
+  let index = 0;
+
+  async function worker() {
+    while (true) {
+      const current =
+        index++;
+
+      if (
+        current >=
+        items.length
+      ) {
+        break;
+      }
+
+      try {
+        results[current] =
+          await fn(
+            items[current],
+            current
+          );
+      } catch (err) {
+        results[current] = {
+          error: err
+        };
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      {
+        length:
+          Math.min(
+            concurrency,
+            items.length
+          )
+      },
+      worker
+    )
+  );
+
+  return results;
+}
 
 async function initializeMarket() {
   console.log(
-    `📡 Initializing ${PAIRS.length} Forex pairs...`
+    `📡 Initializing ${INSTRUMENTS.length} instruments on ${TIMEFRAME}...`
   );
 
   const results =
     await mapWithConcurrency(
-      PAIRS,
+      INSTRUMENTS,
       OHLC_CONCURRENCY,
       async (symbol) => {
         const bars =
@@ -2144,48 +2029,49 @@ async function initializeMarket() {
           );
         }
 
-        const pair =
+        const pairState =
           state.pairState.get(
             symbol
           );
 
-        pair.bars =
+        pairState.bars =
           closed.slice(
             -HISTORY_LIMIT
           );
 
-        pair.lastClosedBarTime =
-          pair.bars[
-            pair.bars.length - 1
-          ]?.openTime ||
-          null;
+        pairState
+          .lastClosedBarTime =
+            pairState.bars[
+              pairState
+                .bars
+                .length - 1
+            ]?.openTime ||
+            null;
 
-        pair.lastSignal =
+        pairState.lastSignal =
           deriveLastSignalFromHistory(
-            pair.bars
+            pairState.bars
           );
 
-        pair.lastAnalysis =
+        pairState.lastAnalysis =
           analyzeV51(
-            pair.bars
+            pairState.bars
           );
 
-        pair.initialized =
+        pairState.initialized =
           true;
 
         return {
           symbol,
-
-          bars:
-            pair.bars.length,
-
-          lastSignal:
-            pair.lastSignal
+          count:
+            pairState
+              .bars
+              .length
         };
       }
     );
 
-  let successful = 0;
+  let ok = 0;
 
   for (
     let i = 0;
@@ -2195,187 +2081,145 @@ async function initializeMarket() {
     const result =
       results[i];
 
-    const symbol =
-      PAIRS[i];
-
     if (
       result &&
       !result.error
     ) {
-      successful++;
-
-      console.log(
-        `✅ ${symbol} ready | ${result.bars} closed bars | lastSignal=${result.lastSignal}`
-      );
+      ok++;
     } else {
-      const pair =
-        state.pairState.get(
-          symbol
-        );
+      const symbol =
+        INSTRUMENTS[i];
 
-      if (pair) {
-        pair.errors++;
-      }
+      state
+        .pairState
+        .get(symbol)
+        .errors++;
 
       console.warn(
-        `⚠️ ${symbol} init: ${safeError(
-          result?.error ||
-          'unknown error'
-        )}`
+        `⚠️ ${symbol} init: ${safeError(result?.error || 'unknown')}`
       );
     }
   }
 
   state.marketReady =
-    successful >=
+    ok >=
     Math.ceil(
-      PAIRS.length *
+      INSTRUMENTS.length *
       0.70
     );
 
   state.initializing =
     false;
 
-  state.lastMarketError =
-    state.marketReady
-      ? null
-      : `Only ${successful}/${PAIRS.length} pairs initialized`;
-
   console.log(
-    `📡 Market initialized: ${successful}/${PAIRS.length}`
+    `✅ Market initialized: ${ok}/${INSTRUMENTS.length}`
   );
 
   console.log(
     state.marketReady
       ? '✅ Market engine READY'
-      : '⚠️ Market engine PARTIAL/WAIT'
+      : '⚠️ Market engine PARTIAL'
   );
 }
 
 // ============================================================
-// CALCULATE SL / TP
+// PAPER EXECUTION
 // ============================================================
 
-function calcLevels(
+function calcSignalStop(
   direction,
   analysis,
   currentBar
 ) {
-  const entry =
+  const signalEntry =
     analysis.close;
 
+  const atr =
+    analysis.atr;
+
   if (
-    !Number.isFinite(entry) ||
     !Number.isFinite(
-      analysis.atr
+      signalEntry
     ) ||
-    analysis.atr <= 0
+    !Number.isFinite(atr) ||
+    atr <= 0
   ) {
     return null;
   }
 
-  if (
-    direction === 'BUY'
-  ) {
-    let calculatedSL =
+  if (direction === 'BUY') {
+    let stopLoss =
       analysis.support -
-      analysis.atr *
+      atr *
       STRATEGY.atrMargin;
 
     if (
       !Number.isFinite(
-        calculatedSL
+        stopLoss
       ) ||
-      calculatedSL >=
-        entry
+      stopLoss >=
+        signalEntry
     ) {
-      calculatedSL =
+      stopLoss =
         currentBar.low -
-        analysis.atr *
+        atr *
         STRATEGY.atrMargin;
     }
 
-    let risk =
-      entry -
-      calculatedSL;
-
-    if (!(risk > 0)) {
-      risk =
-        analysis.atr;
+    if (
+      !(stopLoss <
+        signalEntry)
+    ) {
+      stopLoss =
+        signalEntry -
+        atr;
     }
 
     return {
-      signalEntry:
-        entry,
-
-      stopLoss:
-        entry -
-        risk,
-
-      takeProfit:
-        entry +
-        risk *
-        STRATEGY.riskReward,
-
-      signalRisk:
-        risk
+      signalEntry,
+      stopLoss
     };
   }
 
-  let calculatedSL =
+  let stopLoss =
     analysis.resistance +
-    analysis.atr *
+    atr *
     STRATEGY.atrMargin;
 
   if (
     !Number.isFinite(
-      calculatedSL
+      stopLoss
     ) ||
-    calculatedSL <=
-      entry
+    stopLoss <=
+      signalEntry
   ) {
-    calculatedSL =
+    stopLoss =
       currentBar.high +
-      analysis.atr *
+      atr *
       STRATEGY.atrMargin;
   }
 
-  let risk =
-    calculatedSL -
-    entry;
-
-  if (!(risk > 0)) {
-    risk =
-      analysis.atr;
+  if (
+    !(stopLoss >
+      signalEntry)
+  ) {
+    stopLoss =
+      signalEntry +
+      atr;
   }
 
   return {
-    signalEntry:
-      entry,
-
-    stopLoss:
-      entry +
-      risk,
-
-    takeProfit:
-      entry -
-      risk *
-      STRATEGY.riskReward,
-
-    signalRisk:
-      risk
+    signalEntry,
+    stopLoss
   };
 }
-
-// ============================================================
-// OPEN PAPER TRADE
-// ============================================================
 
 async function openPaperTrade(
   symbol,
   direction,
   analysis,
-  currentBar
+  currentBar,
+  quality
 ) {
   if (
     state.openTrades.has(
@@ -2388,6 +2232,7 @@ async function openPaperTrade(
       symbol,
       direction,
       analysis,
+      quality,
       false,
       'PAIR_ALREADY_OPEN'
     );
@@ -2405,6 +2250,7 @@ async function openPaperTrade(
       symbol,
       direction,
       analysis,
+      quality,
       false,
       'MAX_OPEN_TRADES'
     );
@@ -2412,22 +2258,23 @@ async function openPaperTrade(
     return;
   }
 
-  const levels =
-    calcLevels(
+  const base =
+    calcSignalStop(
       direction,
       analysis,
       currentBar
     );
 
-  if (!levels) {
+  if (!base) {
     state.skippedSignals++;
 
     await logSignal(
       symbol,
       direction,
       analysis,
+      quality,
       false,
-      'INVALID_LEVELS'
+      'INVALID_SIGNAL_LEVELS'
     );
 
     return;
@@ -2445,8 +2292,28 @@ async function openPaperTrade(
       symbol,
       direction,
       analysis,
+      quality,
       false,
       'NO_FRESH_QUOTE'
+    );
+
+    return;
+  }
+
+  if (
+    quote.stale ||
+    quote.marketState ===
+      'closed'
+  ) {
+    state.skippedSignals++;
+
+    await logSignal(
+      symbol,
+      direction,
+      analysis,
+      quality,
+      false,
+      'STALE_OR_CLOSED_MARKET'
     );
 
     return;
@@ -2457,12 +2324,74 @@ async function openPaperTrade(
       ? quote.ask
       : quote.bid;
 
-  const riskDistance =
-    direction === 'BUY'
-      ? entryPrice -
-        levels.stopLoss
-      : levels.stopLoss -
-        entryPrice;
+  const executionMove =
+    Math.abs(
+      entryPrice -
+      base.signalEntry
+    );
+
+  const executionMoveAtr =
+    analysis.atr > 0
+      ? executionMove /
+        analysis.atr
+      : Infinity;
+
+  // Only protection against
+  // a badly delayed execution.
+  if (
+    executionMoveAtr >
+    QUALITY.maxChaseAtr
+  ) {
+    state.skippedSignals++;
+
+    await logSignal(
+      symbol,
+      direction,
+      analysis,
+      quality,
+      false,
+      `CHASED_${executionMoveAtr.toFixed(2)}ATR`
+    );
+
+    console.log(
+      `⏭️ ${symbol} ${direction} skipped: chased ${executionMoveAtr.toFixed(2)} ATR`
+    );
+
+    return;
+  }
+
+  let stopLoss =
+    base.stopLoss;
+
+  let riskDistance;
+
+  if (direction === 'BUY') {
+    if (
+      !(stopLoss <
+        entryPrice)
+    ) {
+      stopLoss =
+        entryPrice -
+        analysis.atr;
+    }
+
+    riskDistance =
+      entryPrice -
+      stopLoss;
+  } else {
+    if (
+      !(stopLoss >
+        entryPrice)
+    ) {
+      stopLoss =
+        entryPrice +
+        analysis.atr;
+    }
+
+    riskDistance =
+      stopLoss -
+      entryPrice;
+  }
 
   if (!(riskDistance > 0)) {
     state.skippedSignals++;
@@ -2471,8 +2400,52 @@ async function openPaperTrade(
       symbol,
       direction,
       analysis,
+      quality,
       false,
-      'EXECUTION_PRICE_INVALIDATES_SL'
+      'INVALID_EXECUTION_RISK'
+    );
+
+    return;
+  }
+
+  // CRITICAL FIX:
+  // TP calculated from actual entry,
+  // never from the old signal price.
+  const takeProfit =
+    direction === 'BUY'
+      ? entryPrice +
+        riskDistance *
+        STRATEGY.riskReward
+
+      : entryPrice -
+        riskDistance *
+        STRATEGY.riskReward;
+
+  const validGeometry =
+    direction === 'BUY'
+      ? (
+          stopLoss <
+            entryPrice &&
+          entryPrice <
+            takeProfit
+        )
+      : (
+          takeProfit <
+            entryPrice &&
+          entryPrice <
+            stopLoss
+        );
+
+  if (!validGeometry) {
+    state.skippedSignals++;
+
+    await logSignal(
+      symbol,
+      direction,
+      analysis,
+      quality,
+      false,
+      'INVALID_SL_ENTRY_TP_GEOMETRY'
     );
 
     return;
@@ -2491,19 +2464,22 @@ async function openPaperTrade(
       100
     );
 
-  const trade = {
-    version:
-      VERSION,
+  const spreadAtEntry =
+    Math.max(
+      0,
+      quote.ask -
+      quote.bid
+    );
 
-    mode:
-      MODE,
+  const document = {
+    version: VERSION,
+    mode: MODE,
+    timeframe: TIMEFRAME,
 
     symbol,
-
     direction,
 
-    status:
-      'OPEN',
+    status: 'OPEN',
 
     signalTime:
       new Date(
@@ -2513,44 +2489,33 @@ async function openPaperTrade(
     openedAt:
       new Date(),
 
-    closedAt:
-      null,
+    closedAt: null,
 
     signalEntry:
-      levels.signalEntry,
+      base.signalEntry,
 
     entryPrice,
 
-    stopLoss:
-      levels.stopLoss,
+    stopLoss,
+    takeProfit,
 
-    takeProfit:
-      levels.takeProfit,
-
-    exitPrice:
-      null,
-
-    exitReason:
-      null,
+    exitPrice: null,
+    exitReason: null,
 
     riskDistance,
-
     riskAmount,
 
-    pnlR:
-      0,
+    pnlR: 0,
+    pnlUsd: 0,
 
-    pnlUsd:
-      0,
+    balanceAfter: null,
 
-    balanceAfter:
-      null,
+    spreadAtEntry,
+    spreadAtExit: null,
 
-    spreadAtEntry:
-      quote.spread,
+    executionMoveAtr,
 
-    spreadAtExit:
-      null,
+    quality,
 
     signal: {
       cmo:
@@ -2591,21 +2556,21 @@ async function openPaperTrade(
       new Date()
   };
 
-  let savedTrade =
-    trade;
+  let saved =
+    document;
 
   if (state.mongoReady) {
-    savedTrade =
+    saved =
       (
         await ForexTrade.create(
-          trade
+          document
         )
       ).toObject();
   }
 
   state.openTrades.set(
     symbol,
-    savedTrade
+    saved
   );
 
   state.executedSignals++;
@@ -2614,66 +2579,58 @@ async function openPaperTrade(
     symbol,
     direction,
     analysis,
+    quality,
     true,
     ''
   );
 
-  console.log(
-    `${
-      direction === 'BUY'
-        ? '🟢'
-        : '🔴'
-    } ${symbol} ${direction} @ ${entryPrice}`
-  );
+  const fibText =
+    quality?.fib?.valid
+      ? (
+          quality.fib
+            .inGoldenZone
+            ? 'Fib: Golden Zone'
+
+            : quality.fib
+                .nearFib
+              ? 'Fib: Near level'
+
+              : 'Fib: Neutral'
+        )
+      : 'Fib: n/a';
+
+  const message =
+    `${direction === 'BUY' ? '🟢' : '🔴'} <b>${direction} ${symbol}</b> — PAPER\n` +
+    `⏱ ${TIMEFRAME} CLOSED candle\n\n` +
+
+    `Signal: ${fmtPrice(base.signalEntry, symbol)}\n` +
+    `Entry: ${fmtPrice(entryPrice, symbol)}\n` +
+    `SL: ${fmtPrice(stopLoss, symbol)}\n` +
+    `TP: ${fmtPrice(takeProfit, symbol)}\n` +
+    `R:R: 1:${STRATEGY.riskReward}\n` +
+    `Move: ${executionMoveAtr.toFixed(2)} ATR\n\n` +
+
+    `V5.1: CMO ${analysis.cmo.toFixed(1)} | ` +
+    `Body ${(analysis.bodyRatio * 100).toFixed(0)}% | ` +
+    `Vol ${analysis.highVolume ? 'YES' : 'NO'}\n` +
+
+    `Retest: ${quality.retest ? 'YES' : 'NO'} | ` +
+    `${fibText} | ` +
+    `Quality: ${quality.label} (${quality.score})\n\n` +
+
+    `🔒 PAPER ONLY`;
 
   await sendTelegram(
-    `${
-      direction === 'BUY'
-        ? '🟢'
-        : '🔴'
-    } <b>${direction} ${symbol}</b>\n\n` +
+    message
+  );
 
-    `${VERSION} — PAPER\n` +
-
-    `Signal: ${fmtPrice(
-      levels.signalEntry,
-      symbol
-    )}\n` +
-
-    `Entry: ${fmtPrice(
-      entryPrice,
-      symbol
-    )}\n` +
-
-    `SL: ${fmtPrice(
-      levels.stopLoss,
-      symbol
-    )}\n` +
-
-    `TP: ${fmtPrice(
-      levels.takeProfit,
-      symbol
-    )}\n` +
-
-    `R:R: 1:${STRATEGY.riskReward}\n` +
-
-    `CMO: ${analysis.cmo.toFixed(1)}\n` +
-
-    `Body: ${(analysis.bodyRatio * 100).toFixed(0)}%\n` +
-
-    `Volume Spike: YES\n\n` +
-
-    `🔒 PAPER ONLY`,
-    {
-      parse_mode:
-        'HTML'
-    }
+  console.log(
+    `${direction === 'BUY' ? '🟢' : '🔴'} ` +
+    `${symbol} ${direction} @ ${entryPrice} | ` +
+    `SL ${stopLoss} | TP ${takeProfit} | ` +
+    `Q=${quality.score}`
   );
 }
-
-// ============================================================
-// CLOSE PAPER TRADE
-// ============================================================
 
 async function closePaperTrade(
   symbol,
@@ -2690,14 +2647,13 @@ async function closePaperTrade(
     return;
   }
 
-  const sign =
-    trade.direction ===
-    'BUY'
+  const directionSign =
+    trade.direction === 'BUY'
       ? 1
       : -1;
 
   const move =
-    sign *
+    directionSign *
     (
       exitPrice -
       trade.entryPrice
@@ -2716,27 +2672,20 @@ async function closePaperTrade(
       balance:
         PAPER.startingBalance,
 
-      realizedPnl:
-        0,
+      realizedPnl: 0,
 
-      totalTrades:
-        0,
+      totalTrades: 0,
 
-      wins:
-        0,
-
-      losses:
-        0,
-
-      breakeven:
-        0
+      wins: 0,
+      losses: 0,
+      breakeven: 0
     };
   }
 
   account.balance =
     Number(
       account.balance ||
-      0
+      PAPER.startingBalance
     ) +
     pnlUsd;
 
@@ -2751,55 +2700,57 @@ async function closePaperTrade(
     Number(
       account.totalTrades ||
       0
-    ) + 1;
+    ) +
+    1;
 
-  if (
-    pnlUsd >
-    0.000001
-  ) {
+  if (pnlUsd > 0.000001) {
     account.wins =
       Number(
         account.wins ||
         0
-      ) + 1;
+      ) +
+      1;
   } else if (
-    pnlUsd <
-    -0.000001
+    pnlUsd < -0.000001
   ) {
     account.losses =
       Number(
         account.losses ||
         0
-      ) + 1;
+      ) +
+      1;
   } else {
     account.breakeven =
       Number(
         account.breakeven ||
         0
-      ) + 1;
+      ) +
+      1;
   }
 
   const patch = {
-    status:
-      'CLOSED',
+    status: 'CLOSED',
 
     closedAt:
       new Date(),
 
     exitPrice,
-
     exitReason,
 
     pnlR,
-
     pnlUsd,
 
     balanceAfter:
       account.balance,
 
     spreadAtExit:
-      quote?.spread ??
-      0,
+      quote
+        ? Math.max(
+            0,
+            quote.ask -
+            quote.bid
+          )
+        : 0,
 
     updatedAt:
       new Date()
@@ -2827,47 +2778,20 @@ async function closePaperTrade(
     symbol
   );
 
-  console.log(
-    `${
-      pnlUsd >= 0
-        ? '✅'
-        : '❌'
-    } ${symbol} CLOSE ${exitReason} ${pnlR.toFixed(2)}R`
+  await sendTelegram(
+    `${pnlUsd >= 0 ? '✅' : '❌'} <b>CLOSE ${symbol} ${trade.direction}</b>\n` +
+    `Reason: ${exitReason}\n` +
+    `Exit: ${fmtPrice(exitPrice, symbol)}\n` +
+    `PnL: ${fmtMoney(pnlUsd)} (${pnlR.toFixed(2)}R)\n` +
+    `Paper Balance: ${fmtMoney(Number(account.balance))}\n\n` +
+    `🔒 PAPER ONLY`
   );
 
-  await sendTelegram(
-    `${
-      pnlUsd >= 0
-        ? '✅'
-        : '❌'
-    } <b>CLOSE ${symbol} ${trade.direction}</b>\n\n` +
-
-    `Reason: ${exitReason}\n` +
-
-    `Exit: ${fmtPrice(
-      exitPrice,
-      symbol
-    )}\n` +
-
-    `PnL: ${fmtMoney(
-      pnlUsd
-    )} (${pnlR.toFixed(2)}R)\n` +
-
-    `Paper Balance: ${fmtMoney(
-      account.balance
-    )}\n\n` +
-
-    `🔒 PAPER ONLY`,
-    {
-      parse_mode:
-        'HTML'
-    }
+  console.log(
+    `${pnlUsd >= 0 ? '✅' : '❌'} ` +
+    `${symbol} CLOSE ${exitReason} ${pnlR.toFixed(2)}R`
   );
 }
-
-// ============================================================
-// REVERSE SIGNAL
-// ============================================================
 
 async function reverseIfNeeded(
   symbol,
@@ -2896,8 +2820,7 @@ async function reverseIfNeeded(
   }
 
   const exitPrice =
-    trade.direction ===
-    'BUY'
+    trade.direction === 'BUY'
       ? quote.bid
       : quote.ask;
 
@@ -2910,19 +2833,19 @@ async function reverseIfNeeded(
 }
 
 // ============================================================
-// SCAN PAIR
+// 15 MINUTE SCANNER
 // ============================================================
 
-async function scanPairForNewClosedBar(
+async function scanInstrument(
   symbol
 ) {
-  const pair =
+  const pairState =
     state.pairState.get(
       symbol
     );
 
   if (
-    !pair?.initialized
+    !pairState?.initialized
   ) {
     return;
   }
@@ -2930,7 +2853,7 @@ async function scanPairForNewClosedBar(
   const latest =
     await fetchOhlc(
       symbol,
-      3
+      4
     );
 
   const closed =
@@ -2955,60 +2878,58 @@ async function scanPairForNewClosedBar(
   }
 
   if (
-    pair.lastClosedBarTime &&
+    pairState
+      .lastClosedBarTime &&
     barTimeMs(
       newestClosed
     ) <=
-    new Date(
-      pair.lastClosedBarTime
-    ).getTime()
+      new Date(
+        pairState
+          .lastClosedBarTime
+      ).getTime()
   ) {
     return;
   }
 
-  pair.bars =
+  pairState.bars =
     mergeClosedBars(
-      pair.bars,
+      pairState.bars,
       closed,
       HISTORY_LIMIT
     );
 
-  pair.lastClosedBarTime =
-    newestClosed.openTime;
+  pairState
+    .lastClosedBarTime =
+      newestClosed.openTime;
 
   const analysis =
     analyzeV51(
-      pair.bars
+      pairState.bars
     );
 
-  pair.lastAnalysis =
+  pairState.lastAnalysis =
     analysis;
 
   if (!analysis) {
     return;
   }
 
-  let direction =
-    null;
+  let direction = null;
 
   if (
     analysis.rawBuy &&
-    pair.lastSignal !== 1
+    pairState.lastSignal !== 1
   ) {
-    direction =
-      'BUY';
+    direction = 'BUY';
 
-    pair.lastSignal =
-      1;
+    pairState.lastSignal = 1;
   } else if (
     analysis.rawSell &&
-    pair.lastSignal !== -1
+    pairState.lastSignal !== -1
   ) {
-    direction =
-      'SELL';
+    direction = 'SELL';
 
-    pair.lastSignal =
-      -1;
+    pairState.lastSignal = -1;
   }
 
   if (!direction) {
@@ -3017,11 +2938,18 @@ async function scanPairForNewClosedBar(
 
   state.rawSignals++;
 
+  const quality =
+    analyzeQualityTools(
+      pairState.bars,
+      direction,
+      analysis
+    );
+
   console.log(
-    `🚨 ${symbol} ${direction} SIGNAL | ` +
+    `🚨 ${symbol} ${direction} V5.1 | ` +
     `CMO ${analysis.cmo.toFixed(1)} | ` +
-    `Body ${(analysis.bodyRatio * 100).toFixed(0)}% | ` +
-    `Vol ${analysis.volume}/${analysis.volAvg.toFixed(0)}`
+    `body ${(analysis.bodyRatio * 100).toFixed(0)}% | ` +
+    `Q=${quality.score}`
   );
 
   await reverseIfNeeded(
@@ -3033,53 +2961,52 @@ async function scanPairForNewClosedBar(
     symbol,
     direction,
     analysis,
-    newestClosed
+    newestClosed,
+    quality
   );
 }
 
-// ============================================================
-// RUN 30-PAIR SCAN
-// ============================================================
-
-async function runSignalScan() {
+async function runFullSignalScan(
+  slot
+) {
   if (
     state.scanRunning ||
     state.initializing
   ) {
-    return;
+    return false;
   }
 
-  state.scanRunning =
-    true;
+  state.scanRunning = true;
 
   state.lastSignalScanAt =
     new Date();
 
   state.totalSignalScans++;
 
-  const initializedSymbols =
-    PAIRS.filter(
-      (symbol) =>
-        state.pairState.get(
-          symbol
-        )?.initialized
-    );
+  const scanNumber =
+    state.totalSignalScans;
 
   console.log(
-    `🔎 Scan #${state.totalSignalScans} | ` +
-    `${initializedSymbols.length} pairs | ` +
-    `${new Date().toISOString()}`
+    `🔎 Scan #${scanNumber} | ` +
+    `${INSTRUMENTS.length} instruments | ` +
+    `${TIMEFRAME} | ` +
+    `${nowIso()}`
   );
 
   try {
     const results =
       await mapWithConcurrency(
-        initializedSymbols,
+        INSTRUMENTS,
         OHLC_CONCURRENCY,
-        async (symbol) =>
-          scanPairForNewClosedBar(
+        async (symbol) => {
+          await scanInstrument(
             symbol
-          )
+          );
+
+          return {
+            ok: true
+          };
+        }
       );
 
     const errors =
@@ -3090,78 +3017,92 @@ async function runSignalScan() {
 
     if (errors.length) {
       state.lastMarketError =
-        `${errors.length} pair scan error(s): ` +
+        `${errors.length} scan error(s): ` +
         safeError(
           errors[0].error
         );
 
       console.warn(
-        `⚠️ ${state.lastMarketError}`
+        `⚠️ Scan #${scanNumber}: ${state.lastMarketError}`
       );
     } else {
       state.lastMarketError =
         null;
+
+      state.marketReady =
+        true;
     }
 
+    state.lastGlobalScanSlot =
+      slot;
+
     console.log(
-      `✅ Scan #${state.totalSignalScans} complete | ` +
+      `✅ Scan #${scanNumber} complete | ` +
       `raw=${state.rawSignals} ` +
-      `executed=${state.executedSignals}`
+      `executed=${state.executedSignals} ` +
+      `skipped=${state.skippedSignals}`
     );
+
+    return true;
+  } catch (err) {
+    state.lastMarketError =
+      safeError(err);
+
+    console.warn(
+      `❌ Scan #${scanNumber}: ${state.lastMarketError}`
+    );
+
+    return false;
   } finally {
     state.scanRunning =
       false;
   }
 }
 
-// ============================================================
-// SCAN CLOCK
-// ============================================================
-
-function scanClockLoop() {
-  if (state.initializing) {
+async function signalClockLoop() {
+  if (
+    state.initializing ||
+    state.scanRunning
+  ) {
     return;
   }
 
   const now =
     new Date();
 
+  const minute =
+    now.getUTCMinutes();
+
+  const second =
+    now.getUTCSeconds();
+
+  // New 15m candle closes at:
+  // :00 :15 :30 :45
   if (
-    now.getUTCSeconds() <
-    SCAN_AFTER_SECOND
+    minute % 15 !== 0 ||
+    second <
+      SCAN_AFTER_SECOND
   ) {
     return;
   }
 
-  const key =
-    minuteKey(now);
+  const slot =
+    utc15mSlot(now);
 
   if (
-    state.lastGlobalScanMinute ===
-    key
+    state.lastGlobalScanSlot ===
+    slot
   ) {
     return;
   }
 
-  state.lastGlobalScanMinute =
-    key;
-
-  runSignalScan()
-    .catch(
-      (err) => {
-        state.lastMarketError =
-          safeError(err);
-
-        console.error(
-          '❌ Global scan:',
-          state.lastMarketError
-        );
-      }
-    );
+  await runFullSignalScan(
+    slot
+  );
 }
 
 // ============================================================
-// FAST EXIT MONITOR
+// PAPER EXIT MONITOR
 // ============================================================
 
 async function quotePollLoop() {
@@ -3183,7 +3124,9 @@ async function quotePollLoop() {
 
   try {
     const symbols =
-      [...state.openTrades.keys()];
+      [
+        ...state.openTrades.keys()
+      ];
 
     const quotes =
       await fetchLatestQuotes(
@@ -3191,8 +3134,10 @@ async function quotePollLoop() {
       );
 
     for (
-      const [symbol, quote]
-      of quotes
+      const [
+        symbol,
+        quote
+      ] of quotes
     ) {
       state.latestQuotes.set(
         symbol,
@@ -3201,25 +3146,29 @@ async function quotePollLoop() {
     }
 
     for (
-      const [symbol, trade]
-      of [
+      const [
+        symbol,
+        trade
+      ] of [
         ...state.openTrades.entries()
       ]
     ) {
       const quote =
-        quotes.get(symbol) ||
         state.latestQuotes.get(
           symbol
         );
 
       if (
         !quote ||
-        quote.stale === true
+        quote.stale ||
+        quote.marketState ===
+          'closed'
       ) {
         continue;
       }
 
-      // BUY closes at BID
+      // BUY opens at ask,
+      // exits at bid.
       if (
         trade.direction ===
         'BUY'
@@ -3245,10 +3194,9 @@ async function quotePollLoop() {
             quote
           );
         }
-      }
-
-      // SELL closes at ASK
-      else {
+      } else {
+        // SELL opens at bid,
+        // exits at ask.
         if (
           quote.ask >=
           trade.stopLoss
@@ -3275,11 +3223,6 @@ async function quotePollLoop() {
   } catch (err) {
     state.lastMarketError =
       `quote: ${safeError(err)}`;
-
-    console.warn(
-      '⚠️',
-      state.lastMarketError
-    );
   } finally {
     state.quoteRunning =
       false;
@@ -3297,167 +3240,71 @@ app.disable(
   'x-powered-by'
 );
 
-// ============================================================
-// HOME
-// ============================================================
-
 app.get(
   '/',
   (_req, res) => {
-    const initialized =
-      [...state.pairState.values()]
-        .filter(
-          (pair) =>
-            pair.initialized
-        )
-        .length;
+    const a =
+      account || {};
 
     res
       .type('html')
-      .send(`
-<!doctype html>
+      .send(
+        `<!doctype html>
 <html>
 <head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${VERSION}</title>
-
 <style>
-body {
-  font-family: Arial, sans-serif;
-  background: #111;
-  color: #eee;
-  padding: 24px;
+body{
+font-family:Arial,sans-serif;
+background:#111;
+color:#eee;
+padding:24px
 }
-
-.card {
-  max-width: 760px;
-  margin: auto;
-  background: #1b1b1b;
-  padding: 22px;
-  border-radius: 14px;
+.card{
+max-width:760px;
+margin:auto;
+background:#1b1b1b;
+padding:22px;
+border-radius:14px
 }
-
-.ok {
-  color: #61d17c;
-}
-
-.warn {
-  color: #ffcc66;
-}
+.ok{color:#61d17c}
+.warn{color:#ffcc66}
 </style>
 </head>
-
 <body>
-
 <div class="card">
-
 <h2>${VERSION}</h2>
-
-<p>
-<b>Mode:</b>
-PAPER ONLY
-</p>
-
-<p>
-<b>Live Trading:</b>
-OFF
-</p>
-
-<p>
-<b>Market:</b>
-<span class="${state.marketReady ? 'ok' : 'warn'}">
-${state.marketReady ? 'READY' : 'WAIT'}
-</span>
-</p>
-
-<p>
-<b>Pairs:</b>
-${initialized}/${PAIRS.length}
-</p>
-
-<p>
-<b>Open Trades:</b>
-${state.openTrades.size}
-</p>
-
-<p>
-<b>Paper Balance:</b>
-${fmtMoney(
-  account?.balance ??
-  PAPER.startingBalance
-)}
-</p>
-
-<p>
-<b>Closed Trades:</b>
-${Number(
-  account?.totalTrades ||
-  0
-)}
-</p>
-
-<p>
-<b>Signals:</b>
-${state.rawSignals}
-raw /
-${state.executedSignals}
-executed
-</p>
-
-<p>
-<b>Core:</b>
-Ultra-Fast Scalp Engine V5.1
-</p>
-
-<p>
-<b>Entry:</b>
-1-minute CLOSED candle
-</p>
-
-<p>
-<b>R:R:</b>
-1:${STRATEGY.riskReward}
-</p>
-
-<p>
-🔒 NO REAL MONEY USED
-</p>
-
+<p><b>Mode:</b> PAPER ONLY</p>
+<p><b>Market:</b> <span class="${state.marketReady ? 'ok' : 'warn'}">${state.marketReady ? 'READY' : 'WAIT'}</span></p>
+<p><b>Timeframe:</b> ${TIMEFRAME} CLOSED candle</p>
+<p><b>Instruments:</b> ${INSTRUMENTS.length} (30 FX + XAUUSD)</p>
+<p><b>Open trades:</b> ${state.openTrades.size}</p>
+<p><b>Paper balance:</b> ${fmtMoney(Number(a.balance ?? PAPER.startingBalance))}</p>
+<p><b>Core:</b> Ultra-Fast Scalp Engine V5.1</p>
+<p><b>Quality:</b> Lightweight Retest + Auto Fibonacci score</p>
+<p><b>Data:</b> BiQuote primary</p>
 </div>
-
 </body>
-</html>
-      `);
+</html>`
+      );
   }
 );
-
-// ============================================================
-// HEALTH
-// ============================================================
 
 app.get(
   '/health',
   (_req, res) => {
-    const initialized =
-      [...state.pairState.values()]
-        .filter(
-          (pair) =>
-            pair.initialized
-        )
-        .length;
-
     res.json({
-      ok:
-        true,
+      ok: true,
 
-      version:
-        VERSION,
-
-      mode:
-        MODE,
+      version: VERSION,
+      mode: MODE,
 
       liveTrading:
         LIVE_TRADING,
+
+      timeframe:
+        TIMEFRAME,
 
       marketReady:
         state.marketReady,
@@ -3468,23 +3315,14 @@ app.get(
       telegramReady:
         state.telegramReady,
 
-      initializedPairs:
-        initialized,
-
-      totalPairs:
-        PAIRS.length,
+      instruments:
+        INSTRUMENTS.length,
 
       openTrades:
         state.openTrades.size,
 
-      totalSignalScans:
+      scans:
         state.totalSignalScans,
-
-      rawSignals:
-        state.rawSignals,
-
-      executedSignals:
-        state.executedSignals,
 
       lastSignalScanAt:
         state.lastSignalScanAt,
@@ -3493,17 +3331,10 @@ app.get(
         state.lastQuotePollAt,
 
       lastMarketError:
-        state.lastMarketError,
-
-      startedAt:
-        state.startedAt
+        state.lastMarketError
     });
   }
 );
-
-// ============================================================
-// API STATUS
-// ============================================================
 
 app.get(
   '/api/status',
@@ -3518,51 +3349,59 @@ app.get(
       liveTrading:
         LIVE_TRADING,
 
-      provider:
-        'BiQuote',
-
-      twelveDataConfigured:
-        Boolean(
-          TWELVE_DATA_API_KEY
-        ),
-
-      strategy:
-        STRATEGY,
+      timeframe:
+        TIMEFRAME,
 
       paper: {
         startingBalance:
           PAPER.startingBalance,
 
         balance:
-          account?.balance ??
-          PAPER.startingBalance,
+          Number(
+            account?.balance ??
+            PAPER.startingBalance
+          ),
 
         realizedPnl:
-          account?.realizedPnl ??
-          0,
+          Number(
+            account?.realizedPnl ??
+            0
+          ),
 
         totalTrades:
-          account?.totalTrades ??
-          0,
+          Number(
+            account?.totalTrades ??
+            0
+          ),
 
         wins:
-          account?.wins ??
-          0,
+          Number(
+            account?.wins ??
+            0
+          ),
 
         losses:
-          account?.losses ??
-          0,
+          Number(
+            account?.losses ??
+            0
+          ),
 
         openTrades:
           state.openTrades.size
       },
 
       engine: {
-        pairs:
-          PAIRS,
+        core:
+          'Ultra-Fast Scalp Engine V5.1',
 
-        scans:
-          state.totalSignalScans,
+        strategy:
+          STRATEGY,
+
+        quality:
+          QUALITY,
+
+        instruments:
+          INSTRUMENTS,
 
         rawSignals:
           state.rawSignals,
@@ -3571,7 +3410,20 @@ app.get(
           state.executedSignals,
 
         skippedSignals:
-          state.skippedSignals
+          state.skippedSignals,
+
+        scans:
+          state.totalSignalScans
+      },
+
+      providers: {
+        primary:
+          'BiQuote',
+
+        twelveDataConfigured:
+          Boolean(
+            TWELVE_DATA_API_KEY
+          )
       }
     });
   }
@@ -3595,7 +3447,11 @@ async function boot() {
   );
 
   console.log(
-    `📡 Forex Pairs: ${PAIRS.length}`
+    `⏱ Timeframe: ${TIMEFRAME} CLOSED candles`
+  );
+
+  console.log(
+    `📡 Instruments: ${INSTRUMENTS.length} (30 FX + XAUUSD)`
   );
 
   console.log(
@@ -3603,26 +3459,13 @@ async function boot() {
   );
 
   console.log(
-    '⏱ Entry: 1-minute CLOSED candle'
-  );
-
-  console.log(
-    '📊 Primary data: BiQuote'
-  );
-
-  console.log(
-    `🔑 Twelve Data key: ${
-      TWELVE_DATA_API_KEY
-        ? 'configured'
-        : 'missing'
-    }`
+    '📐 Retest + Auto Fibonacci: lightweight scoring'
   );
 
   console.log(
     '================================================'
   );
 
-  // Start Render server immediately.
   app.listen(
     PORT,
     () => {
@@ -3632,14 +3475,10 @@ async function boot() {
     }
   );
 
-  // MongoDB
   await initMongo();
 
-  // Telegram
-  // Does NOT block market initialization.
   await initTelegram();
 
-  // Market
   try {
     await initializeMarket();
   } catch (err) {
@@ -3658,59 +3497,28 @@ async function boot() {
     );
   }
 
-  // Scan timer
   setInterval(
-    scanClockLoop,
+    signalClockLoop,
     CLOCK_CHECK_MS
   );
 
-  // Fast exit monitor
   setInterval(
     quotePollLoop,
     QUOTE_POLL_MS
   );
 
-  // Heartbeat
   setInterval(
     () => {
-      const initialized =
-        [...state.pairState.values()]
-          .filter(
-            (pair) =>
-              pair.initialized
-          )
-          .length;
-
       console.log(
-        `💓 HEARTBEAT | ` +
-        `market=${
-          state.marketReady
-            ? 'READY'
-            : 'WAIT'
-        } | ` +
-        `pairs=${initialized}/${PAIRS.length} | ` +
-        `scans=${state.totalSignalScans} | ` +
+        `💓 ${VERSION} | ` +
+        `market=${state.marketReady ? 'READY' : 'WAIT'} | ` +
         `open=${state.openTrades.size} | ` +
-        `signals=${state.rawSignals}/${state.executedSignals}`
+        `scans=${state.totalSignalScans} | ` +
+        `signals=${state.rawSignals} | ` +
+        `executed=${state.executedSignals}`
       );
     },
     HEARTBEAT_MS
-  );
-
-  // First scan after initialization
-  setTimeout(
-    () => {
-      runSignalScan()
-        .catch(
-          (err) => {
-            console.error(
-              '❌ Startup scan:',
-              safeError(err)
-            );
-          }
-        );
-    },
-    2500
   );
 
   console.log(
@@ -3736,7 +3544,9 @@ async function shutdown(
   } catch {}
 
   try {
-    await mongoose.connection.close();
+    await mongoose
+      .connection
+      .close();
   } catch {}
 
   process.exit(0);
@@ -3744,26 +3554,24 @@ async function shutdown(
 
 process.once(
   'SIGINT',
-  () =>
-    shutdown('SIGINT')
+  () => {
+    shutdown('SIGINT');
+  }
 );
 
 process.once(
   'SIGTERM',
-  () =>
-    shutdown('SIGTERM')
+  () => {
+    shutdown('SIGTERM');
+  }
 );
-
-// ============================================================
-// GLOBAL ERROR HANDLING
-// ============================================================
 
 process.on(
   'unhandledRejection',
-  (reason) => {
+  (err) => {
     console.error(
-      '❌ Unhandled rejection:',
-      safeError(reason)
+      'UNHANDLED REJECTION:',
+      safeError(err)
     );
   }
 );
@@ -3772,24 +3580,19 @@ process.on(
   'uncaughtException',
   (err) => {
     console.error(
-      '❌ Uncaught exception:',
+      'UNCAUGHT EXCEPTION:',
       safeError(err)
     );
   }
 );
 
-// ============================================================
-// START
-// ============================================================
+boot().catch(
+  (err) => {
+    console.error(
+      'FATAL:',
+      safeError(err)
+    );
 
-boot()
-  .catch(
-    (err) => {
-      console.error(
-        '❌ FATAL:',
-        safeError(err)
-      );
-
-      process.exit(1);
-    }
-  );
+    process.exit(1);
+  }
+);
