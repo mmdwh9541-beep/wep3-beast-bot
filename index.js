@@ -5,274 +5,117 @@ const express = require('express');
 const mongoose = require('mongoose');
 const { Telegraf } = require('telegraf');
 
-// ============================================================
-// LOMY FOREX V1.2.0 — SMC + BREAK-EVEN 1:1.2
-// PAPER ONLY — NO REAL TRADING
-// ============================================================
-
-const VERSION = 'LOMY FOREX V1.2.0';
+const VERSION = 'LOMY FOREX V1.2.1';
 const MODE = 'PAPER';
 const LIVE_TRADING = false;
 
 const PORT = Number(process.env.PORT || 10000);
-const TELEGRAM_BOT_TOKEN = String(
-  process.env.TELEGRAM_BOT_TOKEN || ''
-).trim();
-
-const MONGODB_URI = String(
-  process.env.MONGODB_URI || ''
-).trim();
-
-const TWELVE_DATA_API_KEY = String(
-  process.env.TWELVE_DATA_API_KEY || ''
-).trim();
+const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
+const TWELVE_DATA_API_KEY = String(process.env.TWELVE_DATA_API_KEY || '').trim();
 
 const BIQUOTE_BASE = 'https://biquote.io';
-
 const TIMEFRAME = '15m';
-
 const HISTORY_LIMIT = 260;
-
+const MIN_HISTORY = 230;
 const OHLC_CONCURRENCY = 4;
-
+const OHLC_TIMEOUT_MS = 10000;
+const INIT_SYMBOL_TIMEOUT_MS = 12000;
 const QUOTE_POLL_MS = 3000;
-
 const SCAN_TIMER_MS = 4000;
 
-
-// ============================================================
-// INSTRUMENTS
-// ============================================================
-
 const INSTRUMENTS = [
-
-  'EURUSD',
-  'GBPUSD',
-  'USDJPY',
-  'USDCHF',
-  'AUDUSD',
-  'NZDUSD',
-  'USDCAD',
-
-  'EURGBP',
-  'EURJPY',
-  'EURCHF',
-  'EURAUD',
-  'EURNZD',
-  'EURCAD',
-
-  'GBPJPY',
-  'GBPCHF',
-  'GBPAUD',
-  'GBPNZD',
-  'GBPCAD',
-
-  'AUDJPY',
-  'AUDCHF',
-  'AUDNZD',
-  'AUDCAD',
-
-  'NZDJPY',
-  'NZDCHF',
-  'NZDCAD',
-
-  'CADJPY',
-  'CADCHF',
-  'CHFJPY',
-
-  'GBPSGD',
-  'EURSGD',
-
-  'XAUUSD'
+  'EURUSD','GBPUSD','USDJPY','USDCHF','AUDUSD','NZDUSD','USDCAD',
+  'EURGBP','EURJPY','EURCHF','EURAUD','EURNZD','EURCAD',
+  'GBPJPY','GBPCHF','GBPAUD','GBPNZD','GBPCAD',
+  'AUDJPY','AUDCHF','AUDNZD','AUDCAD',
+  'NZDJPY','NZDCHF','NZDCAD',
+  'CADJPY','CADCHF','CHFJPY',
+  'GBPSGD','EURSGD','XAUUSD'
 ];
 
-
-// ============================================================
-// STRATEGY
-// ============================================================
-
 const STRATEGY = Object.freeze({
-
-  // Ultra-Fast V5.1
   cmoLen: 9,
-
   cmoBuyThresh: 30,
-
   cmoSellThresh: -30,
-
   volLen: 10,
-
   volMult: 1.30,
-
   srLen: 20,
-
   fastEmaLen: 9,
-
   slowEmaLen: 21,
-
   atrLen: 14,
-
   atrMargin: 0.20,
-
   bodyRatioMin: 0.50,
 
-  // ==========================================
-  // NEW MONEY MANAGEMENT
-  // ==========================================
-
   riskReward: 1.20,
-
   breakEvenTriggerR: 0.60,
-
-  // Prevent entering after price already ran away
   maxEntryMoveAtr: 0.50,
 
-  // ==========================================
-  // RETEST + FIB
-  // ==========================================
-
   retestLookback: 8,
-
   fibLookback: 40,
-
   fibToleranceAtr: 0.20,
 
-  // ==========================================
-  // SMC SNIPER
-  // ==========================================
-
   smcFastEmaLen: 50,
-
   smcSlowEmaLen: 200,
-
   adxLen: 14,
-
   adxSmooth: 14,
-
   adxThreshold: 25,
-
   pivotLeft: 5,
-
   pivotRight: 5
 });
 
-
-// ============================================================
-// PAPER ACCOUNT
-// ============================================================
-
 const PAPER = Object.freeze({
-
   startingBalance: 1000,
-
   riskPctPerTrade: 0.50,
-
   maxOpenTrades: 31,
-
-  accountKey:
-    'lomy-forex-v120-smc-be-12r'
+  accountKey: 'lomy-forex-v121-smc-be-12r'
 });
 
-
-// ============================================================
-// RUNTIME STATE
-// ============================================================
-
 const state = {
-
   startedAt: new Date(),
 
   mongoReady: false,
-
   telegramReady: false,
-
   marketReady: false,
-
   initializing: true,
 
   scanRunning: false,
-
   quoteRunning: false,
 
   lastScanSlot: null,
-
   lastSignalScanAt: null,
-
   lastQuotePollAt: null,
-
   lastMarketError: null,
 
   totalSignalScans: 0,
-
   totalQuotePolls: 0,
-
   rawSignals: 0,
-
   executedSignals: 0,
-
   skippedSignals: 0,
-
   breakEvenMoves: 0,
 
   pairState: new Map(),
-
   latestQuotes: new Map(),
-
   openTrades: new Map()
 };
 
-
-for (
-  const symbol
-  of INSTRUMENTS
-) {
-
-  state.pairState.set(
-    symbol,
-    {
-
-      bars: [],
-
-      lastClosedBarTime: null,
-
-      lastSignal: 0,
-
-      lastAnalysis: null,
-
-      initialized: false,
-
-      errors: 0
-    }
-  );
+for (const symbol of INSTRUMENTS) {
+  state.pairState.set(symbol, {
+    bars: [],
+    lastClosedBarTime: null,
+    lastSignal: 0,
+    lastAnalysis: null,
+    initialized: false,
+    errors: 0
+  });
 }
 
-
-// ============================================================
-// HELPERS
-// ============================================================
-
-function n(
-  value,
-  fallback = NaN
-) {
-
-  const x =
-    Number(
-      value
-    );
-
-  return Number.isFinite(
-    x
-  )
-    ? x
-    : fallback;
+function n(value, fallback = NaN) {
+  const x = Number(value);
+  return Number.isFinite(x) ? x : fallback;
 }
 
-
-function safeError(
-  error
-) {
-
+function safeError(error) {
   return (
     error?.response?.data?.message ||
     error?.response?.data?.error ||
@@ -282,73 +125,25 @@ function safeError(
   );
 }
 
-
-function fmtMoney(
-  value
-) {
-
-  return (
-    '$' +
-    n(
-      value,
-      0
-    ).toFixed(
-      2
-    )
-  );
+function fmtMoney(value) {
+  return '$' + n(value, 0).toFixed(2);
 }
 
+function fmtPrice(value, symbol = '') {
+  if (!Number.isFinite(value)) return 'n/a';
 
-function fmtPrice(
-  value,
-  symbol = ''
-) {
-
-  if (
-    !Number.isFinite(
-      value
-    )
-  ) {
-
-    return 'n/a';
+  if (symbol === 'XAUUSD') {
+    return value.toFixed(2);
   }
 
-
-  if (
-    symbol ===
-    'XAUUSD'
-  ) {
-
-    return value.toFixed(
-      2
-    );
+  if (symbol.endsWith('JPY')) {
+    return value.toFixed(3);
   }
 
-
-  if (
-    symbol.endsWith(
-      'JPY'
-    )
-  ) {
-
-    return value.toFixed(
-      3
-    );
-  }
-
-
-  return value.toFixed(
-    5
-  );
+  return value.toFixed(5);
 }
 
-
-function clamp(
-  value,
-  minimum,
-  maximum
-) {
-
+function clamp(value, minimum, maximum) {
   return Math.max(
     minimum,
     Math.min(
@@ -358,92 +153,56 @@ function clamp(
   );
 }
 
+function barTimeMs(bar) {
+  const time = new Date(
+    bar.openTime
+  ).getTime();
 
-function barTimeMs(
-  bar
-) {
-
-  const time =
-    new Date(
-      bar.openTime
-    ).getTime();
-
-  return Number.isFinite(
-    time
-  )
+  return Number.isFinite(time)
     ? time
     : 0;
 }
 
-
-// ============================================================
-// BAR NORMALIZATION
-// ============================================================
-
-function normalizeBars(
-  rawBars
-) {
-
-  if (
-    !Array.isArray(
-      rawBars
-    )
-  ) {
-
+function normalizeBars(rawBars) {
+  if (!Array.isArray(rawBars)) {
     return [];
   }
 
-
   return rawBars
-    .map(
-      bar => ({
+    .map(bar => ({
+      openTime:
+        bar.openTime ||
+        bar.datetime ||
+        bar.timestamp ||
+        bar.time,
 
-        openTime:
-          bar.openTime ||
-          bar.datetime ||
-          bar.time ||
-          bar.timestamp,
+      open:
+        n(bar.open),
 
-        open:
+      high:
+        n(bar.high),
+
+      low:
+        n(bar.low),
+
+      close:
+        n(bar.close),
+
+      volume:
+        n(
+          bar.tickVolume,
           n(
-            bar.open
-          ),
+            bar.volume,
+            0
+          )
+        ),
 
-        high:
-          n(
-            bar.high
-          ),
-
-        low:
-          n(
-            bar.low
-          ),
-
-        close:
-          n(
-            bar.close
-          ),
-
-        volume:
-          n(
-            bar.tickVolume,
-            n(
-              bar.volume,
-              0
-            )
-          ),
-
-        isOpen:
-          bar.isOpen ===
-          true
-      })
-    )
-
+      isOpen:
+        bar.isOpen === true
+    }))
     .filter(
       bar =>
-
         bar.openTime &&
-
         [
           bar.open,
           bar.high,
@@ -453,132 +212,68 @@ function normalizeBars(
           Number.isFinite
         )
     )
-
     .sort(
-      (
-        a,
-        b
-      ) =>
-
+      (a, b) =>
         barTimeMs(a) -
         barTimeMs(b)
     );
 }
 
-
-function closedBarsOnly(
-  bars
-) {
-
-  const now =
-    Date.now();
+function closedBarsOnly(bars) {
+  const now = Date.now();
 
   const tfMs =
     15 *
     60 *
     1000;
 
-
   return bars.filter(
-    bar => {
-
-      if (
-        bar.isOpen
-      ) {
-
-        return false;
-      }
-
-
-      const time =
-        barTimeMs(
-          bar
-        );
-
-
-      return (
-        time > 0 &&
-        time + tfMs <=
-          now + 5000
-      );
-    }
+    bar =>
+      !bar.isOpen &&
+      barTimeMs(bar) > 0 &&
+      barTimeMs(bar) + tfMs <=
+        now + 5000
   );
 }
 
-
-// ============================================================
-// SMA
-// ============================================================
-
-function sma(
-  values,
-  length
-) {
-
+function sma(values, length) {
   if (
     !Array.isArray(values) ||
-    values.length <
-      length
+    values.length < length
   ) {
-
     return NaN;
   }
-
 
   const selected =
     values.slice(
       -length
     );
 
-
   if (
     !selected.every(
       Number.isFinite
     )
   ) {
-
     return NaN;
   }
 
-
-  return selected.reduce(
-    (
-      total,
-      value
-    ) =>
-      total +
-      value,
-    0
-  ) / length;
+  return (
+    selected.reduce(
+      (total, value) =>
+        total + value,
+      0
+    ) /
+    length
+  );
 }
 
-
-// ============================================================
-// EMA
-// ============================================================
-
-function emaSeries(
-  values,
-  length
-) {
-
+function emaSeries(values, length) {
   if (
     !Array.isArray(values) ||
-    values.length <
-      length
+    values.length < length
   ) {
-
     return [];
   }
-
-
-  const multiplier =
-    2 /
-    (
-      length +
-      1
-    );
-
 
   const output =
     new Array(
@@ -587,6 +282,12 @@ function emaSeries(
       NaN
     );
 
+  const multiplier =
+    2 /
+    (
+      length +
+      1
+    );
 
   const seed =
     values
@@ -595,16 +296,11 @@ function emaSeries(
         length
       )
       .reduce(
-        (
-          total,
-          value
-        ) =>
-          total +
-          value,
+        (total, value) =>
+          total + value,
         0
       ) /
     length;
-
 
   output[
     length -
@@ -612,15 +308,11 @@ function emaSeries(
   ] =
     seed;
 
-
   for (
-    let i =
-      length;
-    i <
-      values.length;
+    let i = length;
+    i < values.length;
     i++
   ) {
-
     output[i] =
       values[i] *
         multiplier +
@@ -634,22 +326,15 @@ function emaSeries(
         );
   }
 
-
   return output;
 }
 
-
-function emaLast(
-  values,
-  length
-) {
-
+function emaLast(values, length) {
   const series =
     emaSeries(
       values,
       length
     );
-
 
   return series.length
     ? series[
@@ -659,25 +344,13 @@ function emaLast(
     : NaN;
 }
 
-
-// ============================================================
-// ATR
-// ============================================================
-
-function atrSeries(
-  bars,
-  length
-) {
-
+function atrSeries(bars, length) {
   if (
     bars.length <
-      length +
-      1
+    length + 1
   ) {
-
     return [];
   }
-
 
   const trueRange =
     new Array(
@@ -686,45 +359,33 @@ function atrSeries(
       NaN
     );
 
-
   for (
     let i = 1;
-    i <
-      bars.length;
+    i < bars.length;
     i++
   ) {
-
-    const high =
-      bars[i].high;
-
-    const low =
-      bars[i].low;
-
-    const previousClose =
-      bars[
-        i -
-        1
-      ].close;
-
-
     trueRange[i] =
       Math.max(
-
-        high -
-          low,
+        bars[i].high -
+          bars[i].low,
 
         Math.abs(
-          high -
-          previousClose
+          bars[i].high -
+          bars[
+            i -
+            1
+          ].close
         ),
 
         Math.abs(
-          low -
-          previousClose
+          bars[i].low -
+          bars[
+            i -
+            1
+          ].close
         )
       );
   }
-
 
   const output =
     new Array(
@@ -733,47 +394,39 @@ function atrSeries(
       NaN
     );
 
-
   const seedValues =
     trueRange.slice(
       1,
       length +
-        1
+      1
     );
-
 
   if (
     !seedValues.every(
       Number.isFinite
     )
   ) {
-
     return output;
   }
 
-
   output[length] =
     seedValues.reduce(
-      (
-        total,
-        value
-      ) =>
-        total +
-        value,
+      (total, value) =>
+        total + value,
       0
     ) /
     length;
-
 
   for (
     let i =
       length +
       1;
+
     i <
       bars.length;
+
     i++
   ) {
-
     output[i] =
       (
         output[
@@ -789,22 +442,15 @@ function atrSeries(
       length;
   }
 
-
   return output;
 }
 
-
-function atrLast(
-  bars,
-  length
-) {
-
+function atrLast(bars, length) {
   const series =
     atrSeries(
       bars,
       length
     );
-
 
   return series.length
     ? series[
@@ -814,40 +460,27 @@ function atrLast(
     : NaN;
 }
 
-
-// ============================================================
-// CMO
-// ============================================================
-
-function cmo(
-  values,
-  length
-) {
-
+function cmo(values, length) {
   if (
     values.length <
-      length +
-      1
+    length + 1
   ) {
-
     return NaN;
   }
 
-
   let up = 0;
-
   let down = 0;
-
 
   for (
     let i =
       values.length -
       length;
+
     i <
       values.length;
+
     i++
   ) {
-
     const change =
       values[i] -
       values[
@@ -855,39 +488,30 @@ function cmo(
         1
       ];
 
-
     if (
       change >
       0
     ) {
-
-      up +=
-        change;
-
+      up += change;
     } else if (
       change <
       0
     ) {
-
       down +=
         -change;
     }
   }
 
-
   const denominator =
     up +
     down;
-
 
   if (
     denominator ===
     0
   ) {
-
     return 0;
   }
-
 
   return (
     100 *
@@ -899,56 +523,39 @@ function cmo(
   );
 }
 
-
-// ============================================================
-// DMI / ADX
-// ============================================================
-
 function dmiAdx(
   bars,
   diLength = 14,
   adxSmooth = 14
 ) {
-
   if (
     bars.length <
-      diLength +
+    diLength +
       adxSmooth +
       2
   ) {
-
     return {
-
       plusDI: NaN,
-
       minusDI: NaN,
-
       adx: NaN
     };
   }
 
-
   const trueRanges = [];
-
   const plusDMs = [];
-
   const minusDMs = [];
-
 
   for (
     let i = 1;
-    i <
-      bars.length;
+    i < bars.length;
     i++
   ) {
-
     const upMove =
       bars[i].high -
       bars[
         i -
         1
       ].high;
-
 
     const downMove =
       bars[
@@ -957,9 +564,7 @@ function dmiAdx(
       ].low -
       bars[i].low;
 
-
     plusDMs.push(
-
       upMove >
         downMove &&
       upMove >
@@ -969,9 +574,7 @@ function dmiAdx(
         : 0
     );
 
-
     minusDMs.push(
-
       downMove >
         upMove &&
       downMove >
@@ -981,11 +584,8 @@ function dmiAdx(
         : 0
     );
 
-
     trueRanges.push(
-
       Math.max(
-
         bars[i].high -
           bars[i].low,
 
@@ -1008,7 +608,6 @@ function dmiAdx(
     );
   }
 
-
   let trSmoothed =
     trueRanges
       .slice(
@@ -1016,15 +615,10 @@ function dmiAdx(
         diLength
       )
       .reduce(
-        (
-          total,
-          value
-        ) =>
-          total +
-          value,
+        (total, value) =>
+          total + value,
         0
       );
-
 
   let plusSmoothed =
     plusDMs
@@ -1033,15 +627,10 @@ function dmiAdx(
         diLength
       )
       .reduce(
-        (
-          total,
-          value
-        ) =>
-          total +
-          value,
+        (total, value) =>
+          total + value,
         0
       );
-
 
   let minusSmoothed =
     minusDMs
@@ -1050,18 +639,12 @@ function dmiAdx(
         diLength
       )
       .reduce(
-        (
-          total,
-          value
-        ) =>
-          total +
-          value,
+        (total, value) =>
+          total + value,
         0
       );
 
-
   const dxValues = [];
-
 
   let lastPlusDI =
     NaN;
@@ -1069,26 +652,24 @@ function dmiAdx(
   let lastMinusDI =
     NaN;
 
-
   for (
     let i =
       diLength;
+
     i <
       trueRanges.length;
+
     i++
   ) {
-
     if (
       i >
       diLength
     ) {
-
       trSmoothed =
         trSmoothed -
         trSmoothed /
           diLength +
         trueRanges[i];
-
 
       plusSmoothed =
         plusSmoothed -
@@ -1096,14 +677,12 @@ function dmiAdx(
           diLength +
         plusDMs[i];
 
-
       minusSmoothed =
         minusSmoothed -
         minusSmoothed /
           diLength +
         minusDMs[i];
     }
-
 
     lastPlusDI =
       trSmoothed >
@@ -1115,7 +694,6 @@ function dmiAdx(
 
         : 0;
 
-
     lastMinusDI =
       trSmoothed >
       0
@@ -1126,14 +704,11 @@ function dmiAdx(
 
         : 0;
 
-
     const denominator =
       lastPlusDI +
       lastMinusDI;
 
-
     dxValues.push(
-
       denominator >
       0
 
@@ -1148,14 +723,11 @@ function dmiAdx(
     );
   }
 
-
   if (
     dxValues.length <
-      adxSmooth
+    adxSmooth
   ) {
-
     return {
-
       plusDI:
         lastPlusDI,
 
@@ -1167,7 +739,6 @@ function dmiAdx(
     };
   }
 
-
   let adx =
     dxValues
       .slice(
@@ -1175,25 +746,21 @@ function dmiAdx(
         adxSmooth
       )
       .reduce(
-        (
-          total,
-          value
-        ) =>
-          total +
-          value,
+        (total, value) =>
+          total + value,
         0
       ) /
     adxSmooth;
 
-
   for (
     let i =
       adxSmooth;
+
     i <
       dxValues.length;
+
     i++
   ) {
-
     adx =
       (
         adx *
@@ -1206,9 +773,7 @@ function dmiAdx(
       adxSmooth;
   }
 
-
   return {
-
     plusDI:
       lastPlusDI,
 
@@ -1219,15 +784,7 @@ function dmiAdx(
   };
 }
 
-
-// ============================================================
-// HIGH / LOW
-// ============================================================
-
-function lowestLow(
-  bars
-) {
-
+function lowestLow(bars) {
   return Math.min(
     ...bars.map(
       bar =>
@@ -1236,11 +793,7 @@ function lowestLow(
   );
 }
 
-
-function highestHigh(
-  bars
-) {
-
+function highestHigh(bars) {
   return Math.max(
     ...bars.map(
       bar =>
@@ -1249,34 +802,26 @@ function highestHigh(
   );
 }
 
-
-// ============================================================
-// CONFIRMED PIVOTS
-// ============================================================
-
 function confirmedPivots(
   bars,
   left = 5,
   right = 5
 ) {
-
   const lows = [];
-
   const highs = [];
-
 
   for (
     let i =
       left;
+
     i <
       bars.length -
         right;
+
     i++
   ) {
-
     const pivot =
       bars[i];
-
 
     let lowOk =
       true;
@@ -1284,63 +829,54 @@ function confirmedPivots(
     let highOk =
       true;
 
-
     for (
       let j =
         i -
         left;
+
       j <=
         i +
-        right;
+          right;
+
       j++
     ) {
-
       if (
         j ===
         i
       ) {
-
         continue;
       }
-
 
       if (
         bars[j].low <=
         pivot.low
       ) {
-
         lowOk =
           false;
       }
-
 
       if (
         bars[j].high >=
         pivot.high
       ) {
-
         highOk =
           false;
       }
-
 
       if (
         !lowOk &&
         !highOk
       ) {
-
         break;
       }
     }
 
-
     if (
       lowOk
     ) {
-
       lows.push({
-
-        index: i,
+        index:
+          i,
 
         price:
           pivot.low,
@@ -1350,14 +886,12 @@ function confirmedPivots(
       });
     }
 
-
     if (
       highOk
     ) {
-
       highs.push({
-
-        index: i,
+        index:
+          i,
 
         price:
           pivot.high,
@@ -1368,9 +902,7 @@ function confirmedPivots(
     }
   }
 
-
   return {
-
     lastLow:
       lows.length
         ? lows[
@@ -1389,23 +921,16 @@ function confirmedPivots(
   };
 }
 
-
-// ============================================================
-// FIBONACCI CONTEXT
-// ============================================================
-
 function fibContext(
   priorBars,
   signalBar,
   atr,
   direction
 ) {
-
   const window =
     priorBars.slice(
       -STRATEGY.fibLookback
     );
-
 
   if (
     window.length <
@@ -1416,69 +941,47 @@ function fibContext(
     atr <=
       0
   ) {
-
     return {
-
       score: 0,
-
       nearFib: false,
-
       goldenZone: false,
-
       levels: null
     };
   }
-
 
   const low =
     lowestLow(
       window
     );
 
-
   const high =
     highestHigh(
       window
     );
 
-
   const range =
     high -
     low;
-
 
   if (
     range <=
     0
   ) {
-
     return {
-
       score: 0,
-
       nearFib: false,
-
       goldenZone: false,
-
       levels: null
     };
   }
 
-
   let levels;
-
-  let goldenLow;
-
-  let goldenHigh;
-
 
   if (
     direction ===
     'BUY'
   ) {
-
     levels = {
-
       f382:
         high -
         range *
@@ -1509,11 +1012,8 @@ function fibContext(
         range *
           0.618
     };
-
   } else {
-
     levels = {
-
       f382:
         low +
         range *
@@ -1546,25 +1046,21 @@ function fibContext(
     };
   }
 
-
-  goldenLow =
+  const goldenLow =
     Math.min(
       levels.f500,
       levels.f618
     );
 
-
-  goldenHigh =
+  const goldenHigh =
     Math.max(
       levels.f500,
       levels.f618
     );
 
-
   const tolerance =
     atr *
     STRATEGY.fibToleranceAtr;
-
 
   const nearFib =
     [
@@ -1581,7 +1077,6 @@ function fibContext(
         tolerance
     );
 
-
   const goldenZone =
     signalBar.low <=
       goldenHigh +
@@ -1590,9 +1085,7 @@ function fibContext(
       goldenLow -
         tolerance;
 
-
   return {
-
     score:
       (
         goldenZone
@@ -1606,65 +1099,47 @@ function fibContext(
       ),
 
     nearFib,
-
     goldenZone,
-
     levels
   };
 }
-
-
-// ============================================================
-// RETEST
-// ============================================================
 
 function retestContext(
   priorBars,
   signalBar,
   direction
 ) {
-
   const window =
     priorBars.slice(
       -STRATEGY.retestLookback
     );
 
-
   if (
     window.length <
-      3
+    3
   ) {
-
     return {
-
       breakout: false,
-
       retest: false,
-
       level: NaN,
-
       score: 0
     };
   }
-
 
   if (
     direction ===
     'BUY'
   ) {
-
     const level =
       highestHigh(
         window
       );
-
 
     const breakout =
       signalBar.high >
         level &&
       signalBar.close >
         level;
-
 
     const retest =
       breakout &&
@@ -1673,13 +1148,9 @@ function retestContext(
       signalBar.close >
         level;
 
-
     return {
-
       breakout,
-
       retest,
-
       level,
 
       score:
@@ -1696,19 +1167,16 @@ function retestContext(
     };
   }
 
-
   const level =
     lowestLow(
       window
     );
-
 
   const breakout =
     signalBar.low <
       level &&
     signalBar.close <
       level;
-
 
   const retest =
     breakout &&
@@ -1717,13 +1185,9 @@ function retestContext(
     signalBar.close <
       level;
 
-
   return {
-
     breakout,
-
     retest,
-
     level,
 
     score:
@@ -1740,22 +1204,15 @@ function retestContext(
   };
 }
 
-
-// ============================================================
-// SMC SNIPER ENGINE
-// ============================================================
-
 function smcContext(
   bars,
   direction
 ) {
-
   const signal =
     bars[
       bars.length -
       1
     ];
-
 
   const closes =
     bars.map(
@@ -1763,13 +1220,11 @@ function smcContext(
         bar.close
     );
 
-
   const ema50 =
     emaLast(
       closes,
       STRATEGY.smcFastEmaLen
     );
-
 
   const ema200 =
     emaLast(
@@ -1777,36 +1232,23 @@ function smcContext(
       STRATEGY.smcSlowEmaLen
     );
 
-
   const {
-
     plusDI,
-
     minusDI,
-
     adx
-
   } =
     dmiAdx(
-
       bars,
-
       STRATEGY.adxLen,
-
       STRATEGY.adxSmooth
     );
 
-
   const pivots =
     confirmedPivots(
-
       bars,
-
       STRATEGY.pivotLeft,
-
       STRATEGY.pivotRight
     );
-
 
   const bullishTrend =
     Number.isFinite(
@@ -1818,7 +1260,6 @@ function smcContext(
     ema50 >
       ema200;
 
-
   const bearishTrend =
     Number.isFinite(
       ema50
@@ -1829,7 +1270,6 @@ function smcContext(
     ema50 <
       ema200;
 
-
   const strongTrend =
     Number.isFinite(
       adx
@@ -1837,46 +1277,27 @@ function smcContext(
     adx >
       STRATEGY.adxThreshold;
 
-
-  // ==========================================
-  // LIQUIDITY SWEEP
-  // ==========================================
-
   const bullishSweep =
     Boolean(
-
       pivots.lastLow &&
-
       signal.low <
         pivots.lastLow.price &&
-
       signal.close >
         pivots.lastLow.price &&
-
       signal.close >
         signal.open
     );
-
 
   const bearishSweep =
     Boolean(
-
       pivots.lastHigh &&
-
       signal.high >
         pivots.lastHigh.price &&
-
       signal.close <
         pivots.lastHigh.price &&
-
       signal.close <
         signal.open
     );
-
-
-  // ==========================================
-  // FVG
-  // ==========================================
 
   const bar2 =
     bars[
@@ -1884,154 +1305,117 @@ function smcContext(
       3
     ];
 
-
   const bar1 =
     bars[
       bars.length -
       2
     ];
 
-
   const bullishFvg =
     Boolean(
-
       bar2 &&
       bar1 &&
-
       signal.low >
         bar2.high &&
-
       bar1.close >
         bar1.open
     );
 
-
   const bearishFvg =
     Boolean(
-
       bar2 &&
       bar1 &&
-
       signal.high <
         bar2.low &&
-
       bar1.close <
         bar1.open
     );
 
-
   let score = 0;
-
   const reasons = [];
-
 
   if (
     direction ===
     'BUY'
   ) {
-
     if (
       bullishTrend
     ) {
-
-      score +=
-        1;
+      score += 1;
 
       reasons.push(
         'EMA50>EMA200'
       );
     }
 
-
     if (
       strongTrend &&
       plusDI >
         minusDI
     ) {
-
-      score +=
-        1;
+      score += 1;
 
       reasons.push(
         'ADX_TREND'
       );
     }
 
-
     if (
       bullishSweep
     ) {
-
-      score +=
-        3;
+      score += 3;
 
       reasons.push(
         'LIQUIDITY_SWEEP'
       );
     }
 
-
     if (
       bullishFvg
     ) {
-
-      score +=
-        1;
+      score += 1;
 
       reasons.push(
         'BULL_FVG'
       );
     }
-
   } else {
-
     if (
       bearishTrend
     ) {
-
-      score +=
-        1;
+      score += 1;
 
       reasons.push(
         'EMA50<EMA200'
       );
     }
 
-
     if (
       strongTrend &&
       minusDI >
         plusDI
     ) {
-
-      score +=
-        1;
+      score += 1;
 
       reasons.push(
         'ADX_TREND'
       );
     }
 
-
     if (
       bearishSweep
     ) {
-
-      score +=
-        3;
+      score += 3;
 
       reasons.push(
         'LIQUIDITY_SWEEP'
       );
     }
 
-
     if (
       bearishFvg
     ) {
-
-      score +=
-        1;
+      score += 1;
 
       reasons.push(
         'BEAR_FVG'
@@ -2039,29 +1423,17 @@ function smcContext(
     }
   }
 
-
   return {
-
     score,
-
     reasons,
-
     ema50,
-
     ema200,
-
     adx,
-
     plusDI,
-
     minusDI,
-
     bullishSweep,
-
     bearishSweep,
-
     bullishFvg,
-
     bearishFvg,
 
     lastPivotLow:
@@ -2074,29 +1446,17 @@ function smcContext(
   };
 }
 
-
-// ============================================================
-// MAIN SIGNAL ANALYSIS
-// ============================================================
-
 function analyzeBars(
   symbol,
   bars,
   pairMemory
 ) {
-
-  const minimumHistory =
-    230;
-
-
   if (
     bars.length <
-      minimumHistory
+    MIN_HISTORY
   ) {
-
     return null;
   }
-
 
   const signal =
     bars[
@@ -2104,13 +1464,11 @@ function analyzeBars(
       1
     ];
 
-
   const prior =
     bars.slice(
       0,
       -1
     );
-
 
   const closes =
     bars.map(
@@ -2118,17 +1476,11 @@ function analyzeBars(
         bar.close
     );
 
-
   const volumes =
     bars.map(
       bar =>
         bar.volume
     );
-
-
-  // ==========================================
-  // V5.1
-  // ==========================================
 
   const ema9 =
     emaLast(
@@ -2136,13 +1488,11 @@ function analyzeBars(
       STRATEGY.fastEmaLen
     );
 
-
   const ema21 =
     emaLast(
       closes,
       STRATEGY.slowEmaLen
     );
-
 
   const momentum =
     cmo(
@@ -2150,18 +1500,14 @@ function analyzeBars(
       STRATEGY.cmoLen
     );
 
-
   const volumeAverage =
     sma(
-
       volumes.slice(
         0,
         -1
       ),
-
       STRATEGY.volLen
     );
-
 
   const atr =
     atrLast(
@@ -2169,11 +1515,9 @@ function analyzeBars(
       STRATEGY.atrLen
     );
 
-
   const range =
     signal.high -
     signal.low;
-
 
   const body =
     Math.abs(
@@ -2181,16 +1525,12 @@ function analyzeBars(
       signal.open
     );
 
-
   const bodyRatio =
     range >
     0
-
       ? body /
         range
-
       : 0;
-
 
   const strongBull =
     signal.close >
@@ -2198,13 +1538,11 @@ function analyzeBars(
     bodyRatio >=
       STRATEGY.bodyRatioMin;
 
-
   const strongBear =
     signal.close <
       signal.open &&
     bodyRatio >=
       STRATEGY.bodyRatioMin;
-
 
   const highVolume =
     Number.isFinite(
@@ -2216,89 +1554,60 @@ function analyzeBars(
       volumeAverage *
         STRATEGY.volMult;
 
-
-  const bullMomentum =
-    momentum >
-    STRATEGY.cmoBuyThresh;
-
-
-  const bearMomentum =
-    momentum <
-    STRATEGY.cmoSellThresh;
-
-
-  const bullTrend =
-    ema9 >
-    ema21;
-
-
-  const bearTrend =
-    ema9 <
-    ema21;
-
-
   const rawBuy =
     strongBull &&
     highVolume &&
-    bullMomentum &&
-    bullTrend;
-
+    momentum >
+      STRATEGY.cmoBuyThresh &&
+    ema9 >
+      ema21;
 
   const rawSell =
     strongBear &&
     highVolume &&
-    bearMomentum &&
-    bearTrend;
-
+    momentum <
+      STRATEGY.cmoSellThresh &&
+    ema9 <
+      ema21;
 
   let direction =
     null;
-
 
   if (
     rawBuy &&
     pairMemory.lastSignal !==
       1
   ) {
-
     direction =
       'BUY';
   }
-
 
   if (
     rawSell &&
     pairMemory.lastSignal !==
       -1
   ) {
-
     direction =
       'SELL';
   }
-
 
   if (
     direction ===
     'BUY'
   ) {
-
     pairMemory.lastSignal =
       1;
   }
-
 
   if (
     direction ===
     'SELL'
   ) {
-
     pairMemory.lastSignal =
       -1;
   }
 
-
   const common = {
-
     symbol,
 
     signalBarTime:
@@ -2308,7 +1617,6 @@ function analyzeBars(
       signal.close,
 
     ema9,
-
     ema21,
 
     cmo:
@@ -2323,68 +1631,43 @@ function analyzeBars(
     volumeRatio:
       volumeAverage >
       0
-
         ? signal.volume /
           volumeAverage
-
         : NaN,
 
     bodyRatio,
-
     atr,
-
     rawBuy,
-
     rawSell
   };
-
 
   if (
     !direction
   ) {
-
     return {
-
       ...common,
-
       direction: null
     };
   }
-
-
-  // ==========================================
-  // ORIGINAL SUPPORT / RESISTANCE
-  // ==========================================
 
   const srWindow =
     prior.slice(
       -STRATEGY.srLen
     );
 
-
   const support =
     srWindow.length
-
       ? lowestLow(
           srWindow
         )
-
       : signal.low;
-
 
   const resistance =
     srWindow.length
-
       ? highestHigh(
           srWindow
         )
-
       : signal.high;
-
-
-  // ==========================================
-  // NEW CONFLUENCE
-  // ==========================================
 
   const retest =
     retestContext(
@@ -2392,7 +1675,6 @@ function analyzeBars(
       signal,
       direction
     );
-
 
   const fib =
     fibContext(
@@ -2402,109 +1684,119 @@ function analyzeBars(
       direction
     );
 
-
   const smc =
     smcContext(
       bars,
       direction
     );
 
-
-  let qualityScore =
-    retest.score +
-    fib.score +
-    smc.score;
-
-
-  qualityScore =
+  const qualityScore =
     clamp(
-      qualityScore,
+      retest.score +
+      fib.score +
+      smc.score,
       0,
       12
     );
 
-
-  let quality =
-    'NEUTRAL';
-
-
-  if (
+  const quality =
     qualityScore >=
       7
-  ) {
 
-    quality =
-      'STRONG';
+      ? 'STRONG'
 
-  } else if (
-    qualityScore >=
-      4
-  ) {
+      : qualityScore >=
+          4
 
-    quality =
-      'GOOD';
-  }
-
+        ? 'GOOD'
+        : 'NEUTRAL';
 
   return {
-
     ...common,
 
     direction,
-
     support,
-
     resistance,
-
     retest,
-
     fib,
-
     smc,
-
     qualityScore,
-
     quality
   };
 }
 
-
-// ============================================================
-// HTTP CLIENT
-// ============================================================
-
 const http =
   axios.create({
-
-    timeout: 12000,
+    timeout:
+      OHLC_TIMEOUT_MS,
 
     headers: {
-
       'User-Agent':
-        'LOMY-Forex-Paper/1.2'
+        'LOMY-Forex-Paper/1.2.1'
     }
   });
 
+function extractBarsPayload(data) {
+  if (
+    Array.isArray(data)
+  ) {
+    return data;
+  }
 
-// ============================================================
-// BIQUOTE OHLC
-// ============================================================
+  if (
+    Array.isArray(
+      data?.bars
+    )
+  ) {
+    return data.bars;
+  }
+
+  if (
+    Array.isArray(
+      data?.data?.bars
+    )
+  ) {
+    return data.data.bars;
+  }
+
+  if (
+    Array.isArray(
+      data?.data
+    )
+  ) {
+    return data.data;
+  }
+
+  if (
+    Array.isArray(
+      data?.ohlc
+    )
+  ) {
+    return data.ohlc;
+  }
+
+  if (
+    Array.isArray(
+      data?.candles
+    )
+  ) {
+    return data.candles;
+  }
+
+  return [];
+}
 
 async function fetchOhlc(
   symbol
 ) {
-
   const url =
     `${BIQUOTE_BASE}/api/${encodeURIComponent(symbol)}/ohlc`;
-
 
   const response =
     await http.get(
       url,
       {
-
         params: {
-
           interval:
             TIMEFRAME,
 
@@ -2514,79 +1806,55 @@ async function fetchOhlc(
       }
     );
 
-
-  const raw =
-    Array.isArray(
-      response.data
-    )
-
-      ? response.data
-
-      : (
-          response.data?.data ||
-          response.data?.ohlc ||
-          response.data?.candles ||
-          []
-        );
-
-
   return closedBarsOnly(
     normalizeBars(
-      raw
+      extractBarsPayload(
+        response.data
+      )
     )
   );
 }
-
-
-// ============================================================
-// QUOTES
-// ============================================================
 
 function normalizeQuoteItem(
   item,
   fallbackSymbol = ''
 ) {
-
   if (
     !item ||
     typeof item !==
       'object'
   ) {
-
     return null;
   }
 
-
   const symbol =
     String(
-
       item.symbol ||
       item.instrument ||
       fallbackSymbol ||
       ''
-
     ).toUpperCase();
-
 
   const bid =
     n(
       item.bid
     );
 
-
   const ask =
     n(
       item.ask
     );
 
-
   const mid =
     n(
-
       item.mid,
 
-      Number.isFinite(bid) &&
-      Number.isFinite(ask)
+      Number.isFinite(
+        bid
+      ) &&
+      Number.isFinite(
+        ask
+      )
 
         ? (
             bid +
@@ -2597,18 +1865,20 @@ function normalizeQuoteItem(
         : NaN
     );
 
-
   const timestamp =
     item.timestamp ||
     item.datetime ||
     item.time ||
     null;
 
-
   if (
     !symbol ||
-    !Number.isFinite(bid) ||
-    !Number.isFinite(ask) ||
+    !Number.isFinite(
+      bid
+    ) ||
+    !Number.isFinite(
+      ask
+    ) ||
     bid <=
       0 ||
     ask <=
@@ -2616,144 +1886,102 @@ function normalizeQuoteItem(
     ask <
       bid
   ) {
-
     return null;
   }
 
-
   return {
-
     symbol,
-
     bid,
-
     ask,
-
     mid,
-
     timestamp
   };
 }
-
 
 function parseLatestResponse(
   data,
   requestedSymbols
 ) {
-
   const map =
     new Map();
 
+  const add =
+    (
+      item,
+      fallback = ''
+    ) => {
+      const quote =
+        normalizeQuoteItem(
+          item,
+          fallback
+        );
+
+      if (
+        quote
+      ) {
+        map.set(
+          quote.symbol ||
+            fallback,
+          quote
+        );
+      }
+    };
 
   if (
     Array.isArray(
       data
     )
   ) {
-
-    for (
-      const item
-      of data
-    ) {
-
-      const quote =
-        normalizeQuoteItem(
-          item
-        );
-
-
-      if (
-        quote
-      ) {
-
-        map.set(
-          quote.symbol,
-          quote
-        );
-      }
-    }
-
-
-    return map;
-  }
-
-
-  const array =
-    data?.data ||
-    data?.quotes ||
-    data?.results;
-
-
-  if (
+    data.forEach(
+      item =>
+        add(item)
+    );
+  } else if (
     Array.isArray(
-      array
+      data?.data
     )
   ) {
-
-    for (
-      const item
-      of array
-    ) {
-
-      const quote =
-        normalizeQuoteItem(
-          item
-        );
-
-
-      if (
-        quote
-      ) {
-
-        map.set(
-          quote.symbol,
-          quote
-        );
-      }
-    }
-
-
-    return map;
-  }
-
-
-  if (
+    data.data.forEach(
+      item =>
+        add(item)
+    );
+  } else if (
+    Array.isArray(
+      data?.quotes
+    )
+  ) {
+    data.quotes.forEach(
+      item =>
+        add(item)
+    );
+  } else if (
+    Array.isArray(
+      data?.results
+    )
+  ) {
+    data.results.forEach(
+      item =>
+        add(item)
+    );
+  } else if (
     data &&
     typeof data ===
       'object'
   ) {
-
     for (
       const symbol
       of requestedSymbols
     ) {
-
-      const item =
+      add(
         data[symbol] ||
         data[
           symbol.toLowerCase()
         ] ||
-        data?.data?.[symbol];
+        data?.data?.[symbol],
 
-
-      const quote =
-        normalizeQuoteItem(
-          item,
-          symbol
-        );
-
-
-      if (
-        quote
-      ) {
-
-        map.set(
-          symbol,
-          quote
-        );
-      }
+        symbol
+      );
     }
-
 
     if (
       map.size ===
@@ -2761,44 +1989,24 @@ function parseLatestResponse(
       requestedSymbols.length ===
         1
     ) {
-
-      const quote =
-        normalizeQuoteItem(
-
-          data,
-
-          requestedSymbols[0]
-        );
-
-
-      if (
-        quote
-      ) {
-
-        map.set(
-          requestedSymbols[0],
-          quote
-        );
-      }
+      add(
+        data,
+        requestedSymbols[0]
+      );
     }
   }
-
 
   return map;
 }
 
-
 async function fetchLatestQuotes(
   symbols
 ) {
-
   if (
     !symbols.length
   ) {
-
     return new Map();
   }
-
 
   const query =
     symbols
@@ -2810,67 +2018,44 @@ async function fetchLatestQuotes(
         '&'
       );
 
-
-  const url =
-    `${BIQUOTE_BASE}/api/latest?${query}&allowStale=false`;
-
-
   const response =
     await http.get(
-      url
+      `${BIQUOTE_BASE}/api/latest?${query}&allowStale=false`
     );
 
-
   return parseLatestResponse(
-
     response.data,
-
     symbols
   );
 }
 
-
 async function fetchSingleQuote(
   symbol
 ) {
-
   try {
-
     const response =
       await http.get(
-
         `${BIQUOTE_BASE}/api/${encodeURIComponent(symbol)}`,
-
         {
-
           params: {
-
             allowStale:
               false
           }
         }
       );
 
-
     return normalizeQuoteItem(
-
       response.data?.data ||
       response.data,
-
       symbol
     );
-
-  } catch (
-    error
-  ) {
-
+  } catch {
     const quotes =
       await fetchLatestQuotes(
         [
           symbol
         ]
       );
-
 
     return (
       quotes.get(
@@ -2881,72 +2066,50 @@ async function fetchSingleQuote(
   }
 }
 
-
-// ============================================================
-// CONCURRENCY
-// ============================================================
-
 async function mapWithConcurrency(
   items,
   limit,
   worker
 ) {
-
   const results =
     new Array(
       items.length
     );
 
-
   let cursor = 0;
 
-
   async function run() {
-
     while (
       true
     ) {
-
       const index =
         cursor++;
 
-
       if (
         index >=
-          items.length
+        items.length
       ) {
-
         return;
       }
 
-
       try {
-
         results[index] =
           await worker(
-
             items[index],
-
             index
           );
-
       } catch (
         error
       ) {
-
         results[index] = {
-
           error
         };
       }
     }
   }
 
-
   await Promise.all(
-
     Array.from(
-
       {
         length:
           Math.min(
@@ -2954,30 +2117,50 @@ async function mapWithConcurrency(
             items.length
           )
       },
-
       run
     )
   );
 
-
   return results;
 }
 
+function withTimeout(
+  promise,
+  ms,
+  label = 'operation'
+) {
+  return Promise.race([
+    promise,
 
-// ============================================================
-// MONGODB SCHEMAS
-// ============================================================
+    new Promise(
+      (
+        _,
+        reject
+      ) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `${label} timeout after ${ms}ms`
+              )
+            ),
+          ms
+        )
+    )
+  ]);
+}
 
 const accountSchema =
   new mongoose.Schema({
-
     accountKey: {
+      type:
+        String,
 
-      type: String,
+      unique:
+        true,
 
-      unique: true,
-
-      index: true
+      index:
+        true
     },
 
     startingBalance:
@@ -3009,39 +2192,38 @@ const accountSchema =
 
     updatedAt:
       Date
-
   }, {
-
     minimize:
       false
   });
 
-
 const tradeSchema =
   new mongoose.Schema({
-
     accountKey: {
+      type:
+        String,
 
-      type: String,
-
-      index: true
+      index:
+        true
     },
 
     symbol: {
+      type:
+        String,
 
-      type: String,
-
-      index: true
+      index:
+        true
     },
 
     direction:
       String,
 
     status: {
+      type:
+        String,
 
-      type: String,
-
-      index: true
+      index:
+        true
     },
 
     timeframe:
@@ -3109,22 +2291,19 @@ const tradeSchema =
 
     analysis:
       mongoose.Schema.Types.Mixed
-
   }, {
-
     minimize:
       false
   });
 
-
 const signalSchema =
   new mongoose.Schema({
-
     accountKey: {
+      type:
+        String,
 
-      type: String,
-
-      index: true
+      index:
+        true
     },
 
     createdAt:
@@ -3147,98 +2326,73 @@ const signalSchema =
 
     analysis:
       mongoose.Schema.Types.Mixed
-
   }, {
-
     minimize:
       false
   });
 
-
-// ============================================================
-// MODELS
-// ============================================================
-
 const Account =
-  mongoose.models.LomyForexAccountV120 ||
+  mongoose.models.LomyForexAccountV121 ||
   mongoose.model(
-    'LomyForexAccountV120',
+    'LomyForexAccountV121',
     accountSchema
   );
 
-
 const Trade =
-  mongoose.models.LomyForexTradeV120 ||
+  mongoose.models.LomyForexTradeV121 ||
   mongoose.model(
-    'LomyForexTradeV120',
+    'LomyForexTradeV121',
     tradeSchema
   );
 
-
 const Signal =
-  mongoose.models.LomyForexSignalV120 ||
+  mongoose.models.LomyForexSignalV121 ||
   mongoose.model(
-    'LomyForexSignalV120',
+    'LomyForexSignalV121',
     signalSchema
   );
-
 
 let account =
   null;
 
-
-// ============================================================
-// MONGODB INIT
-// ============================================================
+let bot =
+  null;
 
 async function initMongo() {
-
   if (
     !MONGODB_URI
   ) {
-
     throw new Error(
       'MONGODB_URI is missing'
     );
   }
 
-
   await mongoose.connect(
-
     MONGODB_URI,
-
     {
-
       serverSelectionTimeoutMS:
         15000
     }
   );
 
-
   state.mongoReady =
     true;
-
 
   console.log(
     '✅ MongoDB connected'
   );
 
-
   account =
     await Account.findOne({
-
       accountKey:
         PAPER.accountKey
     });
 
-
   if (
     !account
   ) {
-
     account =
       await Account.create({
-
         accountKey:
           PAPER.accountKey,
 
@@ -3274,102 +2428,65 @@ async function initMongo() {
       });
   }
 
-
   const openTrades =
     await Trade.find({
-
       accountKey:
         PAPER.accountKey,
 
       status:
         'OPEN'
-
     }).lean();
-
 
   for (
     const trade
     of openTrades
   ) {
-
     state.openTrades.set(
-
       trade.symbol,
-
       trade
     );
   }
 
-
   console.log(
-
     `♻️ Restored ${openTrades.length} open PAPER trade(s)`
   );
 }
 
-
 async function saveAccount() {
-
   if (
-    !account
+    account
   ) {
+    account.updatedAt =
+      new Date();
 
-    return;
+    await account.save();
   }
-
-
-  account.updatedAt =
-    new Date();
-
-
-  await account.save();
 }
-
-
-// ============================================================
-// TELEGRAM
-// ============================================================
-
-let bot =
-  null;
-
 
 async function sendTelegram(
   text
 ) {
-
   if (
     !bot ||
     !account?.telegramChatId
   ) {
-
     return;
   }
 
-
   try {
-
     await bot.telegram.sendMessage(
-
       account.telegramChatId,
-
       text,
-
       {
-
         disable_web_page_preview:
           true
       }
     );
-
   } catch (
     error
   ) {
-
     console.error(
-
       'Telegram send error:',
-
       safeError(
         error
       )
@@ -3377,47 +2494,32 @@ async function sendTelegram(
   }
 }
 
-
 async function rememberChat(
   ctx
 ) {
-
   const id =
     String(
       ctx.chat?.id ||
       ''
     );
 
-
   if (
-    !id ||
-    !account
-  ) {
-
-    return;
-  }
-
-
-  if (
+    id &&
+    account &&
     account.telegramChatId !==
       id
   ) {
-
     account.telegramChatId =
       id;
-
 
     await saveAccount();
   }
 }
 
-
 async function initTelegram() {
-
   if (
     !TELEGRAM_BOT_TOKEN
   ) {
-
     console.warn(
       '⚠️ TELEGRAM_BOT_TOKEN missing'
     );
@@ -3425,199 +2527,137 @@ async function initTelegram() {
     return;
   }
 
-
   bot =
     new Telegraf(
       TELEGRAM_BOT_TOKEN
     );
 
-
   bot.start(
     async ctx => {
-
       await rememberChat(
         ctx
       );
 
-
       await ctx.reply(
-
         `🤖 ${VERSION}\n` +
-
         `🧪 PAPER ONLY\n` +
-
-        `⏱ Timeframe: ${TIMEFRAME}\n` +
-
-        `🎯 TP: 1:${STRATEGY.riskReward.toFixed(1)}R\n` +
-
-        `🛡 Break-even: +${STRATEGY.breakEvenTriggerR.toFixed(1)}R → SL to Entry\n` +
-
-        `🧠 V5.1 + SMC + FVG + Liquidity Sweep + Retest + Fibonacci`
+        `⏱ ${TIMEFRAME}\n` +
+        `🎯 TP 1:${STRATEGY.riskReward.toFixed(1)}R\n` +
+        `🛡 BE +${STRATEGY.breakEvenTriggerR.toFixed(1)}R → SL to Entry\n` +
+        `🧠 V5.1 + SMC + FVG + Sweep + Retest + Fibonacci`
       );
     }
   );
 
-
   bot.command(
     'status',
     async ctx => {
-
       await rememberChat(
         ctx
       );
 
-
       await ctx.reply(
-
         `📡 ${VERSION}\n\n` +
-
         `Market: ${state.marketReady ? 'READY ✅' : 'WAIT ⏳'}\n` +
-
         `MongoDB: ${state.mongoReady ? 'OK ✅' : 'NO ❌'}\n` +
-
         `Telegram: ${state.telegramReady ? 'OK ✅' : 'NO ❌'}\n` +
-
         `Instruments: ${INSTRUMENTS.length}\n` +
-
         `Open: ${state.openTrades.size}\n` +
-
         `Scans: ${state.totalSignalScans}\n` +
-
         `Signals: ${state.rawSignals}\n` +
-
         `Executed: ${state.executedSignals}\n` +
-
         `BE moves: ${state.breakEvenMoves}`
       );
     }
   );
 
-
   bot.command(
     'balance',
     async ctx => {
-
       await rememberChat(
         ctx
       );
 
-
       await ctx.reply(
-
         `🧪 PAPER ACCOUNT\n\n` +
-
         `Starting: ${fmtMoney(account?.startingBalance ?? PAPER.startingBalance)}\n` +
-
         `Balance: ${fmtMoney(account?.balance ?? PAPER.startingBalance)}\n` +
-
         `Realized PnL: ${fmtMoney(account?.realizedPnl ?? 0)}\n` +
-
         `Open Trades: ${state.openTrades.size}\n\n` +
-
         `🔒 NO REAL MONEY USED`
       );
     }
   );
 
-
   bot.command(
     'stats',
     async ctx => {
-
       await rememberChat(
         ctx
       );
-
 
       const total =
         account?.totalTrades ??
         0;
 
-
       const wins =
         account?.wins ??
         0;
-
 
       const losses =
         account?.losses ??
         0;
 
-
       const breakeven =
         account?.breakeven ??
         0;
 
-
       const winRate =
         total >
         0
-
           ? 100 *
             wins /
             total
-
           : 0;
 
-
       await ctx.reply(
-
         `📊 ${VERSION} STATS\n\n` +
-
-        `Timeframe: ${TIMEFRAME}\n` +
-
         `Closed: ${total}\n` +
-
         `Wins: ${wins}\n` +
-
         `Losses: ${losses}\n` +
-
         `Breakeven: ${breakeven}\n` +
-
         `Win Rate: ${winRate.toFixed(2)}%\n` +
-
         `Realized PnL: ${fmtMoney(account?.realizedPnl ?? 0)}\n` +
-
         `Balance: ${fmtMoney(account?.balance ?? PAPER.startingBalance)}`
       );
     }
   );
 
-
   bot.command(
     'positions',
     async ctx => {
-
       await rememberChat(
         ctx
       );
 
-
       if (
         !state.openTrades.size
       ) {
-
         return ctx.reply(
           '📭 No open PAPER trades.'
         );
       }
 
-
       const lines = [
-
         '📂 OPEN PAPER TRADES',
-
         ''
       ];
-
 
       for (
         const trade
         of state.openTrades.values()
       ) {
-
         lines.push(
-
           `${trade.direction === 'BUY' ? '🟢' : '🔴'} ${trade.symbol} ${trade.direction}`,
 
           `Entry ${fmtPrice(trade.entryPrice, trade.symbol)} | SL ${fmtPrice(trade.stopLoss, trade.symbol)} | TP ${fmtPrice(trade.takeProfit, trade.symbol)}`,
@@ -3630,9 +2670,7 @@ async function initTelegram() {
         );
       }
 
-
       await ctx.reply(
-
         lines
           .join(
             '\n'
@@ -3645,28 +2683,22 @@ async function initTelegram() {
     }
   );
 
-
   bot.command(
     'trades',
     async ctx => {
-
       await rememberChat(
         ctx
       );
 
-
       const trades =
         await Trade.find({
-
           accountKey:
             PAPER.accountKey,
 
           status:
             'CLOSED'
-
         })
           .sort({
-
             closedAt:
               -1
           })
@@ -3675,46 +2707,33 @@ async function initTelegram() {
           )
           .lean();
 
-
       if (
         !trades.length
       ) {
-
         return ctx.reply(
           '📭 No closed PAPER trades yet.'
         );
       }
 
-
       const lines = [
-
         '🧾 LAST CLOSED TRADES',
-
         ''
       ];
-
 
       for (
         const trade
         of trades
       ) {
-
         const icon =
           trade.pnlUsd >
             0
-
             ? '✅'
-
             : trade.pnlUsd <
                 0
-
               ? '❌'
-
               : '➖';
 
-
         lines.push(
-
           `${icon} ${trade.symbol} ${trade.direction} | ${trade.exitReason}`,
 
           `PnL ${fmtMoney(trade.pnlUsd)} | ${n(trade.pnlR, 0).toFixed(2)}R`,
@@ -3722,7 +2741,6 @@ async function initTelegram() {
           ''
         );
       }
-
 
       await ctx.reply(
         lines.join(
@@ -3732,20 +2750,15 @@ async function initTelegram() {
     }
   );
 
-
   bot.command(
     'pairs',
     async ctx => {
-
       await rememberChat(
         ctx
       );
 
-
       await ctx.reply(
-
         `📋 ${INSTRUMENTS.length} instruments\n` +
-
         INSTRUMENTS.join(
           ', '
         )
@@ -3753,67 +2766,48 @@ async function initTelegram() {
     }
   );
 
-
   const me =
     await bot.telegram.getMe();
-
 
   state.telegramReady =
     true;
 
-
   console.log(
-
     `✅ Telegram authenticated: @${me.username}`
   );
 
-
   bot.launch({
-
     dropPendingUpdates:
       true
-
-  }).then(
-    () => {
-
-      console.log(
-        '✅ Telegram polling started'
-      );
-    }
-  ).catch(
-    error => {
-
-      state.telegramReady =
-        false;
-
-
-      console.error(
-
-        'Telegram launch:',
-
-        safeError(
-          error
+  })
+    .then(
+      () =>
+        console.log(
+          '✅ Telegram polling started'
         )
-      );
-    }
-  );
+    )
+    .catch(
+      error => {
+        state.telegramReady =
+          false;
+
+        console.error(
+          'Telegram launch:',
+          safeError(
+            error
+          )
+        );
+      }
+    );
 }
-
-
-// ============================================================
-// SIGNAL JOURNAL
-// ============================================================
 
 async function recordSignal(
   analysis,
   executed,
   skipReason = ''
 ) {
-
   try {
-
     await Signal.create({
-
       accountKey:
         PAPER.accountKey,
 
@@ -3835,15 +2829,11 @@ async function recordSignal(
 
       analysis
     });
-
   } catch (
     error
   ) {
-
     console.error(
-
       'Signal journal:',
-
       safeError(
         error
       )
@@ -3851,23 +2841,15 @@ async function recordSignal(
   }
 }
 
-
-// ============================================================
-// BUILD EXECUTION LEVELS
-// ============================================================
-
 function buildExecutionLevels(
   analysis,
   quote
 ) {
-
   const direction =
     analysis.direction;
 
-
   const atr =
     analysis.atr;
-
 
   if (
     !Number.isFinite(
@@ -3876,37 +2858,26 @@ function buildExecutionLevels(
     atr <=
       0
   ) {
-
     return null;
   }
-
-
-  // BUY enters ASK
-  // SELL enters BID
 
   const entry =
     direction ===
     'BUY'
-
       ? quote.ask
-
       : quote.bid;
 
-
   let stopLoss;
-
 
   if (
     direction ===
     'BUY'
   ) {
-
     stopLoss =
       analysis.support -
       atr *
         STRATEGY.atrMargin;
 
-
     if (
       !Number.isFinite(
         stopLoss
@@ -3914,13 +2885,11 @@ function buildExecutionLevels(
       stopLoss >=
         entry
     ) {
-
       stopLoss =
         analysis.signalClose -
         atr;
     }
 
-
     if (
       !Number.isFinite(
         stopLoss
@@ -3928,20 +2897,16 @@ function buildExecutionLevels(
       stopLoss >=
         entry
     ) {
-
       stopLoss =
         entry -
         atr;
     }
-
   } else {
-
     stopLoss =
       analysis.resistance +
       atr *
         STRATEGY.atrMargin;
 
-
     if (
       !Number.isFinite(
         stopLoss
@@ -3949,13 +2914,11 @@ function buildExecutionLevels(
       stopLoss <=
         entry
     ) {
-
       stopLoss =
         analysis.signalClose +
         atr;
     }
 
-
     if (
       !Number.isFinite(
         stopLoss
@@ -3963,13 +2926,11 @@ function buildExecutionLevels(
       stopLoss <=
         entry
     ) {
-
       stopLoss =
         entry +
         atr;
     }
   }
-
 
   const riskDistance =
     Math.abs(
@@ -3977,61 +2938,41 @@ function buildExecutionLevels(
       stopLoss
     );
 
-
   if (
-    riskDistance <=
-      0
+    !(riskDistance > 0)
   ) {
-
     return null;
   }
-
-
-  // ==========================================
-  // NEW TP = 1.2R
-  // ==========================================
 
   const takeProfit =
     direction ===
     'BUY'
-
       ? entry +
         riskDistance *
           STRATEGY.riskReward
-
       : entry -
         riskDistance *
           STRATEGY.riskReward;
 
-
-  // ==========================================
-  // NEW BREAK-EVEN TRIGGER = +0.6R
-  // ==========================================
-
   const beTriggerPrice =
     direction ===
     'BUY'
-
       ? entry +
         riskDistance *
           STRATEGY.breakEvenTriggerR
-
       : entry -
         riskDistance *
           STRATEGY.breakEvenTriggerR;
 
-
   const geometryOk =
     direction ===
     'BUY'
-
       ? (
           stopLoss <
             entry &&
           entry <
             takeProfit
         )
-
       : (
           takeProfit <
             entry &&
@@ -4039,110 +2980,70 @@ function buildExecutionLevels(
             stopLoss
         );
 
-
   if (
     !geometryOk
   ) {
-
     return null;
   }
 
-
   return {
-
     entry,
-
     stopLoss,
-
     takeProfit,
-
     riskDistance,
-
     beTriggerPrice
   };
 }
-
-
-// ============================================================
-// OPEN PAPER TRADE
-// ============================================================
 
 async function openPaperTrade(
   analysis,
   quote
 ) {
-
   const symbol =
     analysis.symbol;
 
-
   const direction =
     analysis.direction;
-
 
   if (
     state.openTrades.has(
       symbol
     )
   ) {
-
     state.skippedSignals++;
 
-
-    await recordSignal(
-
+    return recordSignal(
       analysis,
-
       false,
-
       'ALREADY_OPEN'
     );
-
-
-    return;
   }
-
 
   if (
     state.openTrades.size >=
-      PAPER.maxOpenTrades
+    PAPER.maxOpenTrades
   ) {
-
     state.skippedSignals++;
 
-
-    await recordSignal(
-
+    return recordSignal(
       analysis,
-
       false,
-
       'MAX_OPEN_TRADES'
     );
-
-
-    return;
   }
-
 
   const executionPrice =
     direction ===
     'BUY'
-
       ? quote.ask
-
       : quote.bid;
-
 
   const moveFromSignal =
     Math.abs(
-
       executionPrice -
       analysis.signalClose
     );
 
-
-  // Anti-chase only
   if (
     Number.isFinite(
       analysis.atr
@@ -4153,62 +3054,38 @@ async function openPaperTrade(
       analysis.atr *
         STRATEGY.maxEntryMoveAtr
   ) {
-
     state.skippedSignals++;
 
-
-    await recordSignal(
-
+    return recordSignal(
       analysis,
-
       false,
-
       'ANTI_CHASE'
     );
-
-
-    return;
   }
-
 
   const levels =
     buildExecutionLevels(
-
       analysis,
-
       quote
     );
-
 
   if (
     !levels
   ) {
-
     state.skippedSignals++;
 
-
-    await recordSignal(
-
+    return recordSignal(
       analysis,
-
       false,
-
       'INVALID_LEVELS'
     );
-
-
-    return;
   }
-
 
   const balance =
     n(
-
       account?.balance,
-
       PAPER.startingBalance
     );
-
 
   const riskUsd =
     balance *
@@ -4217,15 +3094,12 @@ async function openPaperTrade(
       100
     );
 
-
   const units =
     riskUsd /
     levels.riskDistance;
 
-
   const tradeDocument =
     await Trade.create({
-
       accountKey:
         PAPER.accountKey,
 
@@ -4288,116 +3162,72 @@ async function openPaperTrade(
       analysis
     });
 
-
   const trade =
     tradeDocument.toObject();
 
-
   state.openTrades.set(
-
     symbol,
-
     trade
   );
 
-
   state.executedSignals++;
 
-
   await recordSignal(
-
     analysis,
-
     true,
-
     ''
   );
 
-
   await sendTelegram(
-
     `${direction === 'BUY' ? '🟢' : '🔴'} ${symbol} ${direction} — PAPER\n` +
-
     `Entry: ${fmtPrice(levels.entry, symbol)}\n` +
-
     `SL: ${fmtPrice(levels.stopLoss, symbol)}\n` +
-
     `TP: ${fmtPrice(levels.takeProfit, symbol)} (${STRATEGY.riskReward.toFixed(1)}R)\n` +
-
     `BE trigger: ${fmtPrice(levels.beTriggerPrice, symbol)} (+${STRATEGY.breakEvenTriggerR.toFixed(1)}R)\n` +
-
     `Quality: ${analysis.quality} ${analysis.qualityScore}/12\n` +
-
     `SMC: ${analysis.smc?.reasons?.join(', ') || 'none'}\n` +
-
     `Retest: ${analysis.retest?.retest ? 'YES' : 'NO'} | ` +
-
     `Fib Golden: ${analysis.fib?.goldenZone ? 'YES' : 'NO'}\n\n` +
-
     `🔒 PAPER ONLY`
   );
 }
-
-
-// ============================================================
-// ACTIVATE BREAK-EVEN
-// ============================================================
 
 async function activateBreakEven(
   symbol,
   trade
 ) {
-
   if (
     trade.breakEvenActive
   ) {
-
     return;
   }
-
 
   trade.breakEvenActive =
     true;
 
-
   trade.breakEvenActivatedAt =
     new Date();
-
-
-  // ==========================================
-  // MOVE STOP LOSS TO EXACT ENTRY
-  // ==========================================
 
   trade.stopLoss =
     trade.entryPrice;
 
-
   state.openTrades.set(
-
     symbol,
-
     trade
   );
 
-
   state.breakEvenMoves++;
 
-
   await Trade.updateOne(
-
     {
-
       _id:
         trade._id,
 
       status:
         'OPEN'
     },
-
     {
-
       $set: {
-
         breakEvenActive:
           true,
 
@@ -4410,54 +3240,36 @@ async function activateBreakEven(
     }
   );
 
-
   await sendTelegram(
-
     `🛡 BREAK-EVEN ACTIVATED\n` +
-
     `${symbol} ${trade.direction}\n` +
-
     `SL moved to Entry: ${fmtPrice(trade.entryPrice, symbol)}\n` +
-
     `TP remains: ${fmtPrice(trade.takeProfit, symbol)}\n` +
-
     `Trigger: +${STRATEGY.breakEvenTriggerR.toFixed(1)}R`
   );
 }
-
-
-// ============================================================
-// CLOSE PAPER TRADE
-// ============================================================
 
 async function closePaperTrade(
   symbol,
   exitPrice,
   reason
 ) {
-
   const trade =
     state.openTrades.get(
       symbol
     );
 
-
   if (
     !trade
   ) {
-
     return;
   }
-
 
   const directionSign =
     trade.direction ===
     'BUY'
-
       ? 1
-
       : -1;
-
 
   const pnlPerUnit =
     (
@@ -4466,37 +3278,27 @@ async function closePaperTrade(
     ) *
     directionSign;
 
-
   const pnlUsd =
     pnlPerUnit *
     trade.units;
 
-
   const pnlR =
     trade.riskUsd >
     0
-
       ? pnlUsd /
         trade.riskUsd
-
       : 0;
 
-
   await Trade.updateOne(
-
     {
-
       _id:
         trade._id,
 
       status:
         'OPEN'
     },
-
     {
-
       $set: {
-
         status:
           'CLOSED',
 
@@ -4521,11 +3323,9 @@ async function closePaperTrade(
     }
   );
 
-
   state.openTrades.delete(
     symbol
   );
-
 
   account.balance =
     n(
@@ -4534,14 +3334,12 @@ async function closePaperTrade(
     ) +
     pnlUsd;
 
-
   account.realizedPnl =
     n(
       account.realizedPnl,
       0
     ) +
     pnlUsd;
-
 
   account.totalTrades =
     n(
@@ -4550,44 +3348,34 @@ async function closePaperTrade(
     ) +
     1;
 
-
-  // small tolerance around 0R
   const breakevenTolerance =
     Math.max(
-
       0.01,
-
       trade.riskUsd *
         0.03
     );
 
-
   if (
     pnlUsd >
-      breakevenTolerance
+    breakevenTolerance
   ) {
-
     account.wins =
       n(
         account.wins,
         0
       ) +
       1;
-
   } else if (
     pnlUsd <
-      -breakevenTolerance
+    -breakevenTolerance
   ) {
-
     account.losses =
       n(
         account.losses,
         0
       ) +
       1;
-
   } else {
-
     account.breakeven =
       n(
         account.breakeven,
@@ -4596,124 +3384,82 @@ async function closePaperTrade(
       1;
   }
 
-
   await saveAccount();
-
 
   const icon =
     pnlUsd >
       breakevenTolerance
-
       ? '✅'
-
       : pnlUsd <
           -breakevenTolerance
-
         ? '❌'
-
         : '➖';
 
-
   await sendTelegram(
-
     `${icon} ${symbol} ${trade.direction} | ${reason}\n` +
-
     `Exit: ${fmtPrice(exitPrice, symbol)}\n` +
-
     `PnL ${fmtMoney(pnlUsd)} | ${pnlR.toFixed(2)}R\n` +
-
     (
       trade.breakEvenActive
-
         ? '🛡 Break-even had been activated'
-
         : 'SL remained original'
     )
   );
 }
 
-
-// ============================================================
-// CURRENT R
-// ============================================================
-
 function unrealizedR(
   trade,
   quote
 ) {
-
   const mark =
     trade.direction ===
     'BUY'
-
       ? quote.bid
-
       : quote.ask;
-
 
   const sign =
     trade.direction ===
     'BUY'
-
       ? 1
-
       : -1;
 
-
   return (
-
     (
       mark -
       trade.entryPrice
     ) *
     sign
-
   ) /
   trade.initialRiskDistance;
 }
 
-
-// ============================================================
-// FAST EXIT + BREAK-EVEN MONITOR
-// ============================================================
-
 async function quotePollLoop() {
-
   if (
     state.quoteRunning ||
     state.initializing ||
     state.openTrades.size ===
       0
   ) {
-
     return;
   }
-
 
   state.quoteRunning =
     true;
 
-
   state.lastQuotePollAt =
     new Date();
 
-
   state.totalQuotePolls++;
 
-
   try {
-
-    const symbols =
-      [
-        ...state.openTrades.keys()
-      ];
-
+    const symbols = [
+      ...state.openTrades.keys()
+    ];
 
     const quotes =
       await fetchLatestQuotes(
         symbols
       );
-
 
     for (
       const [
@@ -4722,15 +3468,11 @@ async function quotePollLoop() {
       ]
       of quotes
     ) {
-
       state.latestQuotes.set(
-
         symbol,
-
         quote
       );
     }
-
 
     for (
       const [
@@ -4741,20 +3483,16 @@ async function quotePollLoop() {
         ...state.openTrades.entries()
       ]
     ) {
-
       const quote =
         state.latestQuotes.get(
           symbol
         );
 
-
       if (
         !quote
       ) {
-
         continue;
       }
-
 
       let trade =
         state.openTrades.get(
@@ -4762,37 +3500,24 @@ async function quotePollLoop() {
         ) ||
         originalTrade;
 
-
-      // ==========================================
-      // BREAK-EVEN TRIGGER
-      // ==========================================
-
       if (
         !trade.breakEvenActive
       ) {
-
         const hitBreakEven =
           trade.direction ===
           'BUY'
-
             ? quote.bid >=
               trade.beTriggerPrice
-
             : quote.ask <=
               trade.beTriggerPrice;
-
 
         if (
           hitBreakEven
         ) {
-
           await activateBreakEven(
-
             symbol,
-
             trade
           );
-
 
           trade =
             state.openTrades.get(
@@ -4802,130 +3527,78 @@ async function quotePollLoop() {
         }
       }
 
-
-      // ==========================================
-      // BUY
-      // ==========================================
-
       if (
         trade.direction ===
         'BUY'
       ) {
-
-        // BUY exits using BID
-
         if (
           quote.bid <=
-            trade.stopLoss
+          trade.stopLoss
         ) {
-
           await closePaperTrade(
-
             symbol,
-
             quote.bid,
-
             trade.breakEvenActive
-
               ? 'BREAK_EVEN'
-
               : 'STOP_LOSS'
           );
-
         } else if (
           quote.bid >=
-            trade.takeProfit
+          trade.takeProfit
         ) {
-
           await closePaperTrade(
-
             symbol,
-
             quote.bid,
-
             'TAKE_PROFIT'
           );
         }
-
-      // ==========================================
-      // SELL
-      // ==========================================
-
       } else {
-
-        // SELL exits using ASK
-
         if (
           quote.ask >=
-            trade.stopLoss
+          trade.stopLoss
         ) {
-
           await closePaperTrade(
-
             symbol,
-
             quote.ask,
-
             trade.breakEvenActive
-
               ? 'BREAK_EVEN'
-
               : 'STOP_LOSS'
           );
-
         } else if (
           quote.ask <=
-            trade.takeProfit
+          trade.takeProfit
         ) {
-
           await closePaperTrade(
-
             symbol,
-
             quote.ask,
-
             'TAKE_PROFIT'
           );
         }
       }
     }
-
   } catch (
     error
   ) {
-
     state.lastMarketError =
       `quote: ${safeError(error)}`;
 
-
     console.error(
-
       'Quote loop:',
-
       state.lastMarketError
     );
-
   } finally {
-
     state.quoteRunning =
       false;
   }
 }
 
-
-// ============================================================
-// REVERSE SIGNAL
-// ============================================================
-
 async function handleReverseSignal(
   analysis
 ) {
-
   const trade =
     state.openTrades.get(
       analysis.symbol
     );
-
 
   if (
     !trade ||
@@ -4933,10 +3606,8 @@ async function handleReverseSignal(
     trade.direction ===
       analysis.direction
   ) {
-
     return false;
   }
-
 
   const quote =
     state.latestQuotes.get(
@@ -4949,82 +3620,50 @@ async function handleReverseSignal(
         null
     );
 
-
   if (
     !quote
   ) {
-
     return false;
   }
 
-
   const currentR =
     unrealizedR(
-
       trade,
-
       quote
     );
-
-
-  // ==========================================
-  // IMPORTANT FIX:
-  // Reverse signal will NOT close a losing trade.
-  //
-  // Prevents old situation where REVERSE_SIGNAL
-  // crystallized -0.2R / -0.6R losses.
-  // ==========================================
 
   if (
     currentR >=
       0 ||
     trade.breakEvenActive
   ) {
-
     const exitPrice =
       trade.direction ===
       'BUY'
-
         ? quote.bid
-
         : quote.ask;
 
-
     await closePaperTrade(
-
       analysis.symbol,
-
       exitPrice,
-
       'REVERSE_SIGNAL'
     );
-
 
     return true;
   }
 
-
   return false;
 }
 
-
-// ============================================================
-// SCAN SLOT
-// ============================================================
-
 function currentScanSlot() {
-
   const date =
     new Date();
-
 
   const minute =
     date.getUTCMinutes();
 
-
   const second =
     date.getUTCSeconds();
-
 
   if (
     minute %
@@ -5035,80 +3674,59 @@ function currentScanSlot() {
     second >
       50
   ) {
-
     return null;
   }
 
-
   return (
-
     `${date.getUTCFullYear()}-` +
-
     `${date.getUTCMonth() + 1}-` +
-
     `${date.getUTCDate()}-` +
-
     `${date.getUTCHours()}-` +
-
     `${minute}`
   );
 }
 
-
-// ============================================================
-// SCAN SYMBOL
-// ============================================================
-
 async function scanSymbol(
   symbol
 ) {
-
   const memory =
     state.pairState.get(
       symbol
     );
 
-
   try {
-
     const bars =
-      await fetchOhlc(
-        symbol
+      await withTimeout(
+        fetchOhlc(
+          symbol
+        ),
+        INIT_SYMBOL_TIMEOUT_MS,
+        `${symbol} OHLC`
       );
-
 
     if (
       bars.length <
-        230
+      MIN_HISTORY
     ) {
-
       memory.errors++;
 
-
       return {
-
         symbol,
-
         status:
           'WARMUP',
-
         bars:
           bars.length
       };
     }
 
-
     memory.bars =
       bars;
-
 
     memory.initialized =
       true;
 
-
     memory.errors =
       0;
-
 
     const lastTime =
       bars[
@@ -5116,169 +3734,118 @@ async function scanSymbol(
         1
       ]?.openTime;
 
-
     if (
       !lastTime ||
       lastTime ===
         memory.lastClosedBarTime
     ) {
-
       return {
-
         symbol,
-
         status:
           'NO_NEW_BAR'
       };
     }
 
-
     memory.lastClosedBarTime =
       lastTime;
 
-
     const analysis =
       analyzeBars(
-
         symbol,
-
         bars,
-
         memory
       );
-
 
     memory.lastAnalysis =
       analysis;
 
-
     if (
       !analysis?.direction
     ) {
-
       return {
-
         symbol,
-
         status:
           'NO_SIGNAL'
       };
     }
 
-
     state.rawSignals++;
 
-
-    // Handle old opposite position
     await handleReverseSignal(
       analysis
     );
-
 
     if (
       state.openTrades.has(
         symbol
       )
     ) {
-
       state.skippedSignals++;
 
-
       await recordSignal(
-
         analysis,
-
         false,
-
         'OPPOSITE_SIGNAL_BUT_TRADE_STILL_OPEN'
       );
 
-
       return {
-
         symbol,
-
         status:
           'SKIP_OPEN'
       };
     }
-
 
     const quote =
       await fetchSingleQuote(
         symbol
       );
 
-
     if (
       !quote
     ) {
-
       state.skippedSignals++;
 
-
       await recordSignal(
-
         analysis,
-
         false,
-
         'NO_FRESH_QUOTE'
       );
 
-
       return {
-
         symbol,
-
         status:
           'NO_QUOTE'
       };
     }
 
-
     state.latestQuotes.set(
-
       symbol,
-
       quote
     );
-
 
     await openPaperTrade(
-
       analysis,
-
       quote
     );
 
-
     return {
-
       symbol,
-
       status:
         'SIGNAL',
 
       direction:
         analysis.direction
     };
-
   } catch (
     error
   ) {
-
     memory.errors++;
-
 
     state.lastMarketError =
       `${symbol}: ${safeError(error)}`;
 
-
     return {
-
       symbol,
-
       status:
         'ERROR',
 
@@ -5290,223 +3857,240 @@ async function scanSymbol(
   }
 }
 
-
-// ============================================================
-// 15M SIGNAL SCANNER
-// ============================================================
-
 async function signalScanLoop() {
-
   if (
     state.scanRunning ||
     state.initializing ||
     !state.marketReady
   ) {
-
     return;
   }
 
-
   const slot =
     currentScanSlot();
-
 
   if (
     !slot ||
     state.lastScanSlot ===
       slot
   ) {
-
     return;
   }
-
 
   state.lastScanSlot =
     slot;
 
-
   state.scanRunning =
     true;
-
 
   state.lastSignalScanAt =
     new Date();
 
-
   state.totalSignalScans++;
-
 
   const scanNumber =
     state.totalSignalScans;
 
-
   console.log(
-
     `🔎 Scan #${scanNumber} | ${INSTRUMENTS.length} instruments | ${TIMEFRAME}`
   );
 
-
   try {
-
     const beforeRaw =
       state.rawSignals;
-
 
     const beforeExecuted =
       state.executedSignals;
 
-
     const beforeSkipped =
       state.skippedSignals;
 
+    const results =
+      await mapWithConcurrency(
+        INSTRUMENTS,
+        OHLC_CONCURRENCY,
+        scanSymbol
+      );
 
-    await mapWithConcurrency(
+    const errors =
+      results.filter(
+        result =>
+          result?.status ===
+          'ERROR'
+      ).length;
 
-      INSTRUMENTS,
-
-      OHLC_CONCURRENCY,
-
-      scanSymbol
-    );
-
+    const warmups =
+      results.filter(
+        result =>
+          result?.status ===
+          'WARMUP'
+      ).length;
 
     console.log(
-
       `✅ Scan #${scanNumber} complete | ` +
-
       `raw=${state.rawSignals - beforeRaw} ` +
-
       `executed=${state.executedSignals - beforeExecuted} ` +
-
-      `skipped=${state.skippedSignals - beforeSkipped}`
+      `skipped=${state.skippedSignals - beforeSkipped} ` +
+      `errors=${errors} ` +
+      `warmup=${warmups}`
     );
-
   } finally {
-
     state.scanRunning =
       false;
   }
 }
 
+async function initializeOneSymbol(
+  symbol
+) {
+  const memory =
+    state.pairState.get(
+      symbol
+    );
 
-// ============================================================
-// INITIALIZE MARKET
-// ============================================================
+  try {
+    const bars =
+      await withTimeout(
+        fetchOhlc(
+          symbol
+        ),
+        INIT_SYMBOL_TIMEOUT_MS,
+        `${symbol} init`
+      );
+
+    memory.bars =
+      bars;
+
+    memory.initialized =
+      bars.length >=
+      MIN_HISTORY;
+
+    memory.lastClosedBarTime =
+      bars[
+        bars.length -
+        1
+      ]?.openTime ||
+      null;
+
+    memory.errors =
+      memory.initialized
+        ? 0
+        : memory.errors +
+          1;
+
+    if (
+      memory.initialized
+    ) {
+      console.log(
+        `✅ INIT ${symbol}: READY | bars=${bars.length}`
+      );
+    } else {
+      console.log(
+        `⚠️ INIT ${symbol}: WARMUP | bars=${bars.length}/${MIN_HISTORY}`
+      );
+    }
+
+    return {
+      symbol,
+
+      ready:
+        memory.initialized,
+
+      bars:
+        bars.length
+    };
+  } catch (
+    error
+  ) {
+    memory.initialized =
+      false;
+
+    memory.errors++;
+
+    const message =
+      safeError(
+        error
+      );
+
+    state.lastMarketError =
+      `${symbol}: ${message}`;
+
+    console.log(
+      `❌ INIT ${symbol}: ${message}`
+    );
+
+    return {
+      symbol,
+      ready: false,
+      bars: 0,
+      error:
+        message
+    };
+  }
+}
 
 async function initializeMarket() {
-
   state.initializing =
     true;
 
-
   console.log(
-
     `⏳ Initializing ${INSTRUMENTS.length} instruments on ${TIMEFRAME}...`
   );
 
-
   const results =
     await mapWithConcurrency(
-
       INSTRUMENTS,
-
       OHLC_CONCURRENCY,
-
-      async symbol => {
-
-        const bars =
-          await fetchOhlc(
-            symbol
-          );
-
-
-        const memory =
-          state.pairState.get(
-            symbol
-          );
-
-
-        memory.bars =
-          bars;
-
-
-        memory.initialized =
-          bars.length >=
-            230;
-
-
-        memory.lastClosedBarTime =
-          bars[
-            bars.length -
-            1
-          ]?.openTime ||
-          null;
-
-
-        return memory.initialized;
-      }
+      initializeOneSymbol
     );
-
 
   const ready =
     results.filter(
       result =>
-        result ===
+        result?.ready ===
         true
     ).length;
 
-
-  state.marketReady =
-    ready >=
+  const minimumReady =
     Math.max(
-
       1,
-
       Math.floor(
-
         INSTRUMENTS.length *
         0.80
       )
     );
 
+  state.marketReady =
+    ready >=
+    minimumReady;
 
   state.initializing =
     false;
 
-
   console.log(
-
     `✅ Market initialized: ${ready}/${INSTRUMENTS.length}`
   );
 
-
   console.log(
-
     state.marketReady
-
-      ? '✅ Market engine READY'
-
-      : '⚠️ Market engine PARTIAL'
+      ? `✅ Market engine READY | minimum=${minimumReady}`
+      : `⚠️ Market engine PARTIAL | minimum=${minimumReady}`
   );
+
+  return {
+    ready,
+    total:
+      INSTRUMENTS.length,
+    minimumReady
+  };
 }
-
-
-// ============================================================
-// EXPRESS
-// ============================================================
 
 const app =
   express();
 
-
 app.disable(
   'x-powered-by'
 );
-
-
-// ============================================================
-// HOME
-// ============================================================
 
 app.get(
   '/',
@@ -5514,7 +4098,6 @@ app.get(
     req,
     res
   ) => {
-
     res
       .type(
         'html'
@@ -5525,58 +4108,24 @@ app.get(
 <head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${VERSION}</title>
-
-<style>
-body{
-font-family:Arial,sans-serif;
-background:#111;
-color:#eee;
-padding:24px
-}
-
-.card{
-max-width:820px;
-margin:auto;
-background:#1b1b1b;
-padding:22px;
-border-radius:14px
-}
-
-.ok{
-color:#61d17c
-}
-
-.warn{
-color:#ffcc66
-}
-
-code{
-color:#8dd7ff
-}
-</style>
 </head>
 
-<body>
+<body style="font-family:Arial;background:#111;color:#eee;padding:24px">
 
-<div class="card">
+<div style="max-width:820px;margin:auto;background:#1b1b1b;padding:22px;border-radius:14px">
 
 <h2>${VERSION}</h2>
 
-<p>
-<b>Mode:</b>
-PAPER ONLY — LIVE TRADING OFF
-</p>
+<p><b>Mode:</b> PAPER ONLY</p>
 
 <p>
 <b>Market:</b>
-<span class="${state.marketReady ? 'ok' : 'warn'}">
 ${state.marketReady ? 'READY' : 'WAIT'}
-</span>
 </p>
 
 <p>
 <b>Timeframe:</b>
-${TIMEFRAME} CLOSED candles
+${TIMEFRAME}
 </p>
 
 <p>
@@ -5590,18 +4139,8 @@ ${state.openTrades.size}
 </p>
 
 <p>
-<b>Paper balance:</b>
+<b>Balance:</b>
 ${fmtMoney(account?.balance ?? PAPER.startingBalance)}
-</p>
-
-<p>
-<b>Core:</b>
-Ultra-Fast V5.1 + SMC/Liquidity/FVG + Retest + Fibonacci
-</p>
-
-<p>
-<b>Risk:</b>
-${PAPER.riskPctPerTrade}% per trade
 </p>
 
 <p>
@@ -5610,13 +4149,8 @@ ${PAPER.riskPctPerTrade}% per trade
 </p>
 
 <p>
-<b>Break-even:</b>
-at +${STRATEGY.breakEvenTriggerR.toFixed(1)}R → SL = Entry
-</p>
-
-<p>
-<b>Provider:</b>
-BiQuote primary
+<b>BE:</b>
++${STRATEGY.breakEvenTriggerR.toFixed(1)}R → SL=Entry
 </p>
 
 </div>
@@ -5627,20 +4161,13 @@ BiQuote primary
   }
 );
 
-
-// ============================================================
-// HEALTH
-// ============================================================
-
 app.get(
   '/health',
   (
     req,
     res
   ) => {
-
     res.json({
-
       ok:
         true,
 
@@ -5689,20 +4216,13 @@ app.get(
   }
 );
 
-
-// ============================================================
-// API STATUS
-// ============================================================
-
 app.get(
   '/api/status',
   (
     req,
     res
   ) => {
-
     res.json({
-
       version:
         VERSION,
 
@@ -5713,7 +4233,6 @@ app.get(
         LIVE_TRADING,
 
       paper: {
-
         startingBalance:
           PAPER.startingBalance,
 
@@ -5746,7 +4265,6 @@ app.get(
       },
 
       engine: {
-
         strategy:
           STRATEGY,
 
@@ -5773,7 +4291,6 @@ app.get(
       },
 
       providers: {
-
         primary:
           'BiQuote',
 
@@ -5786,170 +4303,115 @@ app.get(
   }
 );
 
-
-// ============================================================
-// BOOT
-// ============================================================
-
 async function boot() {
-
   console.log(
     '================================================'
   );
-
 
   console.log(
     `🚀 ${VERSION}`
   );
 
-
   console.log(
     '🧪 PAPER ONLY — LIVE TRADING OFF'
   );
-
 
   console.log(
     `⏱ Timeframe: ${TIMEFRAME} CLOSED candles`
   );
 
-
   console.log(
     `📡 Instruments: ${INSTRUMENTS.length} (30 FX + XAUUSD)`
   );
-
 
   console.log(
     '🧠 Core: V5.1 + SMC Sniper + FVG + Liquidity Sweep + Retest + Fibonacci'
   );
 
-
   console.log(
-
     `🎯 R:R 1:${STRATEGY.riskReward.toFixed(1)} | ` +
-
     `BE at +${STRATEGY.breakEvenTriggerR.toFixed(1)}R`
   );
-
 
   console.log(
     '================================================'
   );
 
-
   app.listen(
     PORT,
     () => {
-
       console.log(
         `🌐 Health server on port ${PORT}`
       );
     }
   );
 
-
   await initMongo();
-
 
   await initTelegram();
 
-
   try {
-
     await initializeMarket();
-
   } catch (
     error
   ) {
-
     state.initializing =
       false;
 
-
     state.marketReady =
       false;
-
 
     state.lastMarketError =
       safeError(
         error
       );
 
-
     console.error(
-
       '❌ Market initialization:',
-
       state.lastMarketError
     );
   }
 
-
   setInterval(
-
     signalScanLoop,
-
     SCAN_TIMER_MS
   );
 
-
   setInterval(
-
     quotePollLoop,
-
     QUOTE_POLL_MS
   );
-
 
   console.log(
     '✅ LOMY Forex loops started'
   );
 }
 
-
-// ============================================================
-// SHUTDOWN
-// ============================================================
-
 async function shutdown(
   signal
 ) {
-
   console.log(
-
     `\n🛑 ${signal} received — shutting down`
   );
 
-
   try {
-
     if (
       bot
     ) {
-
       bot.stop(
         signal
       );
     }
-
-  } catch (
-    error
-  ) {}
-
+  } catch {}
 
   try {
-
     await mongoose.connection.close();
-
-  } catch (
-    error
-  ) {}
-
+  } catch {}
 
   process.exit(
     0
   );
 }
-
 
 process.once(
   'SIGINT',
@@ -5959,7 +4421,6 @@ process.once(
     )
 );
 
-
 process.once(
   'SIGTERM',
   () =>
@@ -5968,31 +4429,23 @@ process.once(
     )
 );
 
-
 process.on(
   'unhandledRejection',
   error => {
-
     console.error(
-
       'Unhandled rejection:',
-
       safeError(
         error
       )
     );
   }
 );
-
 
 process.on(
   'uncaughtException',
   error => {
-
     console.error(
-
       'Uncaught exception:',
-
       safeError(
         error
       )
@@ -6000,19 +4453,14 @@ process.on(
   }
 );
 
-
 boot().catch(
   error => {
-
     console.error(
-
       'FATAL:',
-
       safeError(
         error
       )
     );
-
 
     process.exit(
       1
