@@ -5,35 +5,26 @@ const express = require('express');
 const mongoose = require('mongoose');
 const { Telegraf } = require('telegraf');
 
-const VERSION = 'LOMY FOREX V1.2.3';
+const VERSION = 'LOMY FOREX V1.2.4';
 const MODE = 'PAPER';
 const LIVE_TRADING = false;
 
 const PORT = Number(process.env.PORT || 10000);
-
-const TELEGRAM_BOT_TOKEN = String(
-  process.env.TELEGRAM_BOT_TOKEN || ''
-).trim();
-
-const MONGODB_URI = String(
-  process.env.MONGODB_URI || ''
-).trim();
-
-const TWELVE_DATA_API_KEY = String(
-  process.env.TWELVE_DATA_API_KEY || ''
-).trim();
+const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
+const TWELVE_DATA_API_KEY = String(process.env.TWELVE_DATA_API_KEY || '').trim();
 
 const BIQUOTE_BASE = 'https://biquote.io';
-
 const TIMEFRAME = '15m';
 const HISTORY_LIMIT = 260;
-
 const CORE_MIN_HISTORY = 60;
 const EMA200_CONTEXT_HISTORY = 200;
 
 const OHLC_CONCURRENCY = 4;
 const QUOTE_POLL_MS = 3000;
 const SCAN_TIMER_MS = 4000;
+
+const JOURNAL_COLLECTION = 'lomyforexjournalv124';
 
 
 // ============================================================
@@ -84,11 +75,11 @@ const INSTRUMENTS = [
 
 // ============================================================
 // STRATEGY
+// V1.2.3 SIGNAL ENGINE FROZEN
 // ============================================================
 
 const STRATEGY = Object.freeze({
 
-  // Ultra-Fast V5.1
   cmoLen: 9,
   cmoBuyThresh: 30,
   cmoSellThresh: -30,
@@ -106,19 +97,16 @@ const STRATEGY = Object.freeze({
 
   bodyRatioMin: 0.50,
 
-  // Money Management
   riskReward: 1.20,
   breakEvenTriggerR: 0.60,
 
-  // Anti-chase
   maxEntryMoveAtr: 0.50,
 
-  // Retest + Fib
   retestLookback: 8,
+
   fibLookback: 40,
   fibToleranceAtr: 0.20,
 
-  // SMC
   smcFastEmaLen: 50,
   smcSlowEmaLen: 200,
 
@@ -128,17 +116,9 @@ const STRATEGY = Object.freeze({
   pivotLeft: 5,
   pivotRight: 5,
 
-  // ==========================================================
-  // V1.2.3 DATA-DRIVEN ENTRY PROTECTION
-  // ==========================================================
-
-  // BUY + Bull FVG was weak in V1.2.2 sample.
+  // V1.2.3 PROTECTION — UNCHANGED
   rejectBullFvgBuys: true,
-
-  // Reject overextended BUY momentum.
   buyCmoMax: 80,
-
-  // SELL must have CMO <= -40.
   sellCmoMax: -40
 });
 
@@ -149,14 +129,20 @@ const STRATEGY = Object.freeze({
 
 const PAPER = Object.freeze({
 
-  startingBalance: 1000,
+  // NEW CLEAN ACCOUNT
+  startingBalance: 300,
 
+  // $1.50 initial risk when balance = $300
   riskPctPerTrade: 0.50,
+
+  // Maximum combined open capital risk
+  portfolioRiskCapPct: 4.00,
 
   maxOpenTrades: 31,
 
-  accountKey:
-    'lomy-forex-v120-smc-be-12r'
+  // NEW ACCOUNT KEY
+  // Prevents old $1000 account from being restored.
+  accountKey: 'lomy-forex-v124-300usd'
 });
 
 
@@ -166,68 +152,44 @@ const PAPER = Object.freeze({
 
 const state = {
 
-  startedAt:
-    new Date(),
+  startedAt: new Date(),
 
-  mongoReady:
-    false,
+  mongoReady: false,
+  telegramReady: false,
+  marketReady: false,
 
-  telegramReady:
-    false,
+  initializing: true,
 
-  marketReady:
-    false,
+  scanRunning: false,
+  quoteRunning: false,
 
-  initializing:
-    true,
+  lastScanSlot: null,
 
-  scanRunning:
-    false,
+  lastSignalScanAt: null,
+  lastQuotePollAt: null,
 
-  quoteRunning:
-    false,
+  lastMarketError: null,
 
-  lastScanSlot:
-    null,
+  totalSignalScans: 0,
+  totalQuotePolls: 0,
 
-  lastSignalScanAt:
-    null,
+  rawSignals: 0,
+  executedSignals: 0,
+  skippedSignals: 0,
 
-  lastQuotePollAt:
-    null,
+  breakEvenMoves: 0,
 
-  lastMarketError:
-    null,
+  protectionRejects: 0,
 
-  totalSignalScans:
-    0,
+  portfolioRiskRejects: 0,
 
-  totalQuotePolls:
-    0,
+  journalEvents: 0,
 
-  rawSignals:
-    0,
+  pairState: new Map(),
 
-  executedSignals:
-    0,
+  latestQuotes: new Map(),
 
-  skippedSignals:
-    0,
-
-  breakEvenMoves:
-    0,
-
-  protectionRejects:
-    0,
-
-  pairState:
-    new Map(),
-
-  latestQuotes:
-    new Map(),
-
-  openTrades:
-    new Map()
+  openTrades: new Map()
 };
 
 
@@ -238,20 +200,15 @@ for (const symbol of INSTRUMENTS) {
     {
       bars: [],
 
-      lastClosedBarTime:
-        null,
+      lastClosedBarTime: null,
 
-      lastSignal:
-        0,
+      lastSignal: 0,
 
-      lastAnalysis:
-        null,
+      lastAnalysis: null,
 
-      initialized:
-        false,
+      initialized: false,
 
-      errors:
-        0
+      errors: 0
     }
   );
 }
@@ -386,7 +343,7 @@ function barTimeMs(
 
 
 // ============================================================
-// BAR NORMALIZATION
+// BARS
 // ============================================================
 
 function normalizeBars(
@@ -666,10 +623,12 @@ function emaLast(
 
 
   return series.length
+
     ? series[
         series.length -
         1
       ]
+
     : NaN;
 }
 
@@ -1210,7 +1169,7 @@ function dmiAdx(
 
 
 // ============================================================
-// RETEST CONTEXT
+// RETEST
 // ============================================================
 
 function retestContext(
@@ -1308,7 +1267,7 @@ function retestContext(
 
 
 // ============================================================
-// FIBONACCI CONTEXT
+// FIBONACCI
 // ============================================================
 
 function fibContext(
@@ -1562,7 +1521,6 @@ function smcContext(
     0;
 
 
-  // EMA 50 / 200 context
   if (
     Number.isFinite(
       ema200
@@ -1614,7 +1572,6 @@ function smcContext(
   }
 
 
-  // ADX context
   const adxAligned =
     Number.isFinite(
       dmi.adx
@@ -1654,7 +1611,6 @@ function smcContext(
   }
 
 
-  // Liquidity Sweep
   const sweepWindow =
     prior.slice(
       -10
@@ -1720,7 +1676,6 @@ function smcContext(
   }
 
 
-  // FVG
   let bullFvg =
     false;
 
@@ -1950,38 +1905,22 @@ function analyzeBars(
       STRATEGY.volMult;
 
 
-  const bullMomentum =
-    momentum >
-    STRATEGY.cmoBuyThresh;
-
-
-  const bearMomentum =
-    momentum <
-    STRATEGY.cmoSellThresh;
-
-
-  const bullTrend =
-    ema9 >
-    ema21;
-
-
-  const bearTrend =
-    ema9 <
-    ema21;
-
-
   const rawBuy =
     strongBull &&
     highVolume &&
-    bullMomentum &&
-    bullTrend;
+    momentum >
+      STRATEGY.cmoBuyThresh &&
+    ema9 >
+      ema21;
 
 
   const rawSell =
     strongBear &&
     highVolume &&
-    bearMomentum &&
-    bearTrend;
+    momentum <
+      STRATEGY.cmoSellThresh &&
+    ema9 <
+      ema21;
 
 
   let direction =
@@ -2210,7 +2149,7 @@ function analyzeBars(
 
 
 // ============================================================
-// V1.2.3 ENTRY PROTECTION
+// V1.2.3 ENTRY PROTECTION — FROZEN
 // ============================================================
 
 function entryProtectionReason(
@@ -2234,7 +2173,6 @@ function entryProtectionReason(
       : [];
 
 
-  // BUY FILTERS
   if (
     analysis.direction ===
     'BUY'
@@ -2266,7 +2204,6 @@ function entryProtectionReason(
   }
 
 
-  // SELL FILTERS
   if (
     analysis.direction ===
     'SELL'
@@ -2303,13 +2240,13 @@ const http =
     headers: {
 
       'User-Agent':
-        'LOMY-Forex-Paper/1.2.3'
+        'LOMY-Forex-Paper/1.2.4'
     }
   });
 
 
 // ============================================================
-// BIQUOTE OHLC
+// OHLC
 // ============================================================
 
 async function fetchOhlc(
@@ -2323,6 +2260,7 @@ async function fetchOhlc(
 
       {
         params: {
+
           interval:
             TIMEFRAME,
 
@@ -2470,6 +2408,7 @@ async function fetchSingleQuote(
 
         {
           params: {
+
             allowStale:
               false
           }
@@ -2724,6 +2663,7 @@ const accountSchema =
   new mongoose.Schema({
 
     accountKey: {
+
       type:
         String,
 
@@ -2765,6 +2705,7 @@ const accountSchema =
       Date
 
   }, {
+
     minimize:
       false
   });
@@ -2777,6 +2718,7 @@ const tradeSchema =
       String,
 
     accountKey: {
+
       type:
         String,
 
@@ -2785,6 +2727,7 @@ const tradeSchema =
     },
 
     symbol: {
+
       type:
         String,
 
@@ -2796,6 +2739,7 @@ const tradeSchema =
       String,
 
     status: {
+
       type:
         String,
 
@@ -2885,10 +2829,42 @@ const tradeSchema =
     resultR:
       Number,
 
+    // ========================================================
+    // V1.2.4 PATH TELEMETRY
+    // ========================================================
+
+    mfeR:
+      Number,
+
+    maeR:
+      Number,
+
+    mfePrice:
+      Number,
+
+    maePrice:
+      Number,
+
+    mfeAt:
+      Date,
+
+    maeAt:
+      Date,
+
+    beActivatedAt:
+      Date,
+
+    lastMarkPrice:
+      Number,
+
+    lastMarkAt:
+      Date,
+
     analysis:
       mongoose.Schema.Types.Mixed
 
   }, {
+
     minimize:
       false
   });
@@ -2901,6 +2877,7 @@ const signalSchema =
       String,
 
     accountKey: {
+
       type:
         String,
 
@@ -2961,6 +2938,62 @@ const signalSchema =
       mongoose.Schema.Types.Mixed
 
   }, {
+
+    minimize:
+      false
+  });
+
+
+const journalSchema =
+  new mongoose.Schema({
+
+    version:
+      String,
+
+    accountKey: {
+
+      type:
+        String,
+
+      index:
+        true
+    },
+
+    eventType: {
+
+      type:
+        String,
+
+      index:
+        true
+    },
+
+    createdAt: {
+
+      type:
+        Date,
+
+      index:
+        true
+    },
+
+    symbol:
+      String,
+
+    direction:
+      String,
+
+    tradeId:
+      mongoose.Schema.Types.ObjectId,
+
+    message:
+      String,
+
+    data:
+      mongoose.Schema.Types.Mixed
+
+  }, {
+
     minimize:
       false
   });
@@ -2971,37 +3004,109 @@ const signalSchema =
 // ============================================================
 
 const Account =
-  mongoose.models.LomyForexPaperAccount ||
+  mongoose.models.LomyForexPaperAccountV124 ||
 
   mongoose.model(
-    'LomyForexPaperAccount',
+    'LomyForexPaperAccountV124',
     accountSchema,
     'lomyforexpaperaccounts'
   );
 
 
 const Trade =
-  mongoose.models.LomyForexTrade ||
+  mongoose.models.LomyForexTradeV124 ||
 
   mongoose.model(
-    'LomyForexTrade',
+    'LomyForexTradeV124',
     tradeSchema,
     'lomyforextrades'
   );
 
 
 const Signal =
-  mongoose.models.LomyForexSignal ||
+  mongoose.models.LomyForexSignalV124 ||
 
   mongoose.model(
-    'LomyForexSignal',
+    'LomyForexSignalV124',
     signalSchema,
     'lomyforexsignals'
   );
 
 
+const Journal =
+  mongoose.models.LomyForexJournalV124 ||
+
+  mongoose.model(
+    'LomyForexJournalV124',
+    journalSchema,
+    JOURNAL_COLLECTION
+  );
+
+
 let account =
   null;
+
+
+let bot =
+  null;
+
+
+// ============================================================
+// JOURNAL
+// ============================================================
+
+async function journal(
+  eventType,
+  {
+    symbol = '',
+    direction = '',
+    tradeId = null,
+    message = '',
+    data = {}
+  } = {}
+) {
+
+  try {
+
+    await Journal.create({
+
+      version:
+        VERSION,
+
+      accountKey:
+        PAPER.accountKey,
+
+      eventType,
+
+      createdAt:
+        new Date(),
+
+      symbol,
+
+      direction,
+
+      tradeId,
+
+      message,
+
+      data
+    });
+
+
+    state.journalEvents++;
+
+  } catch (
+    error
+  ) {
+
+    console.error(
+      'Journal:',
+      safeError(
+        error
+      )
+    );
+  }
+}
 
 
 // ============================================================
@@ -3021,7 +3126,9 @@ async function initMongo() {
 
 
   await mongoose.connect(
+
     MONGODB_URI,
+
     {
       serverSelectionTimeoutMS:
         15000
@@ -3040,6 +3147,7 @@ async function initMongo() {
 
   account =
     await Account.findOne({
+
       accountKey:
         PAPER.accountKey
     });
@@ -3076,6 +3184,9 @@ async function initMongo() {
         breakeven:
           0,
 
+        telegramChatId:
+          null,
+
         createdAt:
           new Date(),
 
@@ -3102,6 +3213,20 @@ async function initMongo() {
     of openTrades
   ) {
 
+    trade.mfeR =
+      n(
+        trade.mfeR,
+        0
+      );
+
+
+    trade.maeR =
+      n(
+        trade.maeR,
+        0
+      );
+
+
     state.openTrades.set(
       trade.symbol,
       trade
@@ -3111,6 +3236,24 @@ async function initMongo() {
 
   console.log(
     `✅ Restored ${openTrades.length} open PAPER trade(s)`
+  );
+
+
+  await journal(
+    'MONGO_READY',
+    {
+      message:
+        'Mongo connected and account restored',
+
+      data: {
+
+        balance:
+          account.balance,
+
+        openTrades:
+          openTrades.length
+      }
+    }
   );
 }
 
@@ -3133,12 +3276,123 @@ async function saveAccount() {
 
 
 // ============================================================
-// TELEGRAM
+// PORTFOLIO RISK
 // ============================================================
 
-let bot =
-  null;
+function currentPortfolioRiskUsd() {
 
+  let total =
+    0;
+
+
+  for (
+    const trade
+    of state.openTrades.values()
+  ) {
+
+    // Once BE is active there is no initial downside
+    // beyond execution spread / quote gaps.
+    if (
+      trade.breakEvenActive
+    ) {
+      continue;
+    }
+
+
+    const entry =
+      n(
+        trade.entryPrice
+      );
+
+
+    const stop =
+      n(
+        trade.stopLoss
+      );
+
+
+    const distance =
+      n(
+        trade.riskDistance
+      );
+
+
+    const riskAmount =
+      n(
+        trade.riskAmount,
+        0
+      );
+
+
+    if (
+      !Number.isFinite(
+        entry
+      ) ||
+
+      !Number.isFinite(
+        stop
+      ) ||
+
+      !(
+        distance >
+        0
+      ) ||
+
+      !(
+        riskAmount >
+        0
+      )
+    ) {
+      continue;
+    }
+
+
+    const remainingFraction =
+      Math.min(
+        1,
+
+        Math.max(
+          0,
+
+          Math.abs(
+            entry -
+            stop
+          ) /
+          distance
+        )
+      );
+
+
+    total +=
+      riskAmount *
+      remainingFraction;
+  }
+
+
+  return total;
+}
+
+
+function portfolioRiskCapUsd() {
+
+  const balance =
+    n(
+      account?.balance,
+      PAPER.startingBalance
+    );
+
+
+  return (
+    balance *
+    PAPER.portfolioRiskCapPct /
+    100
+  );
+}
+
+
+// ============================================================
+// TELEGRAM
+// ============================================================
 
 async function sendTelegram(
   text
@@ -3217,7 +3471,12 @@ async function initTelegram() {
 
 
       await ctx.reply(
-        `✅ ${VERSION}\nPAPER ONLY`
+
+        `✅ ${VERSION}\n` +
+
+        `PAPER ONLY\n` +
+
+        `Balance: ${fmtMoney(account.balance)}`
       );
     }
   );
@@ -3235,11 +3494,9 @@ async function initTelegram() {
 
         `Market: ${state.marketReady ? 'READY' : 'WAIT'}\n` +
 
-        `Pairs ready: ${pairReadyCount()}/${INSTRUMENTS.length}\n` +
+        `Pairs: ${pairReadyCount()}/${INSTRUMENTS.length}\n` +
 
-        `Open trades: ${state.openTrades.size}\n` +
-
-        `Scans: ${state.totalSignalScans}\n` +
+        `Open: ${state.openTrades.size}\n` +
 
         `Signals: ${state.rawSignals}\n` +
 
@@ -3249,11 +3506,15 @@ async function initTelegram() {
 
         `Protection rejects: ${state.protectionRejects}\n` +
 
+        `Portfolio rejects: ${state.portfolioRiskRejects}\n` +
+
         `BE moves: ${state.breakEvenMoves}\n` +
 
-        `TP: ${STRATEGY.riskReward.toFixed(1)}R\n` +
+        `Journal events: ${state.journalEvents}\n` +
 
-        `Break-even: +${STRATEGY.breakEvenTriggerR.toFixed(1)}R`
+        `Risk: ${PAPER.riskPctPerTrade}%\n` +
+
+        `Portfolio cap: ${PAPER.portfolioRiskCapPct}%`
       );
     }
   );
@@ -3269,7 +3530,11 @@ async function initTelegram() {
 
         `Balance: ${fmtMoney(account?.balance)}\n` +
 
-        `Realized PnL: ${fmtMoney(account?.realizedPnl)}`
+        `Realized PnL: ${fmtMoney(account?.realizedPnl)}\n` +
+
+        `Open Risk: ${fmtMoney(currentPortfolioRiskUsd())}\n` +
+
+        `Risk Cap: ${fmtMoney(portfolioRiskCapUsd())}`
       );
     }
   );
@@ -3302,7 +3567,12 @@ async function initTelegram() {
     async ctx => {
 
       await ctx.reply(
-        `📡 ${INSTRUMENTS.length} instruments\n${INSTRUMENTS.join(', ')}`
+
+        `📡 ${INSTRUMENTS.length} instruments\n` +
+
+        INSTRUMENTS.join(
+          ', '
+        )
       );
     }
   );
@@ -3330,7 +3600,7 @@ async function initTelegram() {
       }
 
 
-      const lines =
+      const message =
         positions.map(
           trade =>
 
@@ -3340,16 +3610,20 @@ async function initTelegram() {
 
             `SL ${fmtPrice(trade.stopLoss, trade.symbol)} | ` +
 
-            `TP ${fmtPrice(trade.takeProfit, trade.symbol)} | ` +
+            `TP ${fmtPrice(trade.takeProfit, trade.symbol)}\n` +
 
-            `BE ${trade.breakEvenActive ? 'ON' : 'OFF'}`
+            `BE ${trade.breakEvenActive ? 'ON' : 'OFF'} | ` +
+
+            `MFE ${n(trade.mfeR, 0).toFixed(2)}R | ` +
+
+            `MAE ${n(trade.maeR, 0).toFixed(2)}R`
+        ).join(
+          '\n\n'
         );
 
 
       await ctx.reply(
-        lines.join(
-          '\n\n'
-        )
+        message
       );
     }
   );
@@ -3400,7 +3674,12 @@ async function initTelegram() {
 
             `${trade.exitReason} ` +
 
-            `${n(trade.resultR, 0).toFixed(2)}R`
+            `${n(trade.resultR, 0).toFixed(2)}R | ` +
+
+            `MFE ${n(trade.mfeR, 0).toFixed(2)}R | ` +
+
+            `MAE ${n(trade.maeR, 0).toFixed(2)}R`
+
         ).join(
           '\n'
         )
@@ -3448,7 +3727,7 @@ async function initTelegram() {
 
 
 // ============================================================
-// SIGNAL JOURNAL
+// SIGNAL + JOURNAL
 // ============================================================
 
 async function recordSignal(
@@ -3457,68 +3736,73 @@ async function recordSignal(
   skipReason = ''
 ) {
 
+  const payload = {
+
+    version:
+      VERSION,
+
+    accountKey:
+      PAPER.accountKey,
+
+    symbol:
+      analysis.symbol,
+
+    direction:
+      analysis.direction,
+
+    signalPrice:
+      analysis.signalClose,
+
+    signalBarTime:
+      String(
+        analysis.signalBarTime ||
+        ''
+      ),
+
+    cmo:
+      analysis.cmo,
+
+    atr:
+      analysis.atr,
+
+    bodyRatio:
+      analysis.bodyRatio,
+
+    volume:
+      analysis.volume,
+
+    volumeAvg:
+      analysis.volumeAvg,
+
+    volumeRatio:
+      analysis.volumeRatio,
+
+    qualityScore:
+      analysis.qualityScore,
+
+    quality:
+      analysis.quality,
+
+    reasons:
+      analysis.reasons ||
+      [],
+
+    createdAt:
+      new Date(),
+
+    executed,
+
+    skipReason,
+
+    analysis
+  };
+
+
   try {
 
-    await Signal.create({
-
-      version:
-        VERSION,
-
-      accountKey:
-        PAPER.accountKey,
-
-      symbol:
-        analysis.symbol,
-
-      direction:
-        analysis.direction,
-
-      signalPrice:
-        analysis.signalClose,
-
-      signalBarTime:
-        String(
-          analysis.signalBarTime ||
-          ''
-        ),
-
-      cmo:
-        analysis.cmo,
-
-      atr:
-        analysis.atr,
-
-      bodyRatio:
-        analysis.bodyRatio,
-
-      volume:
-        analysis.volume,
-
-      volumeAvg:
-        analysis.volumeAvg,
-
-      volumeRatio:
-        analysis.volumeRatio,
-
-      qualityScore:
-        analysis.qualityScore,
-
-      quality:
-        analysis.quality,
-
-      reasons:
-        analysis.reasons ||
-        [],
-
-      createdAt:
-        new Date(),
-
-      executed,
-
-      skipReason,
-
-      analysis
-    });
+    await Signal.create(
+      payload
+    );
 
   } catch (
     error
@@ -3531,11 +3815,68 @@ async function recordSignal(
       )
     );
   }
+
+
+  await journal(
+
+    executed
+      ? 'SIGNAL_EXECUTED'
+      : 'SIGNAL_REJECTED',
+
+    {
+
+      symbol:
+        analysis.symbol,
+
+      direction:
+        analysis.direction,
+
+      message:
+        skipReason ||
+        'EXECUTED',
+
+      data: {
+
+        signalPrice:
+          analysis.signalClose,
+
+        cmo:
+          analysis.cmo,
+
+        atr:
+          analysis.atr,
+
+        bodyRatio:
+          analysis.bodyRatio,
+
+        volume:
+          analysis.volume,
+
+        volumeAvg:
+          analysis.volumeAvg,
+
+        volumeRatio:
+          analysis.volumeRatio,
+
+        qualityScore:
+          analysis.qualityScore,
+
+        quality:
+          analysis.quality,
+
+        reasons:
+          analysis.reasons ||
+          [],
+
+        skipReason
+      }
+    }
+  );
 }
 
 
 // ============================================================
-// BUILD EXECUTION LEVELS
+// EXECUTION LEVELS
 // ============================================================
 
 function buildExecutionLevels(
@@ -3555,6 +3896,7 @@ function buildExecutionLevels(
     !Number.isFinite(
       atr
     ) ||
+
     atr <=
       0
   ) {
@@ -3729,9 +4071,13 @@ function buildExecutionLevels(
   return {
 
     entry,
+
     stopLoss,
+
     takeProfit,
+
     riskDistance,
+
     breakEvenTriggerPrice
   };
 }
@@ -3874,9 +4220,75 @@ async function openPaperTrade(
     100;
 
 
+  // ========================================================
+  // PORTFOLIO RISK CAP
+  // ========================================================
+
+  const currentRisk =
+    currentPortfolioRiskUsd();
+
+
+  const riskCap =
+    portfolioRiskCapUsd();
+
+
+  if (
+    currentRisk +
+    riskAmount >
+    riskCap +
+    0.000000001
+  ) {
+
+    state.skippedSignals++;
+
+
+    state.portfolioRiskRejects++;
+
+
+    await recordSignal(
+      analysis,
+      false,
+      'PORTFOLIO_RISK_CAP'
+    );
+
+
+    await journal(
+      'PORTFOLIO_RISK_REJECT',
+      {
+
+        symbol,
+
+        direction,
+
+        message:
+          'Portfolio risk cap blocked entry',
+
+        data: {
+
+          balance,
+
+          currentRisk,
+
+          requestedRisk:
+            riskAmount,
+
+          riskCap
+        }
+      }
+    );
+
+
+    return false;
+  }
+
+
   const quantity =
     riskAmount /
     levels.riskDistance;
+
+
+  const now =
+    new Date();
 
 
   const tradeDocument =
@@ -3961,7 +4373,34 @@ async function openPaperTrade(
         analysis.bodyRatio,
 
       openedAt:
-        new Date(),
+        now,
+
+      mfeR:
+        0,
+
+      maeR:
+        0,
+
+      mfePrice:
+        levels.entry,
+
+      maePrice:
+        levels.entry,
+
+      mfeAt:
+        now,
+
+      maeAt:
+        now,
+
+      beActivatedAt:
+        null,
+
+      lastMarkPrice:
+        levels.entry,
+
+      lastMarkAt:
+        now,
 
       analysis
     });
@@ -3987,6 +4426,80 @@ async function openPaperTrade(
   );
 
 
+  await journal(
+    'TRADE_OPEN',
+    {
+
+      symbol,
+
+      direction,
+
+      tradeId:
+        trade._id,
+
+      message:
+        'Paper trade opened',
+
+      data: {
+
+        entry:
+          levels.entry,
+
+        stopLoss:
+          levels.stopLoss,
+
+        takeProfit:
+          levels.takeProfit,
+
+        breakEvenTriggerPrice:
+          levels.breakEvenTriggerPrice,
+
+        riskDistance:
+          levels.riskDistance,
+
+        riskAmount,
+
+        quantity,
+
+        portfolioRiskBefore:
+          currentRisk,
+
+        portfolioRiskAfter:
+          currentRisk +
+          riskAmount,
+
+        portfolioRiskCap:
+          riskCap,
+
+        cmo:
+          analysis.cmo,
+
+        volume:
+          analysis.volume,
+
+        volumeAvg:
+          analysis.volumeAvg,
+
+        volumeRatio:
+          analysis.volumeRatio,
+
+        bodyRatio:
+          analysis.bodyRatio,
+
+        quality:
+          analysis.quality,
+
+        qualityScore:
+          analysis.qualityScore,
+
+        reasons:
+          analysis.reasons ||
+          []
+      }
+    }
+  );
+
+
   await sendTelegram(
 
     `${direction === 'BUY' ? '🟢' : '🔴'} ${symbol} ${direction} — PAPER\n` +
@@ -3999,9 +4512,11 @@ async function openPaperTrade(
 
     `BE: ${fmtPrice(levels.breakEvenTriggerPrice, symbol)} (+${STRATEGY.breakEvenTriggerR.toFixed(1)}R)\n` +
 
+    `Risk: ${fmtMoney(riskAmount)}\n` +
+
     `Quality: ${analysis.quality} ${analysis.qualityScore}/12\n` +
 
-    `CMO: ${analysis.cmo.toFixed(1)}\n` +
+    `CMO: ${n(analysis.cmo, 0).toFixed(1)}\n` +
 
     `Volume: ${
       Number.isFinite(
@@ -4024,6 +4539,201 @@ async function openPaperTrade(
 
 
   return true;
+}
+
+
+// ============================================================
+// TRADE MARK PRICE
+// ============================================================
+
+function markPriceForTrade(
+  trade,
+  quote
+) {
+
+  return trade.direction ===
+    'BUY'
+
+    ? quote.bid
+
+    : quote.ask;
+}
+
+
+// ============================================================
+// CURRENT R
+// ============================================================
+
+function currentR(
+  trade,
+  quote
+) {
+
+  const price =
+    markPriceForTrade(
+      trade,
+      quote
+    );
+
+
+  const move =
+    trade.direction ===
+    'BUY'
+
+      ? price -
+        trade.entryPrice
+
+      : trade.entryPrice -
+        price;
+
+
+  return move /
+    trade.riskDistance;
+}
+
+
+// ============================================================
+// MFE / MAE
+// ============================================================
+
+async function updateExcursions(
+  symbol,
+  trade,
+  quote
+) {
+
+  const price =
+    markPriceForTrade(
+      trade,
+      quote
+    );
+
+
+  const r =
+    currentR(
+      trade,
+      quote
+    );
+
+
+  const now =
+    new Date();
+
+
+  let changed =
+    false;
+
+
+  trade.lastMarkPrice =
+    price;
+
+
+  trade.lastMarkAt =
+    now;
+
+
+  if (
+    !Number.isFinite(
+      trade.mfeR
+    ) ||
+
+    r >
+      trade.mfeR
+  ) {
+
+    trade.mfeR =
+      r;
+
+
+    trade.mfePrice =
+      price;
+
+
+    trade.mfeAt =
+      now;
+
+
+    changed =
+      true;
+  }
+
+
+  if (
+    !Number.isFinite(
+      trade.maeR
+    ) ||
+
+    r <
+      trade.maeR
+  ) {
+
+    trade.maeR =
+      r;
+
+
+    trade.maePrice =
+      price;
+
+
+    trade.maeAt =
+      now;
+
+
+    changed =
+      true;
+  }
+
+
+  state.openTrades.set(
+    symbol,
+    trade
+  );
+
+
+  // Persist only when MFE/MAE changes.
+  // Reduces Mongo writes during 3-second quote polling.
+  if (
+    changed
+  ) {
+
+    await Trade.updateOne(
+      {
+        _id:
+          trade._id,
+
+        status:
+          'OPEN'
+      },
+      {
+        $set: {
+
+          mfeR:
+            trade.mfeR,
+
+          maeR:
+            trade.maeR,
+
+          mfePrice:
+            trade.mfePrice,
+
+          maePrice:
+            trade.maePrice,
+
+          mfeAt:
+            trade.mfeAt,
+
+          maeAt:
+            trade.maeAt,
+
+          lastMarkPrice:
+            price,
+
+          lastMarkAt:
+            now
+        }
+      }
+    );
+  }
 }
 
 
@@ -4051,6 +4761,10 @@ async function activateBreakEven(
     trade.entryPrice;
 
 
+  trade.beActivatedAt =
+    new Date();
+
+
   state.breakEvenMoves++;
 
 
@@ -4063,15 +4777,58 @@ async function activateBreakEven(
   await Trade.updateOne(
     {
       _id:
-        trade._id
+        trade._id,
+
+      status:
+        'OPEN'
     },
     {
       $set: {
+
         breakEvenActive:
           true,
 
         stopLoss:
-          trade.entryPrice
+          trade.entryPrice,
+
+        beActivatedAt:
+          trade.beActivatedAt
+      }
+    }
+  );
+
+
+  await journal(
+    'BREAK_EVEN_ACTIVATED',
+    {
+
+      symbol,
+
+      direction:
+        trade.direction,
+
+      tradeId:
+        trade._id,
+
+      message:
+        'Stop moved to exact entry',
+
+      data: {
+
+        entry:
+          trade.entryPrice,
+
+        mfeR:
+          n(
+            trade.mfeR,
+            0
+          ),
+
+        maeR:
+          n(
+            trade.maeR,
+            0
+          )
       }
     }
   );
@@ -4127,6 +4884,10 @@ async function closePaperTrade(
   const pnl =
     trade.riskAmount *
     resultR;
+
+
+  const closedAt =
+    new Date();
 
 
   account.balance =
@@ -4199,7 +4960,10 @@ async function closePaperTrade(
   await Trade.updateOne(
     {
       _id:
-        trade._id
+        trade._id,
+
+      status:
+        'OPEN'
     },
     {
       $set: {
@@ -4207,8 +4971,7 @@ async function closePaperTrade(
         status:
           'CLOSED',
 
-        closedAt:
-          new Date(),
+        closedAt,
 
         exitPrice,
 
@@ -4223,7 +4986,37 @@ async function closePaperTrade(
           trade.stopLoss,
 
         breakEvenActive:
-          trade.breakEvenActive
+          trade.breakEvenActive,
+
+        mfeR:
+          n(
+            trade.mfeR,
+            0
+          ),
+
+        maeR:
+          n(
+            trade.maeR,
+            0
+          ),
+
+        mfePrice:
+          trade.mfePrice,
+
+        maePrice:
+          trade.maePrice,
+
+        mfeAt:
+          trade.mfeAt,
+
+        maeAt:
+          trade.maeAt,
+
+        lastMarkPrice:
+          exitPrice,
+
+        lastMarkAt:
+          closedAt
       }
     }
   );
@@ -4231,6 +5024,82 @@ async function closePaperTrade(
 
   state.openTrades.delete(
     symbol
+  );
+
+
+  const openedAtMs =
+    new Date(
+      trade.openedAt
+    ).getTime();
+
+
+  const durationMinutes =
+    Number.isFinite(
+      openedAtMs
+    )
+
+      ? (
+        closedAt.getTime() -
+        openedAtMs
+      ) /
+      60000
+
+      : null;
+
+
+  await journal(
+    'TRADE_CLOSE',
+    {
+
+      symbol,
+
+      direction:
+        trade.direction,
+
+      tradeId:
+        trade._id,
+
+      message:
+        reason,
+
+      data: {
+
+        entryPrice:
+          trade.entryPrice,
+
+        exitPrice,
+
+        resultR,
+
+        pnl,
+
+        balance:
+          account.balance,
+
+        mfeR:
+          n(
+            trade.mfeR,
+            0
+          ),
+
+        maeR:
+          n(
+            trade.maeR,
+            0
+          ),
+
+        mfePrice:
+          trade.mfePrice,
+
+        maePrice:
+          trade.maePrice,
+
+        breakEvenActive:
+          trade.breakEvenActive,
+
+        durationMinutes
+      }
+    }
   );
 
 
@@ -4246,42 +5115,12 @@ async function closePaperTrade(
 
     `PnL: ${fmtMoney(pnl)}\n` +
 
+    `MFE: ${n(trade.mfeR, 0).toFixed(2)}R\n` +
+
+    `MAE: ${n(trade.maeR, 0).toFixed(2)}R\n` +
+
     `Balance: ${fmtMoney(account.balance)}`
   );
-}
-
-
-// ============================================================
-// CURRENT R
-// ============================================================
-
-function currentR(
-  trade,
-  quote
-) {
-
-  const price =
-    trade.direction ===
-    'BUY'
-
-      ? quote.bid
-
-      : quote.ask;
-
-
-  const move =
-    trade.direction ===
-    'BUY'
-
-      ? price -
-        trade.entryPrice
-
-      : trade.entryPrice -
-        price;
-
-
-  return move /
-    trade.riskDistance;
 }
 
 
@@ -4316,7 +5155,8 @@ async function handleReverseSignal(
     );
 
 
-  // Do not close losing trade just because opposite signal appeared.
+  // Keep V1.2.3 rule:
+  // Do not close a losing trade only because reverse signal appeared.
   if (
     r <
       0 &&
@@ -4327,12 +5167,10 @@ async function handleReverseSignal(
 
 
   const exitPrice =
-    trade.direction ===
-    'BUY'
-
-      ? quote.bid
-
-      : quote.ask;
+    markPriceForTrade(
+      trade,
+      quote
+    );
 
 
   await closePaperTrade(
@@ -4388,7 +5226,7 @@ async function manageOpenTrades() {
       of symbols
     ) {
 
-      const trade =
+      let trade =
         state.openTrades.get(
           symbol
         );
@@ -4414,16 +5252,35 @@ async function manageOpenTrades() {
       );
 
 
+      // ======================================================
+      // PATH TELEMETRY
+      // ======================================================
+
+      await updateExcursions(
+        symbol,
+        trade,
+        quote
+      );
+
+
+      trade =
+        state.openTrades.get(
+          symbol
+        ) ||
+        trade;
+
+
       const exitPrice =
-        trade.direction ===
-        'BUY'
-
-          ? quote.bid
-
-          : quote.ask;
+        markPriceForTrade(
+          trade,
+          quote
+        );
 
 
-      // Break-even activation
+      // ======================================================
+      // BREAK EVEN
+      // ======================================================
+
       if (
         !trade.breakEvenActive
       ) {
@@ -4449,10 +5306,18 @@ async function manageOpenTrades() {
           );
 
 
-          continue;
+          trade =
+            state.openTrades.get(
+              symbol
+            ) ||
+            trade;
         }
       }
 
+
+      // ======================================================
+      // EXIT
+      // ======================================================
 
       const stopHit =
         trade.direction ===
@@ -4505,6 +5370,35 @@ async function manageOpenTrades() {
         );
       }
     }
+
+  } catch (
+    error
+  ) {
+
+    state.lastMarketError =
+      `quote loop: ${safeError(error)}`;
+
+
+    console.error(
+      'Quote loop:',
+      state.lastMarketError
+    );
+
+
+    await journal(
+      'ERROR',
+      {
+        message:
+          'manageOpenTrades failed',
+
+        data: {
+          error:
+            safeError(
+              error
+            )
+        }
+      }
+    );
 
   } finally {
 
@@ -4610,7 +5504,8 @@ async function scanSymbol(
 
 
     // ========================================================
-    // V1.2.3 PROTECTION MUST HAPPEN BEFORE REVERSE/ENTRY
+    // V1.2.3 ENTRY PROTECTION
+    // MUST OCCUR BEFORE REVERSE OR NEW ENTRY
     // ========================================================
 
     const protectionReason =
@@ -4642,7 +5537,7 @@ async function scanSymbol(
 
         `${protectionReason} | ` +
 
-        `CMO=${analysis.cmo.toFixed(1)} | ` +
+        `CMO=${n(analysis.cmo, 0).toFixed(1)} | ` +
 
         `Q=${analysis.qualityScore}`
       );
@@ -4657,6 +5552,10 @@ async function scanSymbol(
       };
     }
 
+
+    // ========================================================
+    // FRESH EXECUTION QUOTE
+    // ========================================================
 
     const quote =
       await fetchSingleQuote(
@@ -4692,6 +5591,10 @@ async function scanSymbol(
     );
 
 
+    // ========================================================
+    // REVERSE MANAGEMENT
+    // ========================================================
+
     await handleReverseSignal(
       analysis,
       quote
@@ -4726,7 +5629,7 @@ async function scanSymbol(
 
       `🎯 ${symbol} ${analysis.direction} V5.1 | ` +
 
-      `CMO=${analysis.cmo.toFixed(1)} | ` +
+      `CMO=${n(analysis.cmo, 0).toFixed(1)} | ` +
 
       `body=${(analysis.bodyRatio * 100).toFixed(0)}% | ` +
 
@@ -4742,16 +5645,22 @@ async function scanSymbol(
     );
 
 
-    await openPaperTrade(
-      analysis,
-      quote
-    );
+    const opened =
+      await openPaperTrade(
+        analysis,
+        quote
+      );
 
 
     return {
+
       symbol,
+
       status:
-        'SIGNAL',
+        opened
+          ? 'SIGNAL'
+          : 'SKIPPED',
+
       direction:
         analysis.direction
     };
@@ -4767,10 +5676,31 @@ async function scanSymbol(
       `${symbol}: ${safeError(error)}`;
 
 
+    await journal(
+      'ERROR',
+      {
+        symbol,
+
+        message:
+          'scanSymbol failed',
+
+        data: {
+          error:
+            safeError(
+              error
+            )
+        }
+      }
+    );
+
+
     return {
+
       symbol,
+
       status:
         'ERROR',
+
       error:
         safeError(
           error
@@ -4893,6 +5823,25 @@ async function signalScanLoop() {
       `executed=${state.executedSignals - beforeExecuted} ` +
 
       `skipped=${state.skippedSignals - beforeSkipped}`
+    );
+
+  } catch (
+    error
+  ) {
+
+    await journal(
+      'ERROR',
+      {
+        message:
+          'signalScanLoop failed',
+
+        data: {
+          error:
+            safeError(
+              error
+            )
+        }
+      }
     );
 
   } finally {
@@ -5106,6 +6055,27 @@ async function initializeMarket() {
 
       : `⚠️ Market engine PARTIAL | ready=${ready} minimum=${minimumReady}`
   );
+
+
+  await journal(
+    'MARKET_INIT',
+    {
+      message:
+        state.marketReady
+          ? 'Market ready'
+          : 'Market partial',
+
+      data: {
+
+        ready,
+
+        total:
+          INSTRUMENTS.length,
+
+        minimumReady
+      }
+    }
+  );
 }
 
 
@@ -5119,6 +6089,11 @@ const app =
 
 app.disable(
   'x-powered-by'
+);
+
+
+app.use(
+  express.json()
 );
 
 
@@ -5141,6 +6116,7 @@ app.get(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${VERSION}</title>
 </head>
+
 <body style="font-family:Arial;background:#111;color:#eee;padding:24px">
 
 <h2>${VERSION}</h2>
@@ -5163,8 +6139,35 @@ ${state.openTrades.size}
 </p>
 
 <p>
+Starting balance:
+${fmtMoney(PAPER.startingBalance)}
+</p>
+
+<p>
 Balance:
 ${fmtMoney(account?.balance ?? PAPER.startingBalance)}
+</p>
+
+<p>
+Risk / trade:
+${PAPER.riskPctPerTrade}%
+</p>
+
+<p>
+Portfolio Risk Cap:
+${PAPER.portfolioRiskCapPct}%
+</p>
+
+<p>
+Current Open Risk:
+${fmtMoney(currentPortfolioRiskUsd())}
+/
+${fmtMoney(portfolioRiskCapUsd())}
+</p>
+
+<p>
+Journal:
+${JOURNAL_COLLECTION}
 </p>
 
 <p>
@@ -5227,8 +6230,14 @@ app.get(
       protectionRejects:
         state.protectionRejects,
 
+      portfolioRiskRejects:
+        state.portfolioRiskRejects,
+
       breakEvenMoves:
         state.breakEvenMoves,
+
+      journalEvents:
+        state.journalEvents,
 
       startedAt:
         state.startedAt,
@@ -5270,6 +6279,9 @@ app.get(
 
       paper: {
 
+        accountKey:
+          PAPER.accountKey,
+
         startingBalance:
           PAPER.startingBalance,
 
@@ -5298,7 +6310,19 @@ app.get(
           0,
 
         openTrades:
-          state.openTrades.size
+          state.openTrades.size,
+
+        riskPctPerTrade:
+          PAPER.riskPctPerTrade,
+
+        portfolioRiskCapPct:
+          PAPER.portfolioRiskCapPct,
+
+        openRiskUsd:
+          currentPortfolioRiskUsd(),
+
+        portfolioRiskCapUsd:
+          portfolioRiskCapUsd()
       },
 
       engine: {
@@ -5321,6 +6345,9 @@ app.get(
         protectionRejects:
           state.protectionRejects,
 
+        portfolioRiskRejects:
+          state.portfolioRiskRejects,
+
         signalScans:
           state.totalSignalScans,
 
@@ -5328,7 +6355,10 @@ app.get(
           state.totalQuotePolls,
 
         breakEvenMoves:
-          state.breakEvenMoves
+          state.breakEvenMoves,
+
+        journalEvents:
+          state.journalEvents
       },
 
       providers: {
@@ -5368,6 +6398,16 @@ async function boot() {
 
 
   console.log(
+
+    `💰 New account: ${fmtMoney(PAPER.startingBalance)} | ` +
+
+    `Risk ${PAPER.riskPctPerTrade}% | ` +
+
+    `Portfolio cap ${PAPER.portfolioRiskCapPct}%`
+  );
+
+
+  console.log(
     `⏱ Timeframe: ${TIMEFRAME} CLOSED candles`
   );
 
@@ -5383,7 +6423,12 @@ async function boot() {
 
 
   console.log(
-    '🛡️ V1.2.3 Protection: BUY BULL-FVG BLOCK | BUY CMO>=80 BLOCK | SELL CMO>-40 BLOCK'
+    '🛡️ V1.2.3 Protection FROZEN: BUY BULL-FVG BLOCK | BUY CMO>=80 BLOCK | SELL CMO>-40 BLOCK'
+  );
+
+
+  console.log(
+    '📓 V1.2.4 Journal + MFE/MAE + Portfolio Risk Cap ON'
   );
 
 
@@ -5391,9 +6436,7 @@ async function boot() {
 
     `🎯 R:R 1:${STRATEGY.riskReward.toFixed(1)} | ` +
 
-    `BE at +${STRATEGY.breakEvenTriggerR.toFixed(1)}R | ` +
-
-    `Risk ${PAPER.riskPctPerTrade}%`
+    `BE at +${STRATEGY.breakEvenTriggerR.toFixed(1)}R`
   );
 
 
@@ -5414,6 +6457,34 @@ async function boot() {
 
 
   await initMongo();
+
+
+  await journal(
+    'BOOT',
+    {
+
+      message:
+        'LOMY boot',
+
+      data: {
+
+        startingBalance:
+          PAPER.startingBalance,
+
+        riskPctPerTrade:
+          PAPER.riskPctPerTrade,
+
+        portfolioRiskCapPct:
+          PAPER.portfolioRiskCapPct,
+
+        timeframe:
+          TIMEFRAME,
+
+        instruments:
+          INSTRUMENTS.length
+      }
+    }
+  );
 
 
   await initTelegram();
@@ -5439,6 +6510,20 @@ async function boot() {
       safeError(
         error
       );
+
+
+    await journal(
+      'ERROR',
+      {
+        message:
+          'Market initialization failed',
+
+        data: {
+          error:
+            state.lastMarketError
+        }
+      }
+    );
 
 
     console.error(
@@ -5470,13 +6555,51 @@ async function boot() {
 // SHUTDOWN
 // ============================================================
 
+let shuttingDown =
+  false;
+
+
 async function shutdown(
   signal
 ) {
 
+  if (
+    shuttingDown
+  ) {
+    return;
+  }
+
+
+  shuttingDown =
+    true;
+
+
   console.log(
     `\n🛑 ${signal} received — shutting down`
   );
+
+
+  try {
+
+    await journal(
+      'SHUTDOWN',
+      {
+
+        message:
+          signal,
+
+        data: {
+
+          balance:
+            account?.balance,
+
+          openTrades:
+            state.openTrades.size
+        }
+      }
+    );
+
+  } catch {}
 
 
   try {
@@ -5524,6 +6647,10 @@ process.once(
 );
 
 
+// ============================================================
+// GLOBAL ERROR JOURNAL
+// ============================================================
+
 process.on(
   'unhandledRejection',
   error => {
@@ -5533,6 +6660,24 @@ process.on(
       safeError(
         error
       )
+    );
+
+
+    journal(
+      'ERROR',
+      {
+        message:
+          'unhandledRejection',
+
+        data: {
+          error:
+            safeError(
+              error
+            )
+        }
+      }
+    ).catch(
+      () => {}
     );
   }
 );
@@ -5548,9 +6693,31 @@ process.on(
         error
       )
     );
+
+
+    journal(
+      'ERROR',
+      {
+        message:
+          'uncaughtException',
+
+        data: {
+          error:
+            safeError(
+              error
+            )
+        }
+      }
+    ).catch(
+      () => {}
+    );
   }
 );
 
+
+// ============================================================
+// START
+// ============================================================
 
 boot().catch(
   error => {
