@@ -5,103 +5,260 @@ const express = require('express');
 const mongoose = require('mongoose');
 const { Telegraf } = require('telegraf');
 
-const VERSION = 'LOMY FOREX V1.2.4';
+// ============================================================
+// LOMY FOREX V1.3 AI TRADER
+// PAPER ONLY
+// ============================================================
+
+const VERSION = 'LOMY FOREX V1.3 AI TRADER';
 const MODE = 'PAPER';
 const LIVE_TRADING = false;
 
 const PORT = Number(process.env.PORT || 10000);
-const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
-const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
-const TWELVE_DATA_API_KEY = String(process.env.TWELVE_DATA_API_KEY || '').trim();
+
+const TELEGRAM_BOT_TOKEN =
+  String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+
+const MONGODB_URI =
+  String(process.env.MONGODB_URI || '').trim();
+
+const TWELVE_DATA_API_KEY =
+  String(process.env.TWELVE_DATA_API_KEY || '').trim();
+
+const GEMINI_API_KEY =
+  String(process.env.GEMINI_API_KEY || '').trim();
+
+const GEMINI_MODEL =
+  String(process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
 
 const BIQUOTE_BASE = 'https://biquote.io';
+const GEMINI_BASE =
+  'https://generativelanguage.googleapis.com/v1beta';
+
 const TIMEFRAME = '15m';
+const TIMEFRAME_MS = 15 * 60 * 1000;
+
 const HISTORY_LIMIT = 260;
 const CORE_MIN_HISTORY = 60;
 const EMA200_CONTEXT_HISTORY = 200;
+
 const OHLC_CONCURRENCY = 4;
+
 const QUOTE_POLL_MS = 3000;
 const SCAN_TIMER_MS = 4000;
-const JOURNAL_COLLECTION = 'lomyforexjournalv124';
+
+const AI_MANAGE_INTERVAL_MS = 60 * 1000;
+const AI_MIN_MANAGE_GAP_MS = 5 * 60 * 1000;
+
+const JOURNAL_COLLECTION = 'lomyforexjournalv13';
+
+// ============================================================
+// INSTRUMENTS
+// ============================================================
 
 const INSTRUMENTS = [
-  'EURUSD','GBPUSD','USDJPY','USDCHF','AUDUSD','NZDUSD','USDCAD',
-  'EURGBP','EURJPY','EURCHF','EURAUD','EURNZD','EURCAD',
-  'GBPJPY','GBPCHF','GBPAUD','GBPNZD','GBPCAD',
-  'AUDJPY','AUDCHF','AUDNZD','AUDCAD',
-  'NZDJPY','NZDCHF','NZDCAD','CADJPY','CADCHF','CHFJPY',
-  'GBPSGD','EURSGD','XAUUSD'
+  'EURUSD',
+  'GBPUSD',
+  'USDJPY',
+  'USDCHF',
+  'AUDUSD',
+  'NZDUSD',
+  'USDCAD',
+
+  'EURGBP',
+  'EURJPY',
+  'EURCHF',
+  'EURAUD',
+  'EURNZD',
+  'EURCAD',
+
+  'GBPJPY',
+  'GBPCHF',
+  'GBPAUD',
+  'GBPNZD',
+  'GBPCAD',
+
+  'AUDJPY',
+  'AUDCHF',
+  'AUDNZD',
+  'AUDCAD',
+
+  'NZDJPY',
+  'NZDCHF',
+  'NZDCAD',
+
+  'CADJPY',
+  'CADCHF',
+  'CHFJPY',
+
+  'GBPSGD',
+  'EURSGD',
+
+  'XAUUSD'
 ];
 
-// IMPORTANT: Signal/entry strategy is frozen from V1.2.3.
+// ============================================================
+// STRATEGY
+// Signal engine remains based on V1.2.4/FIX1 logic.
+// Risk/Reward changed to requested 1:2.
+// ============================================================
+
 const STRATEGY = Object.freeze({
   cmoLen: 9,
+
   cmoBuyThresh: 30,
   cmoSellThresh: -30,
+
   volLen: 10,
   volMult: 1.30,
+
   srLen: 20,
+
   fastEmaLen: 9,
   slowEmaLen: 21,
+
   atrLen: 14,
   atrMargin: 0.20,
+
   bodyRatioMin: 0.50,
-  riskReward: 1.20,
+
+  // ==========================================================
+  // USER REQUEST:
+  // 1% risk / 2% theoretical profit
+  // R:R = 1:2
+  // ==========================================================
+  riskReward: 2.00,
+
   breakEvenTriggerR: 0.60,
+
   maxEntryMoveAtr: 0.50,
+
   retestLookback: 8,
+
   fibLookback: 40,
   fibToleranceAtr: 0.20,
+
   smcFastEmaLen: 50,
   smcSlowEmaLen: 200,
+
   adxLen: 14,
   adxThreshold: 25,
+
   pivotLeft: 5,
   pivotRight: 5,
+
   rejectBullFvgBuys: true,
+
   buyCmoMax: 80,
   sellCmoMax: -40
 });
 
+// ============================================================
+// PAPER RISK MANAGER
+// AI IS NOT ALLOWED TO OVERRIDE THESE VALUES.
+// ============================================================
+
 const PAPER = Object.freeze({
   startingBalance: 300,
-  riskPctPerTrade: 0.50,
+
+  // 1% maximum theoretical risk per trade
+  riskPctPerTrade: 1.00,
+
+  // Maximum total active portfolio risk
   portfolioRiskCapPct: 4.00,
+
   maxOpenTrades: 31,
-  accountKey: 'lomy-forex-v124-300usd'
+
+  accountKey: 'lomy-forex-v13-ai-300usd'
 });
+
+// ============================================================
+// AI CONFIG
+// ============================================================
+
+const AI = Object.freeze({
+  enabled: true,
+
+  // AI confirms or rejects entry candidates.
+  entryDecisionEnabled: true,
+
+  // AI can recommend HOLD or CLOSE.
+  managementEnabled: true,
+
+  // AI can never modify SL/TP/risk/quantity.
+  canModifyRisk: false,
+
+  // AI cannot open arbitrary trades without strategy candidate.
+  strategyCandidateRequired: true,
+
+  entryMinConfidence: 60,
+
+  managementMinConfidence: 65,
+
+  memoryClosedTrades: 30,
+
+  temperature: 0.15,
+
+  timeoutMs: 18000
+});
+
+// ============================================================
+// STATE
+// ============================================================
 
 const state = {
   startedAt: new Date(),
+
   mongoReady: false,
   telegramReady: false,
   marketReady: false,
+  geminiReady: false,
 
   initializing: true,
+
   scanRunning: false,
   quoteRunning: false,
+  aiManageRunning: false,
 
   lastScanSlot: null,
+
   lastSignalScanAt: null,
   lastQuotePollAt: null,
+  lastAiManageAt: null,
+
   lastMarketError: null,
+  lastAiError: null,
 
   totalSignalScans: 0,
   totalQuotePolls: 0,
+
+  aiEntryCalls: 0,
+  aiManageCalls: 0,
+  aiApprovedEntries: 0,
+  aiRejectedEntries: 0,
+  aiCloseDecisions: 0,
+  aiHoldDecisions: 0,
 
   rawSignals: 0,
   executedSignals: 0,
   skippedSignals: 0,
 
   breakEvenMoves: 0,
+
   protectionRejects: 0,
   portfolioRiskRejects: 0,
+
   journalEvents: 0,
 
   pairState: new Map(),
+
   latestQuotes: new Map(),
+
   openTrades: new Map(),
-  closingTrades: new Set()
+
+  closingTrades: new Set(),
+
+  aiLastManageByTrade: new Map()
 };
 
 for (const symbol of INSTRUMENTS) {
@@ -115,6 +272,10 @@ for (const symbol of INSTRUMENTS) {
   });
 }
 
+// ============================================================
+// BASIC HELPERS
+// ============================================================
+
 function n(value, fallback = NaN) {
   const x = Number(value);
   return Number.isFinite(x) ? x : fallback;
@@ -122,6 +283,7 @@ function n(value, fallback = NaN) {
 
 function safeError(error) {
   return (
+    error?.response?.data?.error?.message ||
     error?.response?.data?.message ||
     error?.response?.data?.error ||
     error?.message ||
@@ -138,9 +300,20 @@ function fmtMoney(value) {
 }
 
 function fmtPrice(value, symbol = '') {
-  if (!Number.isFinite(value)) return 'n/a';
-  if (symbol === 'XAUUSD') return value.toFixed(2);
-  if (symbol.endsWith('JPY')) return value.toFixed(3);
+  if (!Number.isFinite(Number(value))) {
+    return 'n/a';
+  }
+
+  value = Number(value);
+
+  if (symbol === 'XAUUSD') {
+    return value.toFixed(2);
+  }
+
+  if (symbol.endsWith('JPY')) {
+    return value.toFixed(3);
+  }
+
   return value.toFixed(5);
 }
 
@@ -149,8 +322,18 @@ function barTimeMs(bar) {
   return Number.isFinite(t) ? t : 0;
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================================
+// BAR NORMALIZATION
+// ============================================================
+
 function normalizeBars(rawBars) {
-  if (!Array.isArray(rawBars)) return [];
+  if (!Array.isArray(rawBars)) {
+    return [];
+  }
 
   return rawBars
     .map(bar => ({
@@ -192,21 +375,17 @@ function normalizeBars(rawBars) {
 function closedBarsOnly(bars) {
   const now = Date.now();
 
-  const timeframeMs =
-    15 *
-    60 *
-    1000;
-
   return bars.filter(
     bar =>
       !bar.isOpen &&
       barTimeMs(bar) > 0 &&
-      barTimeMs(bar) +
-        timeframeMs <=
-        now +
-        5000
+      barTimeMs(bar) + TIMEFRAME_MS <= now + 5000
   );
 }
+
+// ============================================================
+// INDICATORS
+// ============================================================
 
 function sma(values, length) {
   if (
@@ -225,10 +404,12 @@ function sma(values, length) {
     return NaN;
   }
 
-  return selected.reduce(
-    (a, b) => a + b,
-    0
-  ) / length;
+  return (
+    selected.reduce(
+      (a, b) => a + b,
+      0
+    ) / length
+  );
 }
 
 function emaSeries(values, length) {
@@ -240,26 +421,18 @@ function emaSeries(values, length) {
   }
 
   const out =
-    new Array(
-      values.length
-    ).fill(NaN);
+    new Array(values.length).fill(NaN);
 
   const k =
-    2 /
-    (length + 1);
+    2 / (length + 1);
 
   out[length - 1] =
     values
-      .slice(
-        0,
-        length
-      )
+      .slice(0, length)
       .reduce(
-        (a, b) =>
-          a + b,
+        (a, b) => a + b,
         0
-      ) /
-    length;
+      ) / length;
 
   for (
     let i = length;
@@ -267,10 +440,8 @@ function emaSeries(values, length) {
     i++
   ) {
     out[i] =
-      values[i] *
-        k +
-      out[i - 1] *
-        (1 - k);
+      values[i] * k +
+      out[i - 1] * (1 - k);
   }
 
   return out;
@@ -336,16 +507,11 @@ function atrLast(bars, length) {
 
   let atr =
     trueRange
-      .slice(
-        0,
-        length
-      )
+      .slice(0, length)
       .reduce(
-        (a, b) =>
-          a + b,
+        (a, b) => a + b,
         0
-      ) /
-    length;
+      ) / length;
 
   for (
     let i = length;
@@ -355,10 +521,9 @@ function atrLast(bars, length) {
     atr =
       (
         atr *
-          (length - 1) +
+        (length - 1) +
         trueRange[i]
-      ) /
-      length;
+      ) / length;
   }
 
   return atr;
@@ -390,7 +555,8 @@ function cmoLast(values, length) {
       difference >
       0
     ) {
-      up += difference;
+      up +=
+        difference;
     } else {
       down +=
         Math.abs(
@@ -405,8 +571,8 @@ function cmoLast(values, length) {
   return denominator === 0
     ? 0
     : 100 *
-        (up - down) /
-        denominator;
+      (up - down) /
+      denominator;
 }
 
 function highestHigh(bars) {
@@ -501,10 +667,7 @@ function dmiAdx(
 
   let trSmooth =
     trueRange
-      .slice(
-        0,
-        length
-      )
+      .slice(0, length)
       .reduce(
         (a, b) =>
           a + b,
@@ -513,10 +676,7 @@ function dmiAdx(
 
   let plusSmooth =
     plus
-      .slice(
-        0,
-        length
-      )
+      .slice(0, length)
       .reduce(
         (a, b) =>
           a + b,
@@ -525,10 +685,7 @@ function dmiAdx(
 
   let minusSmooth =
     minus
-      .slice(
-        0,
-        length
-      )
+      .slice(0, length)
       .reduce(
         (a, b) =>
           a + b,
@@ -611,16 +768,12 @@ function dmiAdx(
 
   let adx =
     dx
-      .slice(
-        0,
-        length
-      )
+      .slice(0, length)
       .reduce(
         (a, b) =>
           a + b,
         0
-      ) /
-    length;
+      ) / length;
 
   for (
     let i = length;
@@ -630,10 +783,9 @@ function dmiAdx(
     adx =
       (
         adx *
-          (length - 1) +
+        (length - 1) +
         dx[i]
-      ) /
-      length;
+      ) / length;
   }
 
   return {
@@ -642,6 +794,10 @@ function dmiAdx(
     minusDI
   };
 }
+
+// ============================================================
+// RETEST CONTEXT
+// ============================================================
 
 function retestContext(
   prior,
@@ -707,6 +863,10 @@ function retestContext(
     level
   };
 }
+
+// ============================================================
+// FIBONACCI CONTEXT
+// ============================================================
 
 function fibContext(
   prior,
@@ -847,6 +1007,7 @@ function fibContext(
     valid: true,
     goldenZone,
     nearFib,
+
     swingLow: low,
     swingHigh: high,
 
@@ -854,15 +1015,25 @@ function fibContext(
   };
 }
 
+// ============================================================
+// SMC CONTEXT
+// ============================================================
+
 function smcContext(
   bars,
   direction
 ) {
   const signal =
-    bars[bars.length - 1];
+    bars[
+      bars.length -
+      1
+    ];
 
   const prior =
-    bars.slice(0, -1);
+    bars.slice(
+      0,
+      -1
+    );
 
   const closes =
     bars.map(
@@ -878,7 +1049,7 @@ function smcContext(
 
   const ema200 =
     bars.length >=
-      EMA200_CONTEXT_HISTORY
+    EMA200_CONTEXT_HISTORY
       ? emaLast(
           closes,
           STRATEGY.smcSlowEmaLen
@@ -903,17 +1074,17 @@ function smcContext(
     const aligned =
       direction === 'BUY'
         ? (
-          signal.close >
-            ema50 &&
-          ema50 >
-            ema200
-        )
+            signal.close >
+              ema50 &&
+            ema50 >
+              ema200
+          )
         : (
-          signal.close <
-            ema50 &&
-          ema50 <
-            ema200
-        );
+            signal.close <
+              ema50 &&
+            ema50 <
+              ema200
+          );
 
     if (
       aligned
@@ -1061,16 +1232,29 @@ function smcContext(
   return {
     score,
     reasons,
+
     ema50,
     ema200,
-    adx: dmi.adx,
-    plusDI: dmi.plusDI,
-    minusDI: dmi.minusDI,
+
+    adx:
+      dmi.adx,
+
+    plusDI:
+      dmi.plusDI,
+
+    minusDI:
+      dmi.minusDI,
+
     liquiditySweep,
+
     bullFvg,
     bearFvg
   };
 }
+
+// ============================================================
+// MAIN STRATEGY ANALYSIS
+// ============================================================
 
 function analyzeBars(
   symbol,
@@ -1080,16 +1264,22 @@ function analyzeBars(
   if (
     !Array.isArray(bars) ||
     bars.length <
-      CORE_MIN_HISTORY
+    CORE_MIN_HISTORY
   ) {
     return null;
   }
 
   const signal =
-    bars[bars.length - 1];
+    bars[
+      bars.length -
+      1
+    ];
 
   const prior =
-    bars.slice(0, -1);
+    bars.slice(
+      0,
+      -1
+    );
 
   const closes =
     bars.map(
@@ -1132,7 +1322,7 @@ function analyzeBars(
 
   const volumeRatio =
     volumeAverage >
-      0
+    0
       ? signal.volume /
         volumeAverage
       : NaN;
@@ -1143,7 +1333,7 @@ function analyzeBars(
 
   const bodyRatio =
     range >
-      0
+    0
       ? Math.abs(
           signal.close -
           signal.open
@@ -1239,6 +1429,7 @@ function analyzeBars(
       momentum,
 
     atr,
+
     bodyRatio,
 
     volume:
@@ -1335,18 +1526,18 @@ function analyzeBars(
   const qualityScore =
     clamp(
       retest.score +
-        fib.score +
-        smc.score,
+      fib.score +
+      smc.score,
       0,
       12
     );
 
   const quality =
     qualityScore >=
-      7
+    7
       ? 'STRONG'
       : qualityScore >=
-          4
+        4
         ? 'GOOD'
         : 'NEUTRAL';
 
@@ -1354,6 +1545,7 @@ function analyzeBars(
     ...common,
 
     direction,
+
     support,
     resistance,
 
@@ -1368,6 +1560,10 @@ function analyzeBars(
     quality
   };
 }
+
+// ============================================================
+// FROZEN ENTRY PROTECTION
+// ============================================================
 
 function entryProtectionReason(
   analysis
@@ -1424,29 +1620,36 @@ function entryProtectionReason(
   return '';
 }
 
+// ============================================================
+// HTTP CLIENT
+// ============================================================
+
 const http =
   axios.create({
     timeout: 12000,
 
     headers: {
       'User-Agent':
-        'LOMY-Forex-Paper/1.2.4'
+        'LOMY-Forex-AI-Trader/1.3'
     }
   });
 
+// ============================================================
+// MARKET DATA
+// ============================================================
+
 async function fetchOhlc(
-  symbol
+  symbol,
+  interval = TIMEFRAME,
+  limit = HISTORY_LIMIT
 ) {
   const response =
     await http.get(
       `${BIQUOTE_BASE}/api/${encodeURIComponent(symbol)}/ohlc`,
       {
         params: {
-          interval:
-            TIMEFRAME,
-
-          limit:
-            HISTORY_LIMIT
+          interval,
+          limit
         }
       }
     );
@@ -1483,14 +1686,10 @@ function normalizeQuote(
   symbol
 ) {
   const bid =
-    n(
-      raw?.bid
-    );
+    n(raw?.bid);
 
   const ask =
-    n(
-      raw?.ask
-    );
+    n(raw?.ask);
 
   const mid =
     n(
@@ -1498,10 +1697,9 @@ function normalizeQuote(
       Number.isFinite(bid) &&
       Number.isFinite(ask)
         ? (
-          bid +
-          ask
-        ) /
-        2
+            bid +
+            ask
+          ) / 2
         : NaN
     );
 
@@ -1513,10 +1711,8 @@ function normalizeQuote(
     ].every(
       Number.isFinite
     ) ||
-    bid <=
-      0 ||
-    ask <=
-      0 ||
+    bid <= 0 ||
+    ask <= 0 ||
     ask <
       bid
   ) {
@@ -1525,9 +1721,11 @@ function normalizeQuote(
 
   return {
     symbol,
+
     bid,
     ask,
     mid,
+
     spread:
       ask -
       bid,
@@ -1547,15 +1745,14 @@ async function fetchSingleQuote(
         `${BIQUOTE_BASE}/api/${encodeURIComponent(symbol)}`,
         {
           params: {
-            allowStale:
-              false
+            allowStale: false
           }
         }
       );
 
     return normalizeQuote(
       response.data?.data ||
-      response.data,
+        response.data,
       symbol
     );
   } catch (
@@ -1650,9 +1847,9 @@ async function fetchLatestQuotes(
         const quote =
           normalizeQuote(
             body[symbol] ||
-            body[
-              symbol.toLowerCase()
-            ],
+              body[
+                symbol.toLowerCase()
+              ],
             symbol
           );
 
@@ -1677,6 +1874,10 @@ async function fetchLatestQuotes(
     return new Map();
   }
 }
+
+// ============================================================
+// CONCURRENCY
+// ============================================================
 
 async function mapWithConcurrency(
   items,
@@ -1736,6 +1937,10 @@ async function mapWithConcurrency(
 
   return results;
 }
+
+// ============================================================
+// MONGODB SCHEMAS
+// ============================================================
 
 const accountSchema =
   new mongoose.Schema(
@@ -1914,6 +2119,12 @@ const tradeSchema =
       lastMarkAt:
         Date,
 
+      aiEntryDecision:
+        mongoose.Schema.Types.Mixed,
+
+      aiLastManagement:
+        mongoose.Schema.Types.Mixed,
+
       analysis:
         mongoose.Schema.Types.Mixed
     },
@@ -1982,6 +2193,9 @@ const signalSchema =
       skipReason:
         String,
 
+      aiDecision:
+        mongoose.Schema.Types.Mixed,
+
       analysis:
         mongoose.Schema.Types.Mixed
     },
@@ -2031,41 +2245,48 @@ const journalSchema =
     }
   );
 
-// NEW COLLECTION — FIXES OLD key_1 DUPLICATE INDEX
+// ============================================================
+// MODELS
+// ============================================================
+
 const Account =
-  mongoose.models.LomyForexPaperAccountV124 ||
+  mongoose.models.LomyForexPaperAccountV13 ||
   mongoose.model(
-    'LomyForexPaperAccountV124',
+    'LomyForexPaperAccountV13',
     accountSchema,
-    'lomyforexpaperaccountsv124'
+    'lomyforexpaperaccountsv13'
   );
 
 const Trade =
-  mongoose.models.LomyForexTradeV124 ||
+  mongoose.models.LomyForexTradeV13 ||
   mongoose.model(
-    'LomyForexTradeV124',
+    'LomyForexTradeV13',
     tradeSchema,
-    'lomyforextrades'
+    'lomyforextradesv13'
   );
 
 const Signal =
-  mongoose.models.LomyForexSignalV124 ||
+  mongoose.models.LomyForexSignalV13 ||
   mongoose.model(
-    'LomyForexSignalV124',
+    'LomyForexSignalV13',
     signalSchema,
-    'lomyforexsignals'
+    'lomyforexsignalsv13'
   );
 
 const Journal =
-  mongoose.models.LomyForexJournalV124 ||
+  mongoose.models.LomyForexJournalV13 ||
   mongoose.model(
-    'LomyForexJournalV124',
+    'LomyForexJournalV13',
     journalSchema,
     JOURNAL_COLLECTION
   );
 
 let account = null;
 let bot = null;
+
+// ============================================================
+// JOURNAL
+// ============================================================
 
 async function journal(
   eventType,
@@ -2093,6 +2314,7 @@ async function journal(
       symbol,
       direction,
       tradeId,
+
       message,
       data
     });
@@ -2107,6 +2329,10 @@ async function journal(
     );
   }
 }
+
+// ============================================================
+// MONGO INIT
+// ============================================================
 
 async function initMongo() {
   if (
@@ -2243,6 +2469,10 @@ async function saveAccount() {
   await account.save();
 }
 
+// ============================================================
+// TELEGRAM
+// ============================================================
+
 async function sendTelegram(
   text
 ) {
@@ -2276,6 +2506,10 @@ function pairReadyCount() {
       item.initialized
   ).length;
 }
+
+// ============================================================
+// RISK MANAGER
+// ============================================================
 
 function currentPortfolioRiskUsd() {
   let total =
@@ -2353,6 +2587,21 @@ function portfolioRiskCapUsd() {
   );
 }
 
+function perTradeRiskUsd() {
+  return (
+    n(
+      account?.balance,
+      PAPER.startingBalance
+    ) *
+    PAPER.riskPctPerTrade /
+    100
+  );
+}
+
+// ============================================================
+// TELEGRAM COMMANDS
+// ============================================================
+
 async function initTelegram() {
   if (
     !TELEGRAM_BOT_TOKEN
@@ -2381,7 +2630,9 @@ async function initTelegram() {
       await ctx.reply(
         `✅ ${VERSION}\n` +
         `PAPER ONLY\n` +
-        `Balance: ${fmtMoney(account.balance)}`
+        `Balance: ${fmtMoney(account.balance)}\n` +
+        `Risk: ${PAPER.riskPctPerTrade}%\n` +
+        `RR: 1:${STRATEGY.riskReward}`
       );
     }
   );
@@ -2392,17 +2643,20 @@ async function initTelegram() {
       await ctx.reply(
         `🤖 ${VERSION}\n` +
         `Mode: PAPER\n` +
+        `LIVE: OFF\n` +
         `Market: ${state.marketReady ? 'READY' : 'WAIT'}\n` +
+        `Gemini: ${state.geminiReady ? 'READY' : 'OFF'}\n` +
         `Pairs: ${pairReadyCount()}/${INSTRUMENTS.length}\n` +
         `Open: ${state.openTrades.size}\n` +
         `Signals: ${state.rawSignals}\n` +
         `Executed: ${state.executedSignals}\n` +
         `Skipped: ${state.skippedSignals}\n` +
-        `Protection rejects: ${state.protectionRejects}\n` +
-        `Portfolio rejects: ${state.portfolioRiskRejects}\n` +
+        `AI approved: ${state.aiApprovedEntries}\n` +
+        `AI rejected: ${state.aiRejectedEntries}\n` +
         `BE moves: ${state.breakEvenMoves}\n` +
-        `Journal: ${state.journalEvents}\n` +
-        `Risk: ${PAPER.riskPctPerTrade}% | Portfolio cap: ${PAPER.portfolioRiskCapPct}%`
+        `Risk: ${PAPER.riskPctPerTrade}%\n` +
+        `RR: 1:${STRATEGY.riskReward}\n` +
+        `Portfolio cap: ${PAPER.portfolioRiskCapPct}%`
       );
     }
   );
@@ -2414,7 +2668,9 @@ async function initTelegram() {
         `💰 PAPER BALANCE\n` +
         `Balance: ${fmtMoney(account?.balance)}\n` +
         `Realized PnL: ${fmtMoney(account?.realizedPnl)}\n` +
-        `Open risk: ${fmtMoney(currentPortfolioRiskUsd())}/${fmtMoney(portfolioRiskCapUsd())}`
+        `Risk/Trade: ${fmtMoney(perTradeRiskUsd())}\n` +
+        `Open Risk: ${fmtMoney(currentPortfolioRiskUsd())}\n` +
+        `Portfolio Cap: ${fmtMoney(portfolioRiskCapUsd())}`
       );
     }
   );
@@ -2428,7 +2684,9 @@ async function initTelegram() {
         `Wins: ${account?.wins || 0}\n` +
         `Losses: ${account?.losses || 0}\n` +
         `BE: ${account?.breakeven || 0}\n` +
-        `Realized: ${fmtMoney(account?.realizedPnl || 0)}`
+        `Realized: ${fmtMoney(account?.realizedPnl || 0)}\n` +
+        `AI Entry Calls: ${state.aiEntryCalls}\n` +
+        `AI Manage Calls: ${state.aiManageCalls}`
       );
     }
   );
@@ -2516,6 +2774,7 @@ async function initTelegram() {
               `${trade.symbol} ${trade.direction} ` +
               `${trade.exitReason} ` +
               `${n(trade.resultR, 0).toFixed(2)}R | ` +
+              `PnL ${fmtMoney(trade.pnl)} | ` +
               `MFE ${n(trade.mfeR, 0).toFixed(2)}R | ` +
               `MAE ${n(trade.maeR, 0).toFixed(2)}R`
           )
@@ -2554,10 +2813,1159 @@ async function initTelegram() {
     );
 }
 
+// ============================================================
+// AI MEMORY
+// ============================================================
+
+async function getAiMemory(
+  symbol = ''
+) {
+  try {
+    const query = {
+      accountKey:
+        PAPER.accountKey,
+
+      status:
+        'CLOSED'
+    };
+
+    if (
+      symbol
+    ) {
+      query.symbol =
+        symbol;
+    }
+
+    let rows =
+      await Trade.find(
+        query,
+        {
+          symbol: 1,
+          direction: 1,
+          resultR: 1,
+          pnl: 1,
+          exitReason: 1,
+          quality: 1,
+          qualityScore: 1,
+          cmo: 1,
+          volumeRatio: 1,
+          bodyRatio: 1,
+          mfeR: 1,
+          maeR: 1,
+          openedAt: 1,
+          closedAt: 1
+        }
+      )
+        .sort({
+          closedAt:
+            -1
+        })
+        .limit(
+          AI.memoryClosedTrades
+        )
+        .lean();
+
+    if (
+      rows.length <
+      8 &&
+      symbol
+    ) {
+      rows =
+        await Trade.find(
+          {
+            accountKey:
+              PAPER.accountKey,
+
+            status:
+              'CLOSED'
+          },
+          {
+            symbol: 1,
+            direction: 1,
+            resultR: 1,
+            pnl: 1,
+            exitReason: 1,
+            quality: 1,
+            qualityScore: 1,
+            cmo: 1,
+            volumeRatio: 1,
+            bodyRatio: 1,
+            mfeR: 1,
+            maeR: 1,
+            openedAt: 1,
+            closedAt: 1
+          }
+        )
+          .sort({
+            closedAt:
+              -1
+          })
+          .limit(
+            AI.memoryClosedTrades
+          )
+          .lean();
+    }
+
+    const wins =
+      rows.filter(
+        x =>
+          n(
+            x.resultR,
+            0
+          ) >
+          0.10
+      ).length;
+
+    const losses =
+      rows.filter(
+        x =>
+          n(
+            x.resultR,
+            0
+          ) <
+          -0.10
+      ).length;
+
+    const be =
+      rows.length -
+      wins -
+      losses;
+
+    const totalR =
+      rows.reduce(
+        (
+          total,
+          x
+        ) =>
+          total +
+          n(
+            x.resultR,
+            0
+          ),
+        0
+      );
+
+    const avgMfe =
+      rows.length
+        ? rows.reduce(
+            (
+              total,
+              x
+            ) =>
+              total +
+              n(
+                x.mfeR,
+                0
+              ),
+            0
+          ) /
+          rows.length
+        : 0;
+
+    const avgMae =
+      rows.length
+        ? rows.reduce(
+            (
+              total,
+              x
+            ) =>
+              total +
+              n(
+                x.maeR,
+                0
+              ),
+            0
+          ) /
+          rows.length
+        : 0;
+
+    return {
+      count:
+        rows.length,
+
+      wins,
+      losses,
+      breakeven:
+        be,
+
+      winRate:
+        rows.length
+          ? wins /
+            rows.length *
+            100
+          : 0,
+
+      totalR,
+
+      avgR:
+        rows.length
+          ? totalR /
+            rows.length
+          : 0,
+
+      avgMfe,
+      avgMae,
+
+      recent:
+        rows.slice(0, 12).map(
+          x => ({
+            symbol:
+              x.symbol,
+
+            direction:
+              x.direction,
+
+            resultR:
+              n(
+                x.resultR,
+                0
+              ),
+
+            exitReason:
+              x.exitReason,
+
+            quality:
+              x.quality,
+
+            qualityScore:
+              n(
+                x.qualityScore,
+                0
+              ),
+
+            cmo:
+              n(
+                x.cmo,
+                0
+              ),
+
+            volumeRatio:
+              n(
+                x.volumeRatio,
+                0
+              ),
+
+            mfeR:
+              n(
+                x.mfeR,
+                0
+              ),
+
+            maeR:
+              n(
+                x.maeR,
+                0
+              )
+          })
+        )
+    };
+  } catch (
+    error
+  ) {
+    console.error(
+      'AI memory:',
+      safeError(error)
+    );
+
+    return {
+      count: 0,
+      wins: 0,
+      losses: 0,
+      breakeven: 0,
+      winRate: 0,
+      totalR: 0,
+      avgR: 0,
+      avgMfe: 0,
+      avgMae: 0,
+      recent: []
+    };
+  }
+}
+
+// ============================================================
+// MULTI-TIMEFRAME AI CONTEXT
+// ============================================================
+
+async function buildHigherTimeframeContext(
+  symbol
+) {
+  const result = {
+    m15: null,
+    h1: null,
+    h4: null
+  };
+
+  const getContext =
+    bars => {
+      if (
+        !bars ||
+        bars.length <
+        30
+      ) {
+        return null;
+      }
+
+      const closes =
+        bars.map(
+          x =>
+            x.close
+        );
+
+      const signal =
+        bars[
+          bars.length -
+          1
+        ];
+
+      const ema9 =
+        emaLast(
+          closes,
+          9
+        );
+
+      const ema21 =
+        emaLast(
+          closes,
+          21
+        );
+
+      const ema50 =
+        emaLast(
+          closes,
+          50
+        );
+
+      const atr =
+        atrLast(
+          bars,
+          14
+        );
+
+      const cmo =
+        cmoLast(
+          closes,
+          9
+        );
+
+      const dmi =
+        dmiAdx(
+          bars,
+          14
+        );
+
+      const trend =
+        Number.isFinite(
+          ema50
+        )
+          ? signal.close >
+            ema50
+            ? 'BULL'
+            : signal.close <
+              ema50
+              ? 'BEAR'
+              : 'FLAT'
+          : 'UNKNOWN';
+
+      const shortTrend =
+        Number.isFinite(
+          ema9
+        ) &&
+        Number.isFinite(
+          ema21
+        )
+          ? ema9 >
+            ema21
+            ? 'BULL'
+            : 'BEAR'
+          : 'UNKNOWN';
+
+      return {
+        close:
+          signal.close,
+
+        ema9,
+        ema21,
+        ema50,
+
+        trend,
+        shortTrend,
+
+        cmo,
+        atr,
+
+        adx:
+          dmi.adx,
+
+        plusDI:
+          dmi.plusDI,
+
+        minusDI:
+          dmi.minusDI,
+
+        high20:
+          highestHigh(
+            bars.slice(-20)
+          ),
+
+        low20:
+          lowestLow(
+            bars.slice(-20)
+          )
+      };
+    };
+
+  try {
+    const memory =
+      state.pairState.get(
+        symbol
+      );
+
+    if (
+      memory?.bars?.length
+    ) {
+      result.m15 =
+        getContext(
+          memory.bars
+        );
+    }
+
+    const [
+      bars1h,
+      bars4h
+    ] =
+      await Promise.all([
+        fetchOhlc(
+          symbol,
+          '1h',
+          150
+        ).catch(
+          () => []
+        ),
+
+        fetchOhlc(
+          symbol,
+          '4h',
+          150
+        ).catch(
+          () => []
+        )
+      ]);
+
+    result.h1 =
+      getContext(
+        bars1h
+      );
+
+    result.h4 =
+      getContext(
+        bars4h
+      );
+  } catch (
+    error
+  ) {
+    console.error(
+      `MTF ${symbol}:`,
+      safeError(error)
+    );
+  }
+
+  return result;
+}
+
+// ============================================================
+// GEMINI HELPERS
+// ============================================================
+
+function extractGeminiText(
+  response
+) {
+  const candidates =
+    response?.data?.candidates;
+
+  if (
+    !Array.isArray(
+      candidates
+    ) ||
+    !candidates.length
+  ) {
+    return '';
+  }
+
+  const parts =
+    candidates[0]?.content?.parts;
+
+  if (
+    !Array.isArray(parts)
+  ) {
+    return '';
+  }
+
+  return parts
+    .map(
+      part =>
+        typeof part?.text ===
+        'string'
+          ? part.text
+          : ''
+    )
+    .join('')
+    .trim();
+}
+
+function parseJsonFromText(
+  text
+) {
+  if (
+    !text
+  ) {
+    return null;
+  }
+
+  let cleaned =
+    String(text)
+      .trim()
+      .replace(
+        /^```json/i,
+        ''
+      )
+      .replace(
+        /^```/i,
+        ''
+      )
+      .replace(
+        /```$/,
+        ''
+      )
+      .trim();
+
+  try {
+    return JSON.parse(
+      cleaned
+    );
+  } catch {}
+
+  const first =
+    cleaned.indexOf('{');
+
+  const last =
+    cleaned.lastIndexOf('}');
+
+  if (
+    first !== -1 &&
+    last >
+    first
+  ) {
+    try {
+      return JSON.parse(
+        cleaned.slice(
+          first,
+          last + 1
+        )
+      );
+    } catch {}
+  }
+
+  return null;
+}
+
+async function geminiJson(
+  systemInstruction,
+  payload
+) {
+  if (
+    !GEMINI_API_KEY
+  ) {
+    return null;
+  }
+
+  const url =
+    `${GEMINI_BASE}/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
+
+  try {
+    const response =
+      await axios.post(
+        url,
+        {
+          system_instruction: {
+            parts: [
+              {
+                text:
+                  systemInstruction
+              }
+            ]
+          },
+
+          contents: [
+            {
+              role:
+                'user',
+
+              parts: [
+                {
+                  text:
+                    JSON.stringify(
+                      payload
+                    )
+                }
+              ]
+            }
+          ],
+
+          generationConfig: {
+            temperature:
+              AI.temperature,
+
+            response_mime_type:
+              'application/json'
+          }
+        },
+        {
+          timeout:
+            AI.timeoutMs,
+
+          headers: {
+            'Content-Type':
+              'application/json',
+
+            'x-goog-api-key':
+              GEMINI_API_KEY
+          }
+        }
+      );
+
+    const text =
+      extractGeminiText(
+        response
+      );
+
+    const json =
+      parseJsonFromText(
+        text
+      );
+
+    if (
+      !json
+    ) {
+      throw new Error(
+        'Gemini returned invalid JSON'
+      );
+    }
+
+    state.geminiReady =
+      true;
+
+    state.lastAiError =
+      null;
+
+    return json;
+  } catch (
+    error
+  ) {
+    state.lastAiError =
+      safeError(error);
+
+    console.error(
+      'Gemini:',
+      state.lastAiError
+    );
+
+    return null;
+  }
+}
+
+// ============================================================
+// AI ENTRY DECISION
+// ============================================================
+
+async function aiEntryDecision(
+  analysis,
+  quote
+) {
+  if (
+    !AI.enabled ||
+    !AI.entryDecisionEnabled
+  ) {
+    return {
+      decision:
+        'APPROVE',
+
+      confidence:
+        100,
+
+      reason:
+        'AI_DISABLED',
+
+      fallback:
+        true
+    };
+  }
+
+  if (
+    !GEMINI_API_KEY
+  ) {
+    return {
+      decision:
+        'APPROVE',
+
+      confidence:
+        0,
+
+      reason:
+        'GEMINI_KEY_MISSING_STRATEGY_FALLBACK',
+
+      fallback:
+        true
+    };
+  }
+
+  state.aiEntryCalls++;
+
+  const [
+    mtf,
+    memory
+  ] =
+    await Promise.all([
+      buildHigherTimeframeContext(
+        analysis.symbol
+      ),
+
+      getAiMemory(
+        analysis.symbol
+      )
+    ]);
+
+  const systemInstruction =
+    `
+You are LOMY Forex V1.3 AI Decision Layer.
+
+You are NOT the risk manager.
+You cannot change:
+- account balance
+- position size
+- stop loss
+- take profit
+- risk percentage
+- portfolio risk cap
+- API keys
+- trading mode
+- code
+- strategy protections
+
+The system is PAPER ONLY.
+
+A technical strategy has already produced a candidate BUY or SELL.
+Your job is only to decide whether that candidate has sufficient market confirmation.
+
+Analyze:
+15m, 1H and 4H trend alignment,
+market structure,
+liquidity,
+momentum,
+volume,
+candle quality,
+support/resistance,
+Fibonacci,
+FVG,
+ADX,
+historical performance memory,
+MFE/MAE behavior.
+
+Return JSON only.
+
+Required JSON:
+{
+  "decision":"APPROVE" or "REJECT",
+  "confidence":0-100,
+  "reason":"short explanation",
+  "marketRegime":"TRENDING|RANGING|VOLATILE|UNCLEAR",
+  "trend15m":"BULL|BEAR|MIXED",
+  "trend1h":"BULL|BEAR|MIXED",
+  "trend4h":"BULL|BEAR|MIXED",
+  "warnings":[]
+}
+
+Do not propose different SL, TP, risk or quantity.
+`;
+
+  const payload = {
+    version:
+      VERSION,
+
+    mode:
+      MODE,
+
+    candidate: {
+      symbol:
+        analysis.symbol,
+
+      direction:
+        analysis.direction,
+
+      signalPrice:
+        analysis.signalClose,
+
+      quality:
+        analysis.quality,
+
+      qualityScore:
+        analysis.qualityScore,
+
+      cmo:
+        analysis.cmo,
+
+      atr:
+        analysis.atr,
+
+      bodyRatio:
+        analysis.bodyRatio,
+
+      volumeRatio:
+        analysis.volumeRatio,
+
+      support:
+        analysis.support,
+
+      resistance:
+        analysis.resistance,
+
+      reasons:
+        analysis.reasons,
+
+      retest:
+        analysis.retest,
+
+      fib:
+        analysis.fib,
+
+      smc:
+        analysis.smc
+    },
+
+    quote: {
+      bid:
+        quote.bid,
+
+      ask:
+        quote.ask,
+
+      spread:
+        quote.spread
+    },
+
+    multiTimeframe:
+      mtf,
+
+    aiMemory:
+      memory,
+
+    immutableRiskRules: {
+      riskPctPerTrade:
+        PAPER.riskPctPerTrade,
+
+      portfolioRiskCapPct:
+        PAPER.portfolioRiskCapPct,
+
+      riskReward:
+        STRATEGY.riskReward,
+
+      breakEvenTriggerR:
+        STRATEGY.breakEvenTriggerR,
+
+      liveTrading:
+        LIVE_TRADING
+    }
+  };
+
+  const response =
+    await geminiJson(
+      systemInstruction,
+      payload
+    );
+
+  if (
+    !response
+  ) {
+    return {
+      decision:
+        'APPROVE',
+
+      confidence:
+        0,
+
+      reason:
+        'AI_UNAVAILABLE_STRATEGY_FALLBACK',
+
+      fallback:
+        true
+    };
+  }
+
+  const decision =
+    String(
+      response.decision ||
+      ''
+    ).toUpperCase();
+
+  const confidence =
+    clamp(
+      n(
+        response.confidence,
+        0
+      ),
+      0,
+      100
+    );
+
+  if (
+    decision ===
+      'APPROVE' &&
+    confidence >=
+      AI.entryMinConfidence
+  ) {
+    state.aiApprovedEntries++;
+
+    return {
+      ...response,
+
+      decision:
+        'APPROVE',
+
+      confidence,
+
+      fallback:
+        false
+    };
+  }
+
+  state.aiRejectedEntries++;
+
+  return {
+    ...response,
+
+    decision:
+      'REJECT',
+
+    confidence,
+
+    fallback:
+      false
+  };
+}
+
+// ============================================================
+// AI OPEN TRADE MANAGEMENT
+// ============================================================
+
+async function aiManagementDecision(
+  trade,
+  quote
+) {
+  if (
+    !AI.enabled ||
+    !AI.managementEnabled ||
+    !GEMINI_API_KEY
+  ) {
+    return null;
+  }
+
+  state.aiManageCalls++;
+
+  const [
+    mtf,
+    memory
+  ] =
+    await Promise.all([
+      buildHigherTimeframeContext(
+        trade.symbol
+      ),
+
+      getAiMemory(
+        trade.symbol
+      )
+    ]);
+
+  const r =
+    currentR(
+      trade,
+      quote
+    );
+
+  const systemInstruction =
+    `
+You manage an already-open PAPER forex trade.
+
+You may return only HOLD or CLOSE.
+
+You must NEVER:
+- move stop loss
+- move take profit
+- change position size
+- add to position
+- reverse the position
+- change risk
+- change account settings
+- change API keys
+- enable live trading
+
+Risk Manager controls SL, TP, break-even and position size.
+
+Use current trade R, MFE, MAE, 15m/1H/4H context,
+market structure, liquidity and historical memory.
+
+Do not close merely because the trade is slightly negative.
+Prefer CLOSE only when the original setup is materially invalidated
+or the market structure strongly reverses.
+
+Return JSON only:
+{
+  "decision":"HOLD" or "CLOSE",
+  "confidence":0-100,
+  "reason":"short explanation",
+  "setupInvalidated":true|false,
+  "warnings":[]
+}
+`;
+
+  const payload = {
+    symbol:
+      trade.symbol,
+
+    direction:
+      trade.direction,
+
+    trade: {
+      entryPrice:
+        trade.entryPrice,
+
+      currentR:
+        r,
+
+      stopLoss:
+        trade.stopLoss,
+
+      takeProfit:
+        trade.takeProfit,
+
+      breakEvenActive:
+        trade.breakEvenActive,
+
+      mfeR:
+        n(
+          trade.mfeR,
+          0
+        ),
+
+      maeR:
+        n(
+          trade.maeR,
+          0
+        ),
+
+      quality:
+        trade.quality,
+
+      qualityScore:
+        trade.qualityScore,
+
+      originalReasons:
+        trade.reasons
+    },
+
+    quote: {
+      bid:
+        quote.bid,
+
+      ask:
+        quote.ask,
+
+      spread:
+        quote.spread
+    },
+
+    multiTimeframe:
+      mtf,
+
+    memory,
+
+    immutableRiskRules: {
+      riskPctPerTrade:
+        PAPER.riskPctPerTrade,
+
+      riskReward:
+        STRATEGY.riskReward,
+
+      breakEvenTriggerR:
+        STRATEGY.breakEvenTriggerR
+    }
+  };
+
+  const response =
+    await geminiJson(
+      systemInstruction,
+      payload
+    );
+
+  if (
+    !response
+  ) {
+    return null;
+  }
+
+  const decision =
+    String(
+      response.decision ||
+      ''
+    ).toUpperCase();
+
+  const confidence =
+    clamp(
+      n(
+        response.confidence,
+        0
+      ),
+      0,
+      100
+    );
+
+  if (
+    decision ===
+      'CLOSE' &&
+    confidence >=
+      AI.managementMinConfidence
+  ) {
+    state.aiCloseDecisions++;
+
+    return {
+      ...response,
+
+      decision:
+        'CLOSE',
+
+      confidence
+    };
+  }
+
+  state.aiHoldDecisions++;
+
+  return {
+    ...response,
+
+    decision:
+      'HOLD',
+
+    confidence
+  };
+}
+
+// ============================================================
+// SIGNAL RECORD
+// ============================================================
+
 async function recordSignal(
   analysis,
   executed,
-  skipReason = ''
+  skipReason = '',
+  aiDecision = null
 ) {
   const payload = {
     version:
@@ -2615,6 +4023,8 @@ async function recordSignal(
     executed,
 
     skipReason,
+
+    aiDecision,
 
     analysis
   };
@@ -2679,11 +4089,17 @@ async function recordSignal(
           analysis.reasons ||
           [],
 
+        aiDecision,
+
         skipReason
       }
     }
   );
 }
+
+// ============================================================
+// EXECUTION LEVELS
+// ============================================================
 
 function buildExecutionLevels(
   analysis,
@@ -2710,7 +4126,8 @@ function buildExecutionLevels(
   let stopLoss;
 
   if (
-    direction === 'BUY'
+    direction ===
+    'BUY'
   ) {
     stopLoss =
       n(
@@ -2771,6 +4188,14 @@ function buildExecutionLevels(
     return null;
   }
 
+  // ==========================================================
+  // TP is exactly 2R from entry.
+  // Therefore:
+  // -1R = approximately -1% account
+  // +2R = approximately +2% account
+  // before real execution friction/spread.
+  // ==========================================================
+
   const takeProfit =
     direction === 'BUY'
       ? entry +
@@ -2792,21 +4217,21 @@ function buildExecutionLevels(
   const valid =
     direction === 'BUY'
       ? (
-        stopLoss <
-          entry &&
-        entry <
-          breakEvenTriggerPrice &&
-        breakEvenTriggerPrice <
-          takeProfit
-      )
+          stopLoss <
+            entry &&
+          entry <
+            breakEvenTriggerPrice &&
+          breakEvenTriggerPrice <
+            takeProfit
+        )
       : (
-        takeProfit <
-          breakEvenTriggerPrice &&
-        breakEvenTriggerPrice <
-          entry &&
-        entry <
-          stopLoss
-      );
+          takeProfit <
+            breakEvenTriggerPrice &&
+          breakEvenTriggerPrice <
+            entry &&
+          entry <
+            stopLoss
+        );
 
   if (
     !valid
@@ -2823,15 +4248,28 @@ function buildExecutionLevels(
   };
 }
 
+// ============================================================
+// OPEN PAPER TRADE
+// ============================================================
+
 async function openPaperTrade(
   analysis,
-  quote
+  quote,
+  aiDecision
 ) {
   const symbol =
     analysis.symbol;
 
   const direction =
     analysis.direction;
+
+  if (
+    LIVE_TRADING
+  ) {
+    throw new Error(
+      'LIVE_TRADING must remain false in V1.3'
+    );
+  }
 
   if (
     state.openTrades.has(
@@ -2843,7 +4281,8 @@ async function openPaperTrade(
     await recordSignal(
       analysis,
       false,
-      'POSITION_ALREADY_OPEN'
+      'POSITION_ALREADY_OPEN',
+      aiDecision
     );
 
     return false;
@@ -2858,7 +4297,8 @@ async function openPaperTrade(
     await recordSignal(
       analysis,
       false,
-      'MAX_OPEN_TRADES'
+      'MAX_OPEN_TRADES',
+      aiDecision
     );
 
     return false;
@@ -2890,7 +4330,8 @@ async function openPaperTrade(
     await recordSignal(
       analysis,
       false,
-      'ENTRY_TOO_FAR_FROM_SIGNAL'
+      'ENTRY_TOO_FAR_FROM_SIGNAL',
+      aiDecision
     );
 
     return false;
@@ -2910,7 +4351,8 @@ async function openPaperTrade(
     await recordSignal(
       analysis,
       false,
-      'INVALID_LEVELS'
+      'INVALID_LEVELS',
+      aiDecision
     );
 
     return false;
@@ -2921,6 +4363,12 @@ async function openPaperTrade(
       account?.balance,
       PAPER.startingBalance
     );
+
+  // ==========================================================
+  // HARD RISK RULE:
+  // exactly 1% of current PAPER balance.
+  // AI cannot change this.
+  // ==========================================================
 
   const riskAmount =
     balance *
@@ -2945,7 +4393,8 @@ async function openPaperTrade(
     await recordSignal(
       analysis,
       false,
-      'PORTFOLIO_RISK_CAP'
+      'PORTFOLIO_RISK_CAP',
+      aiDecision
     );
 
     await journal(
@@ -2975,6 +4424,25 @@ async function openPaperTrade(
   const quantity =
     riskAmount /
     levels.riskDistance;
+
+  if (
+    !Number.isFinite(
+      quantity
+    ) ||
+    quantity <=
+    0
+  ) {
+    state.skippedSignals++;
+
+    await recordSignal(
+      analysis,
+      false,
+      'INVALID_POSITION_SIZE',
+      aiDecision
+    );
+
+    return false;
+  }
 
   const now =
     new Date();
@@ -3088,6 +4556,12 @@ async function openPaperTrade(
       lastMarkAt:
         now,
 
+      aiEntryDecision:
+        aiDecision,
+
+      aiLastManagement:
+        null,
+
       analysis
     });
 
@@ -3104,7 +4578,8 @@ async function openPaperTrade(
   await recordSignal(
     analysis,
     true,
-    ''
+    '',
+    aiDecision
   );
 
   await journal(
@@ -3137,6 +4612,13 @@ async function openPaperTrade(
 
         riskAmount,
 
+        theoreticalLossPct:
+          PAPER.riskPctPerTrade,
+
+        theoreticalTargetPct:
+          PAPER.riskPctPerTrade *
+          STRATEGY.riskReward,
+
         quantity,
 
         portfolioRiskBefore:
@@ -3148,6 +4630,8 @@ async function openPaperTrade(
 
         portfolioRiskCap:
           riskCap,
+
+        aiDecision,
 
         cmo:
           analysis.cmo,
@@ -3181,9 +4665,10 @@ async function openPaperTrade(
     `${direction === 'BUY' ? '🟢' : '🔴'} ${symbol} ${direction} — PAPER\n` +
     `Entry: ${fmtPrice(levels.entry, symbol)}\n` +
     `SL: ${fmtPrice(levels.stopLoss, symbol)}\n` +
-    `TP: ${fmtPrice(levels.takeProfit, symbol)} (${STRATEGY.riskReward.toFixed(1)}R)\n` +
-    `BE: ${fmtPrice(levels.breakEvenTriggerPrice, symbol)} (+${STRATEGY.breakEvenTriggerR.toFixed(1)}R)\n` +
-    `Risk: ${fmtMoney(riskAmount)}\n` +
+    `TP: ${fmtPrice(levels.takeProfit, symbol)} (+2R)\n` +
+    `BE: ${fmtPrice(levels.breakEvenTriggerPrice, symbol)} (+0.60R)\n` +
+    `Risk: ${fmtMoney(riskAmount)} = ${PAPER.riskPctPerTrade}%\n` +
+    `Target: ≈ ${fmtMoney(riskAmount * 2)} = 2R\n` +
     `Quality: ${analysis.quality} ${analysis.qualityScore}/12\n` +
     `CMO: ${n(analysis.cmo, 0).toFixed(1)}\n` +
     `Volume: ${
@@ -3193,6 +4678,9 @@ async function openPaperTrade(
         ? analysis.volumeRatio.toFixed(2) + 'x'
         : 'n/a'
     }\n` +
+    `AI: ${aiDecision?.decision || 'FALLBACK'} ` +
+    `${n(aiDecision?.confidence, 0).toFixed(0)}%\n` +
+    `AI reason: ${aiDecision?.reason || 'n/a'}\n` +
     `Reasons: ${
       (
         analysis.reasons ||
@@ -3205,6 +4693,10 @@ async function openPaperTrade(
 
   return true;
 }
+
+// ============================================================
+// TRADE MARK / R
+// ============================================================
 
 function markPriceForTrade(
   trade,
@@ -3228,7 +4720,7 @@ function currentR(
 
   const move =
     trade.direction ===
-    'BUY'
+      'BUY'
       ? price -
         trade.entryPrice
       : trade.entryPrice -
@@ -3237,6 +4729,10 @@ function currentR(
   return move /
     trade.riskDistance;
 }
+
+// ============================================================
+// MFE / MAE
+// ============================================================
 
 async function updateExcursions(
   symbol,
@@ -3354,6 +4850,10 @@ async function updateExcursions(
   }
 }
 
+// ============================================================
+// BREAK EVEN
+// ============================================================
+
 async function activateBreakEven(
   symbol,
   trade
@@ -3442,6 +4942,10 @@ async function activateBreakEven(
   );
 }
 
+// ============================================================
+// CLOSE TRADE
+// ============================================================
+
 async function closePaperTrade(
   symbol,
   trade,
@@ -3486,7 +4990,7 @@ async function closePaperTrade(
 
     const move =
       trade.direction ===
-      'BUY'
+        'BUY'
         ? exitPrice -
           trade.entryPrice
         : trade.entryPrice -
@@ -3562,7 +5066,11 @@ async function closePaperTrade(
               exitPrice,
 
             lastMarkAt:
-              closedAt
+              closedAt,
+
+            aiLastManagement:
+              trade.aiLastManagement ||
+              null
           }
         }
       );
@@ -3633,6 +5141,12 @@ async function closePaperTrade(
       symbol
     );
 
+    state.aiLastManageByTrade.delete(
+      String(
+        trade._id
+      )
+    );
+
     const durationMinutes =
       (
         closedAt.getTime() -
@@ -3681,16 +5195,14 @@ async function closePaperTrade(
               0
             ),
 
-          mfePrice:
-            trade.mfePrice,
-
-          maePrice:
-            trade.maePrice,
-
           breakEvenActive:
             trade.breakEvenActive,
 
-          durationMinutes
+          durationMinutes,
+
+          aiLastManagement:
+            trade.aiLastManagement ||
+            null
         }
       }
     );
@@ -3713,6 +5225,10 @@ async function closePaperTrade(
     );
   }
 }
+
+// ============================================================
+// REVERSE STRATEGY SIGNAL
+// ============================================================
 
 async function handleReverseSignal(
   analysis,
@@ -3737,6 +5253,8 @@ async function handleReverseSignal(
       quote
     );
 
+  // Preserve protection:
+  // do not close losing trade solely because a reverse signal appeared.
   if (
     r <
       0 &&
@@ -3758,6 +5276,10 @@ async function handleReverseSignal(
     'REVERSE_SIGNAL'
   );
 }
+
+// ============================================================
+// FAST SL / TP / BE MANAGEMENT
+// ============================================================
 
 async function manageOpenTrades() {
   const symbols =
@@ -3835,7 +5357,7 @@ async function manageOpenTrades() {
       ) {
         const hitBreakEven =
           trade.direction ===
-          'BUY'
+            'BUY'
             ? exitPrice >=
               trade.breakEvenTriggerPrice
             : exitPrice <=
@@ -3859,7 +5381,7 @@ async function manageOpenTrades() {
 
       const stopHit =
         trade.direction ===
-        'BUY'
+          'BUY'
           ? exitPrice <=
             trade.stopLoss
           : exitPrice >=
@@ -3867,7 +5389,7 @@ async function manageOpenTrades() {
 
       const targetHit =
         trade.direction ===
-        'BUY'
+          'BUY'
           ? exitPrice >=
             trade.takeProfit
           : exitPrice <=
@@ -3923,6 +5445,248 @@ async function manageOpenTrades() {
       false;
   }
 }
+
+// ============================================================
+// AI POSITION MANAGEMENT LOOP
+// ============================================================
+
+async function manageTradesWithAI() {
+  if (
+    state.aiManageRunning ||
+    !AI.managementEnabled ||
+    !GEMINI_API_KEY ||
+    !state.openTrades.size
+  ) {
+    return;
+  }
+
+  state.aiManageRunning =
+    true;
+
+  state.lastAiManageAt =
+    new Date();
+
+  try {
+    const trades =
+      [
+        ...state.openTrades.values()
+      ];
+
+    for (
+      const originalTrade
+      of trades
+    ) {
+      const trade =
+        state.openTrades.get(
+          originalTrade.symbol
+        );
+
+      if (
+        !trade
+      ) {
+        continue;
+      }
+
+      const tradeId =
+        String(
+          trade._id
+        );
+
+      const lastManaged =
+        state.aiLastManageByTrade.get(
+          tradeId
+        ) ||
+        0;
+
+      if (
+        Date.now() -
+        lastManaged <
+        AI_MIN_MANAGE_GAP_MS
+      ) {
+        continue;
+      }
+
+      const quote =
+        await fetchSingleQuote(
+          trade.symbol
+        );
+
+      if (
+        !quote
+      ) {
+        continue;
+      }
+
+      state.latestQuotes.set(
+        trade.symbol,
+        quote
+      );
+
+      await updateExcursions(
+        trade.symbol,
+        trade,
+        quote
+      );
+
+      const liveTrade =
+        state.openTrades.get(
+          trade.symbol
+        );
+
+      if (
+        !liveTrade
+      ) {
+        continue;
+      }
+
+      const r =
+        currentR(
+          liveTrade,
+          quote
+        );
+
+      // Do not let AI interfere near hard SL or hard TP.
+      // Risk Manager remains primary.
+      if (
+        r <=
+          -0.85 ||
+        r >=
+          1.85
+      ) {
+        continue;
+      }
+
+      const decision =
+        await aiManagementDecision(
+          liveTrade,
+          quote
+        );
+
+      state.aiLastManageByTrade.set(
+        tradeId,
+        Date.now()
+      );
+
+      if (
+        !decision
+      ) {
+        continue;
+      }
+
+      liveTrade.aiLastManagement =
+        {
+          ...decision,
+
+          at:
+            new Date()
+        };
+
+      state.openTrades.set(
+        liveTrade.symbol,
+        liveTrade
+      );
+
+      await Trade.updateOne(
+        {
+          _id:
+            liveTrade._id,
+
+          status:
+            'OPEN'
+        },
+        {
+          $set: {
+            aiLastManagement:
+              liveTrade.aiLastManagement
+          }
+        }
+      );
+
+      await journal(
+        'AI_MANAGEMENT_DECISION',
+        {
+          symbol:
+            liveTrade.symbol,
+
+          direction:
+            liveTrade.direction,
+
+          tradeId:
+            liveTrade._id,
+
+          message:
+            decision.decision,
+
+          data: {
+            currentR:
+              r,
+
+            decision
+          }
+        }
+      );
+
+      if (
+        decision.decision ===
+        'CLOSE'
+      ) {
+        const latestTrade =
+          state.openTrades.get(
+            liveTrade.symbol
+          );
+
+        if (
+          !latestTrade
+        ) {
+          continue;
+        }
+
+        const exitPrice =
+          markPriceForTrade(
+            latestTrade,
+            quote
+          );
+
+        await closePaperTrade(
+          liveTrade.symbol,
+          latestTrade,
+          exitPrice,
+          'AI_CLOSE'
+        );
+      }
+    }
+  } catch (
+    error
+  ) {
+    state.lastAiError =
+      safeError(error);
+
+    console.error(
+      'AI management:',
+      state.lastAiError
+    );
+
+    await journal(
+      'ERROR',
+      {
+        message:
+          'AI management failed',
+
+        data: {
+          error:
+            state.lastAiError
+        }
+      }
+    );
+  } finally {
+    state.aiManageRunning =
+      false;
+  }
+}
+
+// ============================================================
+// SCAN SYMBOL
+// ============================================================
 
 async function scanSymbol(
   symbol
@@ -4012,7 +5776,8 @@ async function scanSymbol(
       await recordSignal(
         analysis,
         false,
-        protectionReason
+        protectionReason,
+        null
       );
 
       console.log(
@@ -4045,7 +5810,8 @@ async function scanSymbol(
       await recordSignal(
         analysis,
         false,
-        'NO_FRESH_QUOTE'
+        'NO_FRESH_QUOTE',
+        null
       );
 
       return {
@@ -4075,7 +5841,8 @@ async function scanSymbol(
       await recordSignal(
         analysis,
         false,
-        'POSITION_ALREADY_OPEN'
+        'POSITION_ALREADY_OPEN',
+        null
       );
 
       return {
@@ -4086,7 +5853,7 @@ async function scanSymbol(
     }
 
     console.log(
-      `🎯 ${symbol} ${analysis.direction} V5.1 | ` +
+      `🎯 STRATEGY CANDIDATE ${symbol} ${analysis.direction} | ` +
       `CMO=${n(analysis.cmo, 0).toFixed(1)} | ` +
       `body=${(analysis.bodyRatio * 100).toFixed(0)}% | ` +
       `vol=${
@@ -4099,10 +5866,71 @@ async function scanSymbol(
       `Q=${analysis.qualityScore}`
     );
 
+    // ========================================================
+    // GEMINI DECISION
+    // ========================================================
+
+    const aiDecision =
+      await aiEntryDecision(
+        analysis,
+        quote
+      );
+
+    console.log(
+      `🧠 AI ${symbol}: ${aiDecision.decision} | ` +
+      `${n(aiDecision.confidence, 0).toFixed(0)}% | ` +
+      `${aiDecision.reason || 'n/a'}`
+    );
+
+    if (
+      aiDecision.decision !==
+      'APPROVE'
+    ) {
+      state.skippedSignals++;
+
+      await recordSignal(
+        analysis,
+        false,
+        'AI_REJECT',
+        aiDecision
+      );
+
+      await journal(
+        'AI_ENTRY_REJECT',
+        {
+          symbol:
+            analysis.symbol,
+
+          direction:
+            analysis.direction,
+
+          message:
+            aiDecision.reason ||
+            'AI rejected candidate',
+
+          data: {
+            aiDecision,
+            analysis
+          }
+        }
+      );
+
+      return {
+        symbol,
+        status:
+          'AI_REJECTED'
+      };
+    }
+
+    // ========================================================
+    // HARD RISK MANAGER HAS FINAL AUTHORITY
+    // ========================================================
+
     const opened =
       await openPaperTrade(
         analysis,
-        quote
+        quote,
+        aiDecision
       );
 
     return {
@@ -4150,6 +5978,10 @@ async function scanSymbol(
     };
   }
 }
+
+// ============================================================
+// 15M SIGNAL LOOP
+// ============================================================
 
 async function signalScanLoop() {
   if (
@@ -4254,6 +6086,10 @@ async function signalScanLoop() {
   }
 }
 
+// ============================================================
+// MARKET INITIALIZATION
+// ============================================================
+
 async function initializeMarket() {
   state.initializing =
     true;
@@ -4346,7 +6182,8 @@ async function initializeMarket() {
           memory.errors++;
 
           console.warn(
-            `⚠️ INIT ${symbol}: WARMUP | bars=${bars.length}/${CORE_MIN_HISTORY}`
+            `⚠️ INIT ${symbol}: WARMUP | ` +
+            `bars=${bars.length}/${CORE_MIN_HISTORY}`
           );
 
           return {
@@ -4434,22 +6271,8 @@ async function initializeMarket() {
 }
 
 // ============================================================
-// EXPRESS + DASHBOARD
+// DASHBOARD DATA
 // ============================================================
-
-const app =
-  express();
-
-app.disable(
-  'x-powered-by'
-);
-
-app.use(
-  express.json({
-    limit:
-      '100kb'
-  })
-);
 
 function openTradeView(
   trade
@@ -4490,7 +6313,7 @@ function openTradeView(
   ) {
     const move =
       trade.direction ===
-      'BUY'
+        'BUY'
         ? currentPrice -
           trade.entryPrice
         : trade.entryPrice -
@@ -4562,24 +6385,6 @@ function openTradeView(
         0
       ),
 
-    cmo:
-      n(
-        trade.cmo,
-        NaN
-      ),
-
-    volumeRatio:
-      n(
-        trade.volumeRatio,
-        NaN
-      ),
-
-    bodyRatio:
-      n(
-        trade.bodyRatio,
-        NaN
-      ),
-
     quality:
       trade.quality ||
       'NEUTRAL',
@@ -4590,9 +6395,13 @@ function openTradeView(
         0
       ),
 
-    reasons:
-      trade.reasons ||
-      [],
+    aiEntryDecision:
+      trade.aiEntryDecision ||
+      null,
+
+    aiLastManagement:
+      trade.aiLastManagement ||
+      null,
 
     openedAt:
       trade.openedAt,
@@ -4607,11 +6416,7 @@ function openTradeView(
           ).getTime()
         ) /
         60000
-      ),
-
-    lastMarkAt:
-      trade.lastMarkAt ||
-      null
+      )
   };
 }
 
@@ -4656,85 +6461,8 @@ async function dashboardData() {
         closedAt:
           -1
       })
-      .limit(
-        20
-      )
+      .limit(20)
       .lean();
-
-  const allClosed =
-    await Trade.find(
-      {
-        accountKey:
-          PAPER.accountKey,
-
-        status:
-          'CLOSED'
-      },
-      {
-        direction:
-          1,
-
-        pnl:
-          1,
-
-        resultR:
-          1
-      }
-    ).lean();
-
-  const directionStats = {
-    BUY: {
-      trades:
-        0,
-
-      pnl:
-        0,
-
-      r:
-        0
-    },
-
-    SELL: {
-      trades:
-        0,
-
-      pnl:
-        0,
-
-      r:
-        0
-    }
-  };
-
-  for (
-    const trade
-    of allClosed
-  ) {
-    const item =
-      directionStats[
-        trade.direction
-      ];
-
-    if (
-      !item
-    ) {
-      continue;
-    }
-
-    item.trades++;
-
-    item.pnl +=
-      n(
-        trade.pnl,
-        0
-      );
-
-    item.r +=
-      n(
-        trade.resultR,
-        0
-      );
-  }
 
   return {
     version:
@@ -4755,6 +6483,12 @@ async function dashboardData() {
     telegramReady:
       state.telegramReady,
 
+    geminiReady:
+      state.geminiReady,
+
+    geminiModel:
+      GEMINI_MODEL,
+
     timeframe:
       TIMEFRAME,
 
@@ -4773,8 +6507,14 @@ async function dashboardData() {
     lastQuotePollAt:
       state.lastQuotePollAt,
 
+    lastAiManageAt:
+      state.lastAiManageAt,
+
     lastMarketError:
       state.lastMarketError,
+
+    lastAiError:
+      state.lastAiError,
 
     account: {
       startingBalance:
@@ -4819,8 +6559,21 @@ async function dashboardData() {
       riskPctPerTrade:
         PAPER.riskPctPerTrade,
 
+      targetPctApprox:
+        PAPER.riskPctPerTrade *
+        STRATEGY.riskReward,
+
+      riskReward:
+        STRATEGY.riskReward,
+
+      breakEvenTriggerR:
+        STRATEGY.breakEvenTriggerR,
+
       portfolioRiskCapPct:
         PAPER.portfolioRiskCapPct,
+
+      riskPerTradeUsd:
+        perTradeRiskUsd(),
 
       openRiskUsd:
         currentPortfolioRiskUsd(),
@@ -4851,11 +6604,27 @@ async function dashboardData() {
       breakEvenMoves:
         state.breakEvenMoves,
 
+      aiEntryCalls:
+        state.aiEntryCalls,
+
+      aiManageCalls:
+        state.aiManageCalls,
+
+      aiApprovedEntries:
+        state.aiApprovedEntries,
+
+      aiRejectedEntries:
+        state.aiRejectedEntries,
+
+      aiCloseDecisions:
+        state.aiCloseDecisions,
+
+      aiHoldDecisions:
+        state.aiHoldDecisions,
+
       journalEvents:
         state.journalEvents
     },
-
-    directionStats,
 
     openTrades,
 
@@ -4915,12 +6684,42 @@ async function dashboardData() {
               0
             ),
 
+          aiEntryDecision:
+            trade.aiEntryDecision ||
+            null,
+
+          aiLastManagement:
+            trade.aiLastManagement ||
+            null,
+
           closedAt:
             trade.closedAt
         })
       )
   };
 }
+
+// ============================================================
+// EXPRESS
+// ============================================================
+
+const app =
+  express();
+
+app.disable(
+  'x-powered-by'
+);
+
+app.use(
+  express.json({
+    limit:
+      '100kb'
+  })
+);
+
+// ============================================================
+// SIMPLE DASHBOARD
+// ============================================================
 
 app.get(
   '/',
@@ -4929,11 +6728,9 @@ app.get(
     res
   ) => {
     res
-      .type(
-        'html'
-      )
+      .type('html')
       .send(
-`<!doctype html>
+        `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -4941,159 +6738,138 @@ app.get(
 <title>${VERSION}</title>
 
 <style>
-* {
-  box-sizing: border-box;
+*{
+box-sizing:border-box
 }
 
-body {
-  margin: 0;
-  background: #081018;
-  color: #e8f0f7;
-  font-family: Arial, sans-serif;
+body{
+margin:0;
+background:#081018;
+color:#e8f0f7;
+font-family:Arial,sans-serif
 }
 
-.wrap {
-  max-width: 1500px;
-  margin: auto;
-  padding: 18px;
+.wrap{
+max-width:1500px;
+margin:auto;
+padding:18px
 }
 
-.top {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: center;
-  flex-wrap: wrap;
+.top{
+display:flex;
+justify-content:space-between;
+gap:12px;
+align-items:center;
+flex-wrap:wrap
 }
 
-.badge {
-  padding: 7px 11px;
-  border: 1px solid #27445b;
-  border-radius: 20px;
-  background: #0d1a25;
+.badge{
+padding:7px 11px;
+border:1px solid #27445b;
+border-radius:20px;
+background:#0d1a25
 }
 
-.ok {
-  color: #65e6a5;
+.ok{
+color:#65e6a5
 }
 
-.bad {
-  color: #ff7b7b;
+.bad{
+color:#ff7b7b
 }
 
-.muted {
-  color: #8ea4b5;
+.muted{
+color:#8ea4b5
 }
 
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit,minmax(170px,1fr));
-  gap: 10px;
-  margin: 14px 0;
+.grid{
+display:grid;
+grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+gap:10px;
+margin:14px 0
 }
 
-.card {
-  background: #0d1721;
-  border: 1px solid #1c3447;
-  border-radius: 12px;
-  padding: 14px;
+.card{
+background:#0d1721;
+border:1px solid #1c3447;
+border-radius:12px;
+padding:14px
 }
 
-.big {
-  font-size: 24px;
-  font-weight: 700;
-  margin-top: 5px;
+.big{
+font-size:23px;
+font-weight:700;
+margin-top:5px
 }
 
-.section {
-  margin-top: 18px;
+.section{
+margin-top:18px
 }
 
-.tablewrap {
-  overflow: auto;
-  border: 1px solid #1c3447;
-  border-radius: 12px;
+.tablewrap{
+overflow:auto;
+border:1px solid #1c3447;
+border-radius:12px
 }
 
-table {
-  width: 100%;
-  border-collapse: collapse;
-  min-width: 1050px;
-  background: #0d1721;
+table{
+width:100%;
+border-collapse:collapse;
+min-width:1100px;
+background:#0d1721
 }
 
-th,
-td {
-  padding: 10px;
-  border-bottom: 1px solid #193044;
-  text-align: left;
-  white-space: nowrap;
+th,td{
+padding:10px;
+border-bottom:1px solid #193044;
+text-align:left;
+white-space:nowrap
 }
 
-th {
-  position: sticky;
-  top: 0;
-  background: #10202d;
+th{
+background:#10202d
 }
 
-.buy {
-  color: #60e6a0;
-  font-weight: 700;
+.buy{
+color:#60e6a0;
+font-weight:700
 }
 
-.sell {
-  color: #ff7b7b;
-  font-weight: 700;
+.sell{
+color:#ff7b7b;
+font-weight:700
 }
 
-.pos {
-  color: #65e6a5;
+.pos{
+color:#65e6a5
 }
 
-.neg {
-  color: #ff7b7b;
+.neg{
+color:#ff7b7b
 }
 
-.btn {
-  border: 0;
-  border-radius: 8px;
-  padding: 8px 11px;
-  cursor: pointer;
-  font-weight: 700;
+.btn{
+border:0;
+border-radius:8px;
+padding:8px 11px;
+cursor:pointer;
+font-weight:700
 }
 
-.danger {
-  background: #d94a4a;
-  color: white;
+.danger{
+background:#d94a4a;
+color:white
 }
 
-.toolbar {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
+.toolbar{
+display:flex;
+gap:8px;
+align-items:center;
+flex-wrap:wrap
 }
 
-.reason {
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.small {
-  font-size: 12px;
-}
-
-.statusline {
-  margin: 8px 0 0;
-}
-
-.error {
-  background: #3b1919;
-  border: 1px solid #7d3030;
-  padding: 10px;
-  border-radius: 8px;
-  display: none;
+.small{
+font-size:12px
 }
 </style>
 </head>
@@ -5107,806 +6883,646 @@ th {
 <div>
 <h2 style="margin:0">${VERSION}</h2>
 
-<div class="muted statusline">
-PAPER ONLY — LIVE TRADING OFF • 15m CLOSED candles • 31 instruments
+<div class="muted">
+PAPER ONLY • AI Decision Layer • Risk Manager Locked
 </div>
 </div>
 
 <div class="toolbar">
-
-<span id="market" class="badge">
-Market...
-</span>
+<span id="market" class="badge">Loading...</span>
 
 <button class="btn danger" onclick="closeAll()">
 Close All
 </button>
-
-</div>
 </div>
 
-<div id="err" class="error"></div>
+</div>
 
 <div class="grid" id="cards"></div>
 
-<div class="grid" id="dircards"></div>
-
 <div class="section">
-
 <h3>Open Positions</h3>
 
 <div class="tablewrap">
-
 <table>
 
 <thead>
-
 <tr>
 <th>Symbol</th>
 <th>Side</th>
 <th>Entry</th>
 <th>Current</th>
 <th>SL</th>
-<th>BE</th>
 <th>TP</th>
 <th>R</th>
-<th>Floating</th>
+<th>PnL</th>
+<th>BE</th>
 <th>MFE</th>
 <th>MAE</th>
-<th>CMO</th>
-<th>Vol</th>
-<th>Body</th>
-<th>Quality</th>
-<th>Reasons</th>
-<th>Duration</th>
+<th>AI Entry</th>
+<th>AI Manage</th>
 <th>Action</th>
 </tr>
-
 </thead>
 
 <tbody id="openRows"></tbody>
 
 </table>
-
 </div>
 </div>
 
 <div class="section">
-
 <h3>Recent Closed Trades</h3>
 
 <div class="tablewrap">
-
 <table>
 
 <thead>
-
 <tr>
 <th>Symbol</th>
 <th>Side</th>
 <th>Reason</th>
-<th>Entry</th>
-<th>Exit</th>
 <th>R</th>
 <th>PnL</th>
 <th>MFE</th>
 <th>MAE</th>
-<th>Quality</th>
 <th>Closed</th>
 </tr>
-
 </thead>
 
 <tbody id="closedRows"></tbody>
 
 </table>
-
 </div>
 </div>
 
 <div class="section small muted">
-Protection frozen:
-BUY BULL-FVG blocked •
-BUY CMO ≥ 80 blocked •
-SELL CMO &gt; -40 blocked •
-RR 1.2R •
-BE +0.6R •
-Risk 0.50% •
-Portfolio cap 4%
+Locked Risk Manager:
+Risk 1% • TP 2R • Break-even +0.60R • Portfolio cap 4% • LIVE OFF
 </div>
 
 </div>
 
 <script>
 
-const money =
-  value =>
-    (Number(value) || 0)
-      .toLocaleString(
-        undefined,
-        {
-          style:
-            'currency',
-
-          currency:
-            'USD',
-
-          minimumFractionDigits:
-            2
-        }
-      );
-
-const num =
-  (
-    value,
-    digits = 2
-  ) =>
-    Number.isFinite(
-      Number(value)
-    )
-      ? Number(value).toFixed(
-          digits
-        )
-      : 'n/a';
-
-const price =
-  (
-    value,
-    symbol
-  ) => {
-    if (
-      !Number.isFinite(
-        Number(value)
-      )
-    ) {
-      return 'n/a';
-    }
-
-    return Number(value).toFixed(
-      symbol ===
-        'XAUUSD'
-        ? 2
-        : symbol &&
-          symbol.endsWith(
-            'JPY'
-          )
-          ? 3
-          : 5
-    );
-  };
-
-const cls =
-  value =>
-    Number(value) >=
-    0
-      ? 'pos'
-      : 'neg';
-
-const dur =
-  minutes => {
-    minutes =
-      Number(minutes) ||
-      0;
-
-    if (
-      minutes <
-      60
-    ) {
-      return Math.round(
-        minutes
-      ) + 'm';
-    }
-
-    const hours =
-      Math.floor(
-        minutes /
-        60
-      );
-
-    const remain =
-      Math.round(
-        minutes %
-        60
-      );
-
-    return (
-      hours +
-      'h ' +
-      remain +
-      'm'
-    );
-  };
-
-const esc =
-  value =>
-    String(
-      value ??
-      ''
-    ).replace(
-      /[&<>"']/g,
-      char => ({
-        '&':
-          '&amp;',
-
-        '<':
-          '&lt;',
-
-        '>':
-          '&gt;',
-
-        '"':
-          '&quot;',
-
-        "'":
-          '&#39;'
-      }[char])
-    );
-
-async function load() {
-  try {
-    const response =
-      await fetch(
-        '/api/dashboard',
-        {
-          cache:
-            'no-store'
-        }
-      );
-
-    const data =
-      await response.json();
-
-    document.getElementById(
-      'market'
-    ).innerHTML =
-      (
-        data.marketReady
-          ? '● READY'
-          : '● WAIT'
-      ) +
-      ' • ' +
-      data.pairsReady +
-      '/' +
-      data.pairsTotal;
-
-    document.getElementById(
-      'market'
-    ).className =
-      'badge ' +
-      (
-        data.marketReady
-          ? 'ok'
-          : 'bad'
-      );
-
-    const account =
-      data.account;
-
-    const engine =
-      data.engine;
-
-    const cards = [
-      [
-        'Balance',
-        money(
-          account.balance
-        )
-      ],
-
-      [
-        'Equity',
-        money(
-          account.equity
-        )
-      ],
-
-      [
-        'Realized',
-        money(
-          account.realizedPnl
-        )
-      ],
-
-      [
-        'Unrealized',
-        money(
-          account.unrealizedPnl
-        )
-      ],
-
-      [
-        'Open Risk',
-        money(
-          account.openRiskUsd
-        ) +
-        ' / ' +
-        money(
-          account.riskCapUsd
-        )
-      ],
-
-      [
-        'Open Trades',
-        engine.openTrades
-      ],
-
-      [
-        'Wins / Losses / BE',
-        account.wins +
-        ' / ' +
-        account.losses +
-        ' / ' +
-        account.breakeven
-      ],
-
-      [
-        'Signals Exec / Skip',
-        engine.executedSignals +
-        ' / ' +
-        engine.skippedSignals
-      ]
-    ];
-
-    document.getElementById(
-      'cards'
-    ).innerHTML =
-      cards
-        .map(
-          item =>
-            '<div class="card">' +
-            '<div class="muted">' +
-            item[0] +
-            '</div>' +
-            '<div class="big">' +
-            item[1] +
-            '</div>' +
-            '</div>'
-        )
-        .join('');
-
-    const directionStats =
-      data.directionStats;
-
-    document.getElementById(
-      'dircards'
-    ).innerHTML =
-      [
-        'BUY',
-        'SELL'
-      ]
-        .map(
-          side =>
-            '<div class="card">' +
-            '<div class="' +
-            side.toLowerCase() +
-            '">' +
-            side +
-            ' performance</div>' +
-            '<div class="big ' +
-            cls(
-              directionStats[side].pnl
-            ) +
-            '">' +
-            money(
-              directionStats[side].pnl
-            ) +
-            '</div>' +
-            '<div class="muted">' +
-            directionStats[side].trades +
-            ' closed • ' +
-            num(
-              directionStats[side].r,
-              2
-            ) +
-            'R</div>' +
-            '</div>'
-        )
-        .join('');
-
-    document.getElementById(
-      'openRows'
-    ).innerHTML =
-      data.openTrades.length
-        ? data.openTrades
-            .map(
-              trade =>
-                '<tr>' +
-
-                '<td><b>' +
-                esc(
-                  trade.symbol
-                ) +
-                '</b></td>' +
-
-                '<td class="' +
-                trade.direction.toLowerCase() +
-                '">' +
-                trade.direction +
-                '</td>' +
-
-                '<td>' +
-                price(
-                  trade.entryPrice,
-                  trade.symbol
-                ) +
-                '</td>' +
-
-                '<td>' +
-                price(
-                  trade.currentPrice,
-                  trade.symbol
-                ) +
-                '</td>' +
-
-                '<td>' +
-                price(
-                  trade.stopLoss,
-                  trade.symbol
-                ) +
-                '</td>' +
-
-                '<td>' +
-                (
-                  trade.breakEvenActive
-                    ? 'ON'
-                    : 'OFF'
-                ) +
-                '</td>' +
-
-                '<td>' +
-                price(
-                  trade.takeProfit,
-                  trade.symbol
-                ) +
-                '</td>' +
-
-                '<td class="' +
-                cls(
-                  trade.currentR
-                ) +
-                '">' +
-                num(
-                  trade.currentR,
-                  2
-                ) +
-                'R</td>' +
-
-                '<td class="' +
-                cls(
-                  trade.floatingPnl
-                ) +
-                '">' +
-                money(
-                  trade.floatingPnl
-                ) +
-                '</td>' +
-
-                '<td>' +
-                num(
-                  trade.mfeR,
-                  2
-                ) +
-                'R</td>' +
-
-                '<td>' +
-                num(
-                  trade.maeR,
-                  2
-                ) +
-                'R</td>' +
-
-                '<td>' +
-                num(
-                  trade.cmo,
-                  1
-                ) +
-                '</td>' +
-
-                '<td>' +
-                num(
-                  trade.volumeRatio,
-                  2
-                ) +
-                'x</td>' +
-
-                '<td>' +
-                num(
-                  (
-                    Number(
-                      trade.bodyRatio
-                    ) ||
-                    0
-                  ) *
-                  100,
-                  0
-                ) +
-                '%</td>' +
-
-                '<td>' +
-                esc(
-                  trade.quality
-                ) +
-                ' ' +
-                num(
-                  trade.qualityScore,
-                  0
-                ) +
-                '/12</td>' +
-
-                '<td class="reason" title="' +
-                esc(
-                  (
-                    trade.reasons ||
-                    []
-                  ).join(', ')
-                ) +
-                '">' +
-                esc(
-                  (
-                    trade.reasons ||
-                    []
-                  ).join(', ') ||
-                  '—'
-                ) +
-                '</td>' +
-
-                '<td>' +
-                dur(
-                  trade.durationMinutes
-                ) +
-                '</td>' +
-
-                '<td>' +
-                '<button class="btn danger" onclick="closeOne(\\'' +
-                trade.id +
-                '\\',\\'' +
-                trade.symbol +
-                '\\')">Close</button>' +
-                '</td>' +
-
-                '</tr>'
-            )
-            .join('')
-        : '<tr><td colspan="18" class="muted">No open PAPER trades</td></tr>';
-
-    document.getElementById(
-      'closedRows'
-    ).innerHTML =
-      data.recentClosed.length
-        ? data.recentClosed
-            .map(
-              trade =>
-                '<tr>' +
-
-                '<td><b>' +
-                esc(
-                  trade.symbol
-                ) +
-                '</b></td>' +
-
-                '<td class="' +
-                trade.direction.toLowerCase() +
-                '">' +
-                trade.direction +
-                '</td>' +
-
-                '<td>' +
-                esc(
-                  trade.exitReason
-                ) +
-                '</td>' +
-
-                '<td>' +
-                price(
-                  trade.entryPrice,
-                  trade.symbol
-                ) +
-                '</td>' +
-
-                '<td>' +
-                price(
-                  trade.exitPrice,
-                  trade.symbol
-                ) +
-                '</td>' +
-
-                '<td class="' +
-                cls(
-                  trade.resultR
-                ) +
-                '">' +
-                num(
-                  trade.resultR,
-                  2
-                ) +
-                'R</td>' +
-
-                '<td class="' +
-                cls(
-                  trade.pnl
-                ) +
-                '">' +
-                money(
-                  trade.pnl
-                ) +
-                '</td>' +
-
-                '<td>' +
-                num(
-                  trade.mfeR,
-                  2
-                ) +
-                'R</td>' +
-
-                '<td>' +
-                num(
-                  trade.maeR,
-                  2
-                ) +
-                'R</td>' +
-
-                '<td>' +
-                esc(
-                  trade.quality ||
-                  ''
-                ) +
-                ' ' +
-                num(
-                  trade.qualityScore,
-                  0
-                ) +
-                '/12</td>' +
-
-                '<td>' +
-                new Date(
-                  trade.closedAt
-                ).toLocaleString() +
-                '</td>' +
-
-                '</tr>'
-            )
-            .join('')
-        : '<tr><td colspan="11" class="muted">No closed trades yet</td></tr>';
-
-    document.getElementById(
-      'err'
-    ).style.display =
-      'none';
-
-  } catch (
-    error
-  ) {
-    const box =
-      document.getElementById(
-        'err'
-      );
-
-    box.textContent =
-      'Dashboard error: ' +
-      error.message;
-
-    box.style.display =
-      'block';
-  }
+const money = value =>
+(Number(value)||0).toLocaleString(
+undefined,
+{
+style:'currency',
+currency:'USD',
+minimumFractionDigits:2
+}
+);
+
+const num = (value,digits=2) =>
+Number.isFinite(Number(value))
+? Number(value).toFixed(digits)
+: 'n/a';
+
+const cls = value =>
+Number(value)>=0
+? 'pos'
+: 'neg';
+
+const price = (value,symbol) => {
+
+if(!Number.isFinite(Number(value))){
+return 'n/a';
 }
 
-async function closeOne(
-  id,
-  symbol
-) {
-  if (
-    !confirm(
-      'Close ' +
-      symbol +
-      ' PAPER trade now?'
-    )
-  ) {
-    return;
-  }
+return Number(value).toFixed(
+symbol==='XAUUSD'
+? 2
+: symbol && symbol.endsWith('JPY')
+? 3
+: 5
+);
 
-  const response =
-    await fetch(
-      '/api/trades/' +
-      encodeURIComponent(
-        id
-      ) +
-      '/close',
-      {
-        method:
-          'POST',
+};
 
-        headers: {
-          'Content-Type':
-            'application/json'
-        },
+async function load(){
 
-        body:
-          JSON.stringify({
-            confirm:
-              'CLOSE'
-          })
-      }
-    );
+try{
 
-  const result =
-    await response.json();
+const response =
+await fetch(
+'/api/dashboard',
+{
+cache:'no-store'
+}
+);
 
-  if (
-    !response.ok
-  ) {
-    alert(
-      result.error ||
-      'Close failed'
-    );
-  }
+const data =
+await response.json();
 
-  await load();
+const market =
+document.getElementById('market');
+
+market.textContent =
+(data.marketReady ? '● MARKET READY' : '● MARKET WAIT')
++
+' | AI '
++
+(data.geminiReady ? 'READY' : 'OFF');
+
+market.className =
+'badge '
++
+(data.marketReady ? 'ok' : 'bad');
+
+const a =
+data.account;
+
+const e =
+data.engine;
+
+const cards = [
+
+[
+'Balance',
+money(a.balance)
+],
+
+[
+'Equity',
+money(a.equity)
+],
+
+[
+'Risk / Trade',
+money(a.riskPerTradeUsd)
++
+' ('
++
+a.riskPctPerTrade
++
+'%)'
+],
+
+[
+'Target / Trade',
+'2R ≈ '
++
+a.targetPctApprox
++
+'%'
+],
+
+[
+'Open Risk',
+money(a.openRiskUsd)
++
+' / '
++
+money(a.riskCapUsd)
+],
+
+[
+'Open Trades',
+e.openTrades
+],
+
+[
+'Wins / Losses / BE',
+a.wins
++
+' / '
++
+a.losses
++
+' / '
++
+a.breakeven
+],
+
+[
+'AI Approved / Reject',
+e.aiApprovedEntries
++
+' / '
++
+e.aiRejectedEntries
+],
+
+[
+'AI HOLD / CLOSE',
+e.aiHoldDecisions
++
+' / '
++
+e.aiCloseDecisions
+],
+
+[
+'Signals Exec / Skip',
+e.executedSignals
++
+' / '
++
+e.skippedSignals
+]
+
+];
+
+document.getElementById('cards').innerHTML =
+cards.map(
+item =>
+'<div class="card">'
++
+'<div class="muted">'
++
+item[0]
++
+'</div>'
++
+'<div class="big">'
++
+item[1]
++
+'</div>'
++
+'</div>'
+).join('');
+
+document.getElementById('openRows').innerHTML =
+data.openTrades.length
+?
+data.openTrades.map(
+trade => {
+
+const aiEntry =
+trade.aiEntryDecision
+?
+trade.aiEntryDecision.decision
++
+' '
++
+num(
+trade.aiEntryDecision.confidence,
+0
+)
++
+'%'
+:
+'—';
+
+const aiManage =
+trade.aiLastManagement
+?
+trade.aiLastManagement.decision
++
+' '
++
+num(
+trade.aiLastManagement.confidence,
+0
+)
++
+'%'
+:
+'—';
+
+return '<tr>'
++
+'<td><b>'
++
+trade.symbol
++
+'</b></td>'
++
+'<td class="'
++
+trade.direction.toLowerCase()
++
+'">'
++
+trade.direction
++
+'</td>'
++
+'<td>'
++
+price(
+trade.entryPrice,
+trade.symbol
+)
++
+'</td>'
++
+'<td>'
++
+price(
+trade.currentPrice,
+trade.symbol
+)
++
+'</td>'
++
+'<td>'
++
+price(
+trade.stopLoss,
+trade.symbol
+)
++
+'</td>'
++
+'<td>'
++
+price(
+trade.takeProfit,
+trade.symbol
+)
++
+'</td>'
++
+'<td class="'
++
+cls(trade.currentR)
++
+'">'
++
+num(
+trade.currentR,
+2
+)
++
+'R</td>'
++
+'<td class="'
++
+cls(trade.floatingPnl)
++
+'">'
++
+money(
+trade.floatingPnl
+)
++
+'</td>'
++
+'<td>'
++
+(
+trade.breakEvenActive
+?
+'ON'
+:
+'OFF'
+)
++
+'</td>'
++
+'<td>'
++
+num(
+trade.mfeR,
+2
+)
++
+'R</td>'
++
+'<td>'
++
+num(
+trade.maeR,
+2
+)
++
+'R</td>'
++
+'<td>'
++
+aiEntry
++
+'</td>'
++
+'<td>'
++
+aiManage
++
+'</td>'
++
+'<td>'
++
+'<button class="btn danger" onclick="closeOne(\\''
++
+trade.id
++
+'\\')">Close</button>'
++
+'</td>'
++
+'</tr>';
+
+}
+).join('')
+:
+'<tr><td colspan="14" class="muted">No open PAPER trades</td></tr>';
+
+document.getElementById('closedRows').innerHTML =
+data.recentClosed.length
+?
+data.recentClosed.map(
+trade =>
+'<tr>'
++
+'<td><b>'
++
+trade.symbol
++
+'</b></td>'
++
+'<td class="'
++
+trade.direction.toLowerCase()
++
+'">'
++
+trade.direction
++
+'</td>'
++
+'<td>'
++
+trade.exitReason
++
+'</td>'
++
+'<td class="'
++
+cls(trade.resultR)
++
+'">'
++
+num(
+trade.resultR,
+2
+)
++
+'R</td>'
++
+'<td class="'
++
+cls(trade.pnl)
++
+'">'
++
+money(
+trade.pnl
+)
++
+'</td>'
++
+'<td>'
++
+num(
+trade.mfeR,
+2
+)
++
+'R</td>'
++
+'<td>'
++
+num(
+trade.maeR,
+2
+)
++
+'R</td>'
++
+'<td>'
++
+new Date(
+trade.closedAt
+).toLocaleString()
++
+'</td>'
++
+'</tr>'
+).join('')
+:
+'<tr><td colspan="8" class="muted">No closed trades yet</td></tr>';
+
+}catch(error){
+
+console.error(error);
+
 }
 
-async function closeAll() {
-  if (
-    !confirm(
-      'Close ALL open PAPER trades?'
-    )
-  ) {
-    return;
-  }
+}
 
-  if (
-    !confirm(
-      'Confirm again: close every open PAPER trade now?'
-    )
-  ) {
-    return;
-  }
+async function closeOne(id){
 
-  const response =
-    await fetch(
-      '/api/trades/close-all',
-      {
-        method:
-          'POST',
+if(
+!confirm(
+'Close this PAPER trade now?'
+)
+){
+return;
+}
 
-        headers: {
-          'Content-Type':
-            'application/json'
-        },
+const response =
+await fetch(
+'/api/trades/'
++
+encodeURIComponent(id)
++
+'/close',
+{
+method:'POST',
+headers:{
+'Content-Type':'application/json'
+},
+body:JSON.stringify({
+confirm:'CLOSE'
+})
+}
+);
 
-        body:
-          JSON.stringify({
-            confirm:
-              'CLOSE_ALL'
-          })
-      }
-    );
+const result =
+await response.json();
 
-  const result =
-    await response.json();
+if(!response.ok){
+alert(
+result.error
+||
+'Close failed'
+);
+}
 
-  if (
-    !response.ok
-  ) {
-    alert(
-      result.error ||
-      'Close all failed'
-    );
-  } else {
-    alert(
-      'Closed: ' +
-      result.closed +
-      ' | Failed: ' +
-      result.failed
-    );
-  }
+await load();
 
-  await load();
+}
+
+async function closeAll(){
+
+if(
+!confirm(
+'Close ALL open PAPER trades?'
+)
+){
+return;
+}
+
+if(
+!confirm(
+'Confirm again: close every PAPER trade?'
+)
+){
+return;
+}
+
+const response =
+await fetch(
+'/api/trades/close-all',
+{
+method:'POST',
+headers:{
+'Content-Type':'application/json'
+},
+body:JSON.stringify({
+confirm:'CLOSE_ALL'
+})
+}
+);
+
+const result =
+await response.json();
+
+if(!response.ok){
+
+alert(
+result.error
+||
+'Close all failed'
+);
+
+}else{
+
+alert(
+'Closed: '
++
+result.closed
++
+' | Failed: '
++
+result.failed
+);
+
+}
+
+await load();
+
 }
 
 load();
 
 setInterval(
-  load,
-  3000
+load,
+3000
 );
 
 </script>
@@ -5916,6 +7532,10 @@ setInterval(
       );
   }
 );
+
+// ============================================================
+// API DASHBOARD
+// ============================================================
 
 app.get(
   '/api/dashboard',
@@ -5939,6 +7559,10 @@ app.get(
     }
   }
 );
+
+// ============================================================
+// MANUAL CLOSE ONE
+// ============================================================
 
 app.post(
   '/api/trades/:id/close',
@@ -6041,7 +7665,7 @@ app.post(
           .status(409)
           .json({
             error:
-              'Trade is already closing or closed'
+              'Trade already closing or closed'
           });
       }
 
@@ -6077,6 +7701,10 @@ app.post(
     }
   }
 );
+
+// ============================================================
+// MANUAL CLOSE ALL
+// ============================================================
 
 app.post(
   '/api/trades/close-all',
@@ -6241,19 +7869,6 @@ app.post(
     } catch (
       error
     ) {
-      await journal(
-        'ERROR',
-        {
-          message:
-            'close-all failed',
-
-          data: {
-            error:
-              safeError(error)
-          }
-        }
-      );
-
       res
         .status(500)
         .json({
@@ -6263,6 +7878,10 @@ app.post(
     }
   }
 );
+
+// ============================================================
+// HEALTH
+// ============================================================
 
 app.get(
   '/health',
@@ -6292,6 +7911,17 @@ app.get(
       telegramReady:
         state.telegramReady,
 
+      geminiReady:
+        state.geminiReady,
+
+      geminiConfigured:
+        Boolean(
+          GEMINI_API_KEY
+        ),
+
+      geminiModel:
+        GEMINI_MODEL,
+
       timeframe:
         TIMEFRAME,
 
@@ -6301,17 +7931,17 @@ app.get(
       openTrades:
         state.openTrades.size,
 
-      protectionRejects:
-        state.protectionRejects,
+      riskPct:
+        PAPER.riskPctPerTrade,
 
-      portfolioRiskRejects:
-        state.portfolioRiskRejects,
+      riskReward:
+        STRATEGY.riskReward,
 
-      breakEvenMoves:
-        state.breakEvenMoves,
+      portfolioRiskCapPct:
+        PAPER.portfolioRiskCapPct,
 
-      journalEvents:
-        state.journalEvents,
+      breakEvenTriggerR:
+        STRATEGY.breakEvenTriggerR,
 
       startedAt:
         state.startedAt,
@@ -6322,11 +7952,21 @@ app.get(
       lastQuotePollAt:
         state.lastQuotePollAt,
 
+      lastAiManageAt:
+        state.lastAiManageAt,
+
       lastMarketError:
-        state.lastMarketError
+        state.lastMarketError,
+
+      lastAiError:
+        state.lastAiError
     });
   }
 );
+
+// ============================================================
+// STATUS API
+// ============================================================
 
 app.get(
   '/api/status',
@@ -6345,9 +7985,6 @@ app.get(
         LIVE_TRADING,
 
       paper: {
-        accountKey:
-          PAPER.accountKey,
-
         startingBalance:
           PAPER.startingBalance,
 
@@ -6355,31 +7992,18 @@ app.get(
           account?.balance ??
           PAPER.startingBalance,
 
-        realizedPnl:
-          account?.realizedPnl ??
-          0,
-
-        totalTrades:
-          account?.totalTrades ??
-          0,
-
-        wins:
-          account?.wins ??
-          0,
-
-        losses:
-          account?.losses ??
-          0,
-
-        breakeven:
-          account?.breakeven ??
-          0,
-
-        openTrades:
-          state.openTrades.size,
-
         riskPctPerTrade:
           PAPER.riskPctPerTrade,
+
+        riskReward:
+          STRATEGY.riskReward,
+
+        theoreticalTargetPct:
+          PAPER.riskPctPerTrade *
+          STRATEGY.riskReward,
+
+        breakEvenTriggerR:
+          STRATEGY.breakEvenTriggerR,
 
         portfolioRiskCapPct:
           PAPER.portfolioRiskCapPct,
@@ -6391,12 +8015,46 @@ app.get(
           portfolioRiskCapUsd()
       },
 
-      engine: {
-        strategy:
-          STRATEGY,
+      ai: {
+        configured:
+          Boolean(
+            GEMINI_API_KEY
+          ),
 
+        ready:
+          state.geminiReady,
+
+        model:
+          GEMINI_MODEL,
+
+        entryCalls:
+          state.aiEntryCalls,
+
+        managementCalls:
+          state.aiManageCalls,
+
+        approvedEntries:
+          state.aiApprovedEntries,
+
+        rejectedEntries:
+          state.aiRejectedEntries,
+
+        holdDecisions:
+          state.aiHoldDecisions,
+
+        closeDecisions:
+          state.aiCloseDecisions,
+
+        lastError:
+          state.lastAiError
+      },
+
+      engine: {
         instruments:
           INSTRUMENTS,
+
+        strategy:
+          STRATEGY,
 
         rawSignals:
           state.rawSignals,
@@ -6420,21 +8078,77 @@ app.get(
           state.totalQuotePolls,
 
         breakEvenMoves:
-          state.breakEvenMoves,
-
-        journalEvents:
-          state.journalEvents
-      },
-
-      providers: {
-        primary:
-          'BiQuote',
-
-        twelveDataConfigured:
-          Boolean(
-            TWELVE_DATA_API_KEY
-          )
+          state.breakEvenMoves
       }
+    });
+  }
+);
+
+// ============================================================
+// TEST GEMINI ENDPOINT
+// ============================================================
+
+app.get(
+  '/api/ai/test',
+  async (
+    req,
+    res
+  ) => {
+    if (
+      !GEMINI_API_KEY
+    ) {
+      return res
+        .status(400)
+        .json({
+          ok:
+            false,
+
+          error:
+            'GEMINI_API_KEY missing'
+        });
+    }
+
+    const result =
+      await geminiJson(
+        `
+Return JSON only:
+{
+"ok":true,
+"message":"LOMY AI READY"
+}
+`,
+        {
+          test:
+            true,
+
+          version:
+            VERSION
+        }
+      );
+
+    if (
+      !result
+    ) {
+      return res
+        .status(500)
+        .json({
+          ok:
+            false,
+
+          error:
+            state.lastAiError
+        });
+    }
+
+    res.json({
+      ok:
+        true,
+
+      model:
+        GEMINI_MODEL,
+
+      response:
+        result
     });
   }
 );
@@ -6457,34 +8171,47 @@ async function boot() {
   );
 
   console.log(
-    `💰 New account: ${fmtMoney(PAPER.startingBalance)} | ` +
-    `Risk ${PAPER.riskPctPerTrade}% | ` +
-    `Portfolio cap ${PAPER.portfolioRiskCapPct}%`
+    `💰 Starting Balance: ${fmtMoney(PAPER.startingBalance)}`
   );
 
   console.log(
-    `⏱ Timeframe: ${TIMEFRAME} CLOSED candles`
+    `🛡️ Risk / Trade: ${PAPER.riskPctPerTrade}%`
   );
 
   console.log(
-    `📡 Instruments: ${INSTRUMENTS.length} (30 FX + XAUUSD)`
+    `🎯 R:R = 1:${STRATEGY.riskReward.toFixed(0)}`
   );
 
   console.log(
-    '🧠 Core: V5.1 + SMC Sniper + FVG + Liquidity Sweep + Retest + Fibonacci'
+    `💵 Theoretical: -1% SL / +2% TP`
   );
 
   console.log(
-    '🛡️ V1.2.3 Protection FROZEN: BUY BULL-FVG BLOCK | BUY CMO>=80 BLOCK | SELL CMO>-40 BLOCK'
+    `🛡️ Portfolio Risk Cap: ${PAPER.portfolioRiskCapPct}%`
   );
 
   console.log(
-    '📓 V1.2.4 Journal + MFE/MAE + Portfolio Risk Cap + Dashboard ON'
+    `🛡️ Break Even: +${STRATEGY.breakEvenTriggerR.toFixed(2)}R`
   );
 
   console.log(
-    `🎯 R:R 1:${STRATEGY.riskReward.toFixed(1)} | ` +
-    `BE at +${STRATEGY.breakEvenTriggerR.toFixed(1)}R`
+    `⏱ Signal timeframe: ${TIMEFRAME} CLOSED candles`
+  );
+
+  console.log(
+    `📡 Instruments: ${INSTRUMENTS.length}`
+  );
+
+  console.log(
+    `🧠 Gemini Model: ${GEMINI_MODEL}`
+  );
+
+  console.log(
+    `🧠 Gemini Key: ${GEMINI_API_KEY ? 'CONFIGURED' : 'MISSING'}`
+  );
+
+  console.log(
+    '🔒 AI cannot modify Risk Manager, API keys, LIVE mode or code'
   );
 
   console.log(
@@ -6495,7 +8222,7 @@ async function boot() {
     PORT,
     () => {
       console.log(
-        `🌐 Health server on port ${PORT}`
+        `🌐 Server running on port ${PORT}`
       );
     }
   );
@@ -6506,7 +8233,7 @@ async function boot() {
     'BOOT',
     {
       message:
-        'LOMY boot',
+        'LOMY V1.3 boot',
 
       data: {
         startingBalance:
@@ -6515,8 +8242,22 @@ async function boot() {
         riskPctPerTrade:
           PAPER.riskPctPerTrade,
 
+        riskReward:
+          STRATEGY.riskReward,
+
         portfolioRiskCapPct:
           PAPER.portfolioRiskCapPct,
+
+        breakEvenTriggerR:
+          STRATEGY.breakEvenTriggerR,
+
+        geminiModel:
+          GEMINI_MODEL,
+
+        geminiConfigured:
+          Boolean(
+            GEMINI_API_KEY
+          ),
 
         timeframe:
           TIMEFRAME,
@@ -6572,8 +8313,13 @@ async function boot() {
     QUOTE_POLL_MS
   );
 
+  setInterval(
+    manageTradesWithAI,
+    AI_MANAGE_INTERVAL_MS
+  );
+
   console.log(
-    '✅ LOMY Forex loops started'
+    '✅ LOMY Forex V1.3 loops started'
   );
 }
 
