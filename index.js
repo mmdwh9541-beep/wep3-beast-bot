@@ -58,7 +58,7 @@ const INSTRUMENTS = [
 // ============================================================
 
 const RULES = Object.freeze({
-  ​riskReward: 2,
+  riskReward: 2,
   breakEvenTriggerR: 0.60,
   partialTpTriggerR: 2.00, // الهدف الأول للإغلاق الجزئي (1:2)
   trailingStepR: 0.50,     // الوقف المتحرك بعد الهدف الأول
