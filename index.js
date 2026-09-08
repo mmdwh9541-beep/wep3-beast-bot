@@ -37,7 +37,7 @@ const TELEGRAM_BOT_TOKEN =
 const MONGODB_URI =
   String(
     process.env.MONGODB_URI ||
-    process.env.MONGO_URI ||
+    process.env.MONGODB_URI ||
     ''
   ).trim();
 
@@ -9070,7 +9070,7 @@ function printStartupBanner() {
     `Gemini key: ${GEMINI_API_KEY ? 'CONFIGURED' : 'MISSING'}`
   );
   console.log(
-    `Mongo: ${MONGO_URI ? 'CONFIGURED' : 'OPTIONAL/OFF'}`
+    `Mongo: ${MONGODB_URI ? 'CONFIGURED' : 'OPTIONAL/OFF'}`
   );
   console.log(
     `Telegram: ${bot ? 'CONFIGURED' : 'OPTIONAL/OFF'}`
