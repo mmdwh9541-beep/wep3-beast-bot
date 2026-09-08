@@ -9187,7 +9187,7 @@ async function boot() {
     // Database is optional for runtime.
     // If unavailable, bot continues in memory.
     try {
-      await connectMongo();
+      await initMongo();
     } catch (error) {
       console.error(
         'Mongo boot:',
@@ -9195,11 +9195,9 @@ async function boot() {
       );
     }
 
-    await initializeAccount();
 
-    await restoreOpenTrades();
 
-    await startTelegram();
+    await initTelegram();
 
     try {
       await initializeMarket();
