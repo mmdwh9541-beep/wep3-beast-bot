@@ -6,11 +6,26 @@ const mongoose = require('mongoose');
 const { Telegraf } = require('telegraf');
 
 // ============================================================
-// LOMY FOREX V1.3 AI TRADER
+// LOMY FOREX V1.4 — GEMINI COMMANDER
 // PAPER ONLY
+//
+// Architecture:
+// Market Data -> Technical Intelligence -> Gemini Commander
+// -> Hard Risk Guard -> Paper Execution -> AI Management
+//
+// IMPORTANT:
+// R:R = 1:2 means:
+// Risk distance = 1R
+// Profit distance = 2R
+//
+// It does NOT mean:
+// -1% account loss / +2% account profit.
+//
+// The percentage below is only a MAXIMUM CAPITAL-RISK SAFETY CAP
+// used for position sizing.
 // ============================================================
 
-const VERSION = 'LOMY FOREX V1.3 AI TRADER';
+const VERSION = 'LOMY FOREX V1.4 GEMINI COMMANDER';
 const MODE = 'PAPER';
 const LIVE_TRADING = false;
 
@@ -20,20 +35,33 @@ const TELEGRAM_BOT_TOKEN =
   String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 
 const MONGODB_URI =
-  String(process.env.MONGODB_URI || '').trim();
-
-const TWELVE_DATA_API_KEY =
-  String(process.env.TWELVE_DATA_API_KEY || '').trim();
+  String(
+    process.env.MONGODB_URI ||
+    process.env.MONGO_URI ||
+    ''
+  ).trim();
 
 const GEMINI_API_KEY =
   String(process.env.GEMINI_API_KEY || '').trim();
 
 const GEMINI_MODEL =
-  String(process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
+  String(
+    process.env.GEMINI_MODEL ||
+    'gemini-2.5-flash'
+  ).trim();
 
-const BIQUOTE_BASE = 'https://biquote.io';
+const BIQUOTE_BASE =
+  String(
+    process.env.BIQUOTE_BASE_URL ||
+    'https://biquote.io'
+  ).replace(/\/+$/, '');
+
 const GEMINI_BASE =
   'https://generativelanguage.googleapis.com/v1beta';
+
+// ============================================================
+// TIME / MARKET CONFIG
+// ============================================================
 
 const TIMEFRAME = '15m';
 const TIMEFRAME_MS = 15 * 60 * 1000;
@@ -50,7 +78,11 @@ const SCAN_TIMER_MS = 4000;
 const AI_MANAGE_INTERVAL_MS = 60 * 1000;
 const AI_MIN_MANAGE_GAP_MS = 5 * 60 * 1000;
 
-const JOURNAL_COLLECTION = 'lomyforexjournalv13';
+// Prevent hammering Gemini when many instruments are processed.
+const GEMINI_MIN_CALL_GAP_MS = 850;
+
+const JOURNAL_COLLECTION =
+  'lomyforexjournalv14';
 
 // ============================================================
 // INSTRUMENTS
@@ -98,78 +130,105 @@ const INSTRUMENTS = [
 ];
 
 // ============================================================
-// STRATEGY
-// Signal engine remains based on V1.2.4/FIX1 logic.
-// Risk/Reward changed to requested 1:2.
+// IMMUTABLE TRADING RULES
 // ============================================================
 
-const STRATEGY = Object.freeze({
-  cmoLen: 9,
+const RULES = Object.freeze({
+  // Exact structural reward/risk relationship.
+  riskReward: 2.0,
 
-  cmoBuyThresh: 30,
-  cmoSellThresh: -30,
-
-  volLen: 10,
-  volMult: 1.30,
-
-  srLen: 20,
-
-  fastEmaLen: 9,
-  slowEmaLen: 21,
-
-  atrLen: 14,
-  atrMargin: 0.20,
-
-  bodyRatioMin: 0.50,
-
-  // ==========================================================
-  // USER REQUEST:
-  // 1% risk / 2% theoretical profit
-  // R:R = 1:2
-  // ==========================================================
-  riskReward: 2.00,
-
+  // Mechanical break-even.
   breakEvenTriggerR: 0.60,
 
-  maxEntryMoveAtr: 0.50,
+  // Reject entry if price has moved too far from analyzed close.
+  maxEntryMoveAtr: 0.60,
 
-  retestLookback: 8,
+  // Gemini SL must be technically sensible relative to ATR.
+  minStopAtr: 0.25,
+  maxStopAtr: 6.00,
 
-  fibLookback: 40,
-  fibToleranceAtr: 0.20,
+  // Spread protection.
+  maxSpreadRiskFraction: 0.20,
 
-  smcFastEmaLen: 50,
-  smcSlowEmaLen: 200,
+  // Gemini confidence required for BUY/SELL.
+  minEntryConfidence: 62,
 
-  adxLen: 14,
-  adxThreshold: 25,
-
-  pivotLeft: 5,
-  pivotRight: 5,
-
-  rejectBullFvgBuys: true,
-
-  buyCmoMax: 80,
-  sellCmoMax: -40
+  // Gemini confidence required for discretionary CLOSE.
+  minCloseConfidence: 68
 });
 
 // ============================================================
-// PAPER RISK MANAGER
-// AI IS NOT ALLOWED TO OVERRIDE THESE VALUES.
+// CAPITAL SAFETY
+//
+// maxCapitalRiskPct is NOT a profit/loss target.
+//
+// It only answers:
+// "What is the maximum account capital that this PAPER position
+// is permitted to lose if its original SL is hit?"
+//
+// TP is never calculated from this percentage.
+// TP is calculated only from price-distance R:R = 1:2.
 // ============================================================
 
 const PAPER = Object.freeze({
   startingBalance: 300,
 
-  // 1% maximum theoretical risk per trade
-  riskPctPerTrade: 1.00,
+  maxCapitalRiskPct: 1.00,
 
-  // Maximum total active portfolio risk
   portfolioRiskCapPct: 4.00,
 
   maxOpenTrades: 31,
 
-  accountKey: 'lomy-forex-v13-ai-300usd'
+  accountKey:
+    'lomy-forex-v14-gemini-commander-300usd'
+});
+
+// ============================================================
+// TECHNICAL INTELLIGENCE CONFIG
+// ============================================================
+
+const TECH = Object.freeze({
+  emaFast: 9,
+  emaMedium: 21,
+  emaTrend: 50,
+  emaLong: 100,
+  emaMacro: 200,
+
+  rsiLen: 14,
+  cmoLen: 9,
+
+  atrLen: 14,
+
+  adxLen: 14,
+
+  stochasticLen: 14,
+  stochasticSmooth: 3,
+
+  rocLen: 12,
+
+  bbLen: 20,
+  bbStd: 2,
+
+  keltnerLen: 20,
+  keltnerAtrLen: 14,
+  keltnerMult: 1.5,
+
+  volumeLen: 20,
+
+  srLen: 40,
+
+  fibLookback: 60,
+
+  structureLookback: 30,
+
+  swingLeft: 3,
+  swingRight: 3,
+
+  liquidityLookback: 20,
+
+  vwapLookback: 50,
+
+  mfiLen: 14
 });
 
 // ============================================================
@@ -179,27 +238,15 @@ const PAPER = Object.freeze({
 const AI = Object.freeze({
   enabled: true,
 
-  // AI confirms or rejects entry candidates.
-  entryDecisionEnabled: true,
+  entryCommanderEnabled: true,
 
-  // AI can recommend HOLD or CLOSE.
   managementEnabled: true,
-
-  // AI can never modify SL/TP/risk/quantity.
-  canModifyRisk: false,
-
-  // AI cannot open arbitrary trades without strategy candidate.
-  strategyCandidateRequired: true,
-
-  entryMinConfidence: 60,
-
-  managementMinConfidence: 65,
 
   memoryClosedTrades: 30,
 
-  temperature: 0.15,
+  temperature: 0.10,
 
-  timeoutMs: 18000
+  timeoutMs: 20000
 });
 
 // ============================================================
@@ -234,12 +281,14 @@ const state = {
 
   aiEntryCalls: 0,
   aiManageCalls: 0,
-  aiApprovedEntries: 0,
-  aiRejectedEntries: 0,
+
+  aiBuyDecisions: 0,
+  aiSellDecisions: 0,
+  aiNoTradeDecisions: 0,
+
   aiCloseDecisions: 0,
   aiHoldDecisions: 0,
 
-  rawSignals: 0,
   executedSignals: 0,
   skippedSignals: 0,
 
@@ -258,14 +307,16 @@ const state = {
 
   closingTrades: new Set(),
 
-  aiLastManageByTrade: new Map()
+  aiLastManageByTrade: new Map(),
+
+  geminiQueue: Promise.resolve(),
+  geminiLastCallAt: 0
 };
 
 for (const symbol of INSTRUMENTS) {
   state.pairState.set(symbol, {
     bars: [],
     lastClosedBarTime: null,
-    lastSignal: 0,
     lastAnalysis: null,
     initialized: false,
     errors: 0
@@ -282,17 +333,26 @@ function n(value, fallback = NaN) {
 }
 
 function safeError(error) {
+  const data = error?.response?.data;
+
+  if (typeof data === 'string' && data.trim()) {
+    return data.slice(0, 500);
+  }
+
   return (
-    error?.response?.data?.error?.message ||
-    error?.response?.data?.message ||
-    error?.response?.data?.error ||
+    data?.error?.message ||
+    data?.message ||
+    data?.error ||
     error?.message ||
     String(error)
   );
 }
 
 function clamp(value, minimum, maximum) {
-  return Math.max(minimum, Math.min(maximum, value));
+  return Math.max(
+    minimum,
+    Math.min(maximum, value)
+  );
 }
 
 function fmtMoney(value) {
@@ -324,6 +384,79 @@ function barTimeMs(bar) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function average(values) {
+  const clean = values.filter(Number.isFinite);
+
+  if (!clean.length) {
+    return NaN;
+  }
+
+  return clean.reduce((a, b) => a + b, 0) / clean.length;
+}
+
+function sum(values) {
+  return values
+    .filter(Number.isFinite)
+    .reduce((a, b) => a + b, 0);
+}
+
+function standardDeviation(values) {
+  const clean = values.filter(Number.isFinite);
+
+  if (!clean.length) {
+    return NaN;
+  }
+
+  const mean = average(clean);
+
+  const variance =
+    clean.reduce(
+      (total, value) =>
+        total + Math.pow(value - mean, 2),
+      0
+    ) / clean.length;
+
+  return Math.sqrt(variance);
+}
+
+function lastFinite(values) {
+  for (let i = values.length - 1; i >= 0; i--) {
+    if (Number.isFinite(values[i])) {
+      return values[i];
+    }
+  }
+
+  return NaN;
+}
+
+function pctChange(from, to) {
+  if (
+    !Number.isFinite(from) ||
+    !Number.isFinite(to) ||
+    from === 0
+  ) {
+    return NaN;
+  }
+
+  return ((to - from) / from) * 100;
+}
+
+function highestHigh(bars) {
+  if (!bars?.length) {
+    return NaN;
+  }
+
+  return Math.max(...bars.map(bar => bar.high));
+}
+
+function lowestLow(bars) {
+  if (!bars?.length) {
+    return NaN;
+  }
+
+  return Math.min(...bars.map(bar => bar.low));
 }
 
 // ============================================================
@@ -367,24 +500,30 @@ function normalizeBars(rawBars) {
     )
     .sort(
       (a, b) =>
-        barTimeMs(a) -
-        barTimeMs(b)
+        barTimeMs(a) - barTimeMs(b)
     );
 }
 
-function closedBarsOnly(bars) {
+function closedBarsOnly(bars, interval = TIMEFRAME) {
   const now = Date.now();
+
+  const intervalMs =
+    interval === '4h'
+      ? 4 * 60 * 60 * 1000
+      : interval === '1h'
+        ? 60 * 60 * 1000
+        : TIMEFRAME_MS;
 
   return bars.filter(
     bar =>
       !bar.isOpen &&
       barTimeMs(bar) > 0 &&
-      barTimeMs(bar) + TIMEFRAME_MS <= now + 5000
+      barTimeMs(bar) + intervalMs <= now + 5000
   );
 }
 
 // ============================================================
-// INDICATORS
+// SMA
 // ============================================================
 
 function sma(values, length) {
@@ -395,22 +534,18 @@ function sma(values, length) {
     return NaN;
   }
 
-  const selected =
-    values.slice(-length);
+  const selected = values.slice(-length);
 
-  if (
-    !selected.every(Number.isFinite)
-  ) {
+  if (!selected.every(Number.isFinite)) {
     return NaN;
   }
 
-  return (
-    selected.reduce(
-      (a, b) => a + b,
-      0
-    ) / length
-  );
+  return sum(selected) / length;
 }
+
+// ============================================================
+// EMA
+// ============================================================
 
 function emaSeries(values, length) {
   if (
@@ -423,22 +558,25 @@ function emaSeries(values, length) {
   const out =
     new Array(values.length).fill(NaN);
 
-  const k =
-    2 / (length + 1);
+  const k = 2 / (length + 1);
+
+  const seed = values.slice(0, length);
+
+  if (!seed.every(Number.isFinite)) {
+    return out;
+  }
 
   out[length - 1] =
-    values
-      .slice(0, length)
-      .reduce(
-        (a, b) => a + b,
-        0
-      ) / length;
+    sum(seed) / length;
 
-  for (
-    let i = length;
-    i < values.length;
-    i++
-  ) {
+  for (let i = length; i < values.length; i++) {
+    if (
+      !Number.isFinite(values[i]) ||
+      !Number.isFinite(out[i - 1])
+    ) {
+      continue;
+    }
+
     out[i] =
       values[i] * k +
       out[i - 1] * (1 - k);
@@ -448,92 +586,75 @@ function emaSeries(values, length) {
 }
 
 function emaLast(values, length) {
-  const series =
-    emaSeries(
-      values,
-      length
-    );
-
-  return series.length
-    ? series[series.length - 1]
-    : NaN;
+  return lastFinite(
+    emaSeries(values, length)
+  );
 }
 
-function atrLast(bars, length) {
-  if (
-    bars.length <
-    length + 1
-  ) {
+// ============================================================
+// RSI — WILDER
+// ============================================================
+
+function rsiLast(values, length = 14) {
+  if (values.length < length + 1) {
     return NaN;
   }
 
-  const trueRange = [];
+  let gain = 0;
+  let loss = 0;
 
-  for (
-    let i = 1;
-    i < bars.length;
-    i++
-  ) {
-    const current =
-      bars[i];
+  for (let i = 1; i <= length; i++) {
+    const change =
+      values[i] - values[i - 1];
 
-    const previousClose =
-      bars[i - 1].close;
-
-    trueRange.push(
-      Math.max(
-        current.high -
-          current.low,
-
-        Math.abs(
-          current.high -
-          previousClose
-        ),
-
-        Math.abs(
-          current.low -
-          previousClose
-        )
-      )
-    );
+    if (change > 0) {
+      gain += change;
+    } else {
+      loss += Math.abs(change);
+    }
   }
 
-  if (
-    trueRange.length <
-    length
-  ) {
-    return NaN;
-  }
+  let avgGain = gain / length;
+  let avgLoss = loss / length;
 
-  let atr =
-    trueRange
-      .slice(0, length)
-      .reduce(
-        (a, b) => a + b,
-        0
-      ) / length;
+  for (let i = length + 1; i < values.length; i++) {
+    const change =
+      values[i] - values[i - 1];
 
-  for (
-    let i = length;
-    i < trueRange.length;
-    i++
-  ) {
-    atr =
+    const currentGain =
+      change > 0 ? change : 0;
+
+    const currentLoss =
+      change < 0 ? Math.abs(change) : 0;
+
+    avgGain =
       (
-        atr *
-        (length - 1) +
-        trueRange[i]
+        avgGain * (length - 1) +
+        currentGain
+      ) / length;
+
+    avgLoss =
+      (
+        avgLoss * (length - 1) +
+        currentLoss
       ) / length;
   }
 
-  return atr;
+  if (avgLoss === 0) {
+    return avgGain === 0 ? 50 : 100;
+  }
+
+  const rs = avgGain / avgLoss;
+
+  return 100 - 100 / (1 + rs);
 }
+
+// ============================================================
+// CMO
+// ============================================================
 
 function cmoLast(values, length) {
-  if (
-    values.length <
-    length + 1
-  ) {
+  if (values.length < length + 1) {
     return NaN;
   }
 
@@ -541,64 +662,377 @@ function cmoLast(values, length) {
   let down = 0;
 
   for (
-    let i =
-      values.length -
-      length;
+    let i = values.length - length;
     i < values.length;
     i++
   ) {
     const difference =
-      values[i] -
-      values[i - 1];
+      values[i] - values[i - 1];
 
-    if (
-      difference >
-      0
-    ) {
-      up +=
-        difference;
+    if (difference > 0) {
+      up += difference;
     } else {
-      down +=
-        Math.abs(
-          difference
-        );
+      down += Math.abs(difference);
     }
   }
 
-  const denominator =
-    up + down;
+  const denominator = up + down;
 
   return denominator === 0
     ? 0
-    : 100 *
-      (up - down) /
-      denominator;
+    : 100 * (up - down) / denominator;
 }
 
-function highestHigh(bars) {
-  return Math.max(
-    ...bars.map(
-      bar => bar.high
-    )
-  );
+// ============================================================
+// TRUE RANGE / ATR
+// ============================================================
+
+function trueRangeSeries(bars) {
+  if (!bars || bars.length < 2) {
+    return [];
+  }
+
+  const output = [];
+
+  for (let i = 1; i < bars.length; i++) {
+    const current = bars[i];
+    const previousClose = bars[i - 1].close;
+
+    output.push(
+      Math.max(
+        current.high - current.low,
+        Math.abs(current.high - previousClose),
+        Math.abs(current.low - previousClose)
+      )
+    );
+  }
+
+  return output;
 }
 
-function lowestLow(bars) {
-  return Math.min(
-    ...bars.map(
-      bar => bar.low
-    )
-  );
+function atrLast(bars, length = 14) {
+  const ranges = trueRangeSeries(bars);
+
+  if (ranges.length < length) {
+    return NaN;
+  }
+
+  let atr =
+    sum(ranges.slice(0, length)) / length;
+
+  for (let i = length; i < ranges.length; i++) {
+    atr =
+      (
+        atr * (length - 1) +
+        ranges[i]
+      ) / length;
+  }
+
+  return atr;
 }
 
-function dmiAdx(
-  bars,
-  length = 14
+// ============================================================
+// MACD
+// ============================================================
+
+function macdLast(
+  values,
+  fast = 12,
+  slow = 26,
+  signalLength = 9
 ) {
-  if (
-    bars.length <
-    length * 2 + 2
+  if (values.length < slow + signalLength) {
+    return {
+      macd: NaN,
+      signal: NaN,
+      histogram: NaN
+    };
+  }
+
+  const fastSeries = emaSeries(values, fast);
+  const slowSeries = emaSeries(values, slow);
+
+  const macdValues = [];
+
+  for (let i = 0; i < values.length; i++) {
+    if (
+      Number.isFinite(fastSeries[i]) &&
+      Number.isFinite(slowSeries[i])
+    ) {
+      macdValues.push(
+        fastSeries[i] - slowSeries[i]
+      );
+    }
+  }
+
+  if (macdValues.length < signalLength) {
+    return {
+      macd: NaN,
+      signal: NaN,
+      histogram: NaN
+    };
+  }
+
+  const macd = macdValues[macdValues.length - 1];
+  const signal = emaLast(macdValues, signalLength);
+
+  return {
+    macd,
+    signal,
+    histogram:
+      Number.isFinite(signal)
+        ? macd - signal
+        : NaN
+  };
+}
+
+// ============================================================
+// STOCHASTIC
+// ============================================================
+
+function stochasticLast(
+  bars,
+  length = 14,
+  smooth = 3
+) {
+  if (bars.length < length + smooth - 1) {
+    return {
+      k: NaN,
+      d: NaN
+    };
+  }
+
+  const kValues = [];
+
+  for (
+    let end = bars.length - smooth;
+    end < bars.length;
+    end++
   ) {
+    const start =
+      end - length + 1;
+
+    if (start < 0) {
+      continue;
+    }
+
+    const window =
+      bars.slice(start, end + 1);
+
+    const high =
+      highestHigh(window);
+
+    const low =
+      lowestLow(window);
+
+    const close =
+      bars[end].close;
+
+    const range =
+      high - low;
+
+    kValues.push(
+      range > 0
+        ? ((close - low) / range) * 100
+        : 50
+    );
+  }
+
+  if (!kValues.length) {
+    return {
+      k: NaN,
+      d: NaN
+    };
+  }
+
+  return {
+    k: kValues[kValues.length - 1],
+    d: average(kValues)
+  };
+}
+
+// ============================================================
+// WILLIAMS %R
+// ============================================================
+
+function williamsRLast(bars, length = 14) {
+  if (bars.length < length) {
+    return NaN;
+  }
+
+  const window =
+    bars.slice(-length);
+
+  const high =
+    highestHigh(window);
+
+  const low =
+    lowestLow(window);
+
+  const close =
+    bars[bars.length - 1].close;
+
+  const range =
+    high - low;
+
+  if (!(range > 0)) {
+    return -50;
+  }
+
+  return (
+    -100 *
+    (high - close) /
+    range
+  );
+}
+
+// ============================================================
+// RATE OF CHANGE
+// ============================================================
+
+function rocLast(values, length = 12) {
+  if (values.length < length + 1) {
+    return NaN;
+  }
+
+  const current =
+    values[values.length - 1];
+
+  const previous =
+    values[values.length - 1 - length];
+
+  return pctChange(previous, current);
+}
+
+// ============================================================
+// BOLLINGER BANDS
+// ============================================================
+
+function bollingerLast(
+  values,
+  length = 20,
+  multiplier = 2
+) {
+  if (values.length < length) {
+    return {
+      middle: NaN,
+      upper: NaN,
+      lower: NaN,
+      widthPct: NaN,
+      position: NaN
+    };
+  }
+
+  const window =
+    values.slice(-length);
+
+  const middle =
+    average(window);
+
+  const deviation =
+    standardDeviation(window);
+
+  const upper =
+    middle +
+    deviation * multiplier;
+
+  const lower =
+    middle -
+    deviation * multiplier;
+
+  const current =
+    values[values.length - 1];
+
+  const width =
+    upper - lower;
+
+  return {
+    middle,
+    upper,
+    lower,
+
+    widthPct:
+      middle !== 0
+        ? (width / middle) * 100
+        : NaN,
+
+    position:
+      width > 0
+        ? (current - lower) / width
+        : 0.5
+  };
+}
+
+// ============================================================
+// KELTNER CHANNEL
+// ============================================================
+
+function keltnerLast(
+  bars,
+  length = 20,
+  atrLength = 14,
+  multiplier = 1.5
+) {
+  if (bars.length < Math.max(length, atrLength) + 1) {
+    return {
+      middle: NaN,
+      upper: NaN,
+      lower: NaN,
+      position: NaN
+    };
+  }
+
+  const closes =
+    bars.map(bar => bar.close);
+
+  const middle =
+    emaLast(closes, length);
+
+  const atr =
+    atrLast(bars, atrLength);
+
+  if (
+    !Number.isFinite(middle) ||
+    !Number.isFinite(atr)
+  ) {
+    return {
+      middle: NaN,
+      upper: NaN,
+      lower: NaN,
+      position: NaN
+    };
+  }
+
+  const upper =
+    middle + atr * multiplier;
+
+  const lower =
+    middle - atr * multiplier;
+
+  const current =
+    closes[closes.length - 1];
+
+  const width =
+    upper - lower;
+
+  return {
+    middle,
+    upper,
+    lower,
+
+    position:
+      width > 0
+        ? (current - lower) / width
+        : 0.5
+  };
+}
+
+// ============================================================
+// DMI / ADX
+// ============================================================
+
+function dmiAdx(bars, length = 14) {
+  if (bars.length < length * 2 + 2) {
     return {
       adx: NaN,
       plusDI: NaN,
@@ -606,159 +1040,98 @@ function dmiAdx(
     };
   }
 
-  const trueRange = [];
-  const plus = [];
-  const minus = [];
+  const tr = [];
+  const plusDM = [];
+  const minusDM = [];
 
-  for (
-    let i = 1;
-    i < bars.length;
-    i++
-  ) {
-    const current =
-      bars[i];
-
-    const previous =
-      bars[i - 1];
+  for (let i = 1; i < bars.length; i++) {
+    const current = bars[i];
+    const previous = bars[i - 1];
 
     const upMove =
-      current.high -
-      previous.high;
+      current.high - previous.high;
 
     const downMove =
-      previous.low -
-      current.low;
+      previous.low - current.low;
 
-    plus.push(
-      upMove >
-        downMove &&
-      upMove >
-        0
+    plusDM.push(
+      upMove > downMove && upMove > 0
         ? upMove
         : 0
     );
 
-    minus.push(
-      downMove >
-        upMove &&
-      downMove >
-        0
+    minusDM.push(
+      downMove > upMove && downMove > 0
         ? downMove
         : 0
     );
 
-    trueRange.push(
+    tr.push(
       Math.max(
-        current.high -
-          current.low,
-
-        Math.abs(
-          current.high -
-          previous.close
-        ),
-
-        Math.abs(
-          current.low -
-          previous.close
-        )
+        current.high - current.low,
+        Math.abs(current.high - previous.close),
+        Math.abs(current.low - previous.close)
       )
     );
   }
 
   let trSmooth =
-    trueRange
-      .slice(0, length)
-      .reduce(
-        (a, b) =>
-          a + b,
-        0
-      );
+    sum(tr.slice(0, length));
 
   let plusSmooth =
-    plus
-      .slice(0, length)
-      .reduce(
-        (a, b) =>
-          a + b,
-        0
-      );
+    sum(plusDM.slice(0, length));
 
   let minusSmooth =
-    minus
-      .slice(0, length)
-      .reduce(
-        (a, b) =>
-          a + b,
-        0
-      );
+    sum(minusDM.slice(0, length));
 
   const dx = [];
 
   let plusDI = NaN;
   let minusDI = NaN;
 
-  for (
-    let i = length;
-    i < trueRange.length;
-    i++
-  ) {
-    if (
-      i >
-      length
-    ) {
+  for (let i = length; i < tr.length; i++) {
+    if (i > length) {
       trSmooth =
         trSmooth -
-        trSmooth /
-          length +
-        trueRange[i];
+        trSmooth / length +
+        tr[i];
 
       plusSmooth =
         plusSmooth -
-        plusSmooth /
-          length +
-        plus[i];
+        plusSmooth / length +
+        plusDM[i];
 
       minusSmooth =
         minusSmooth -
-        minusSmooth /
-          length +
-        minus[i];
+        minusSmooth / length +
+        minusDM[i];
     }
 
     plusDI =
-      trSmooth
-        ? 100 *
-          plusSmooth /
-          trSmooth
+      trSmooth > 0
+        ? 100 * plusSmooth / trSmooth
         : 0;
 
     minusDI =
-      trSmooth
-        ? 100 *
-          minusSmooth /
-          trSmooth
+      trSmooth > 0
+        ? 100 * minusSmooth / trSmooth
         : 0;
 
     const denominator =
-      plusDI +
-      minusDI;
+      plusDI + minusDI;
 
     dx.push(
-      denominator
-        ? 100 *
-          Math.abs(
-            plusDI -
-            minusDI
-          ) /
-          denominator
+      denominator > 0
+        ? (
+            100 *
+            Math.abs(plusDI - minusDI) /
+            denominator
+          )
         : 0
     );
   }
 
-  if (
-    dx.length <
-    length
-  ) {
+  if (dx.length < length) {
     return {
       adx: NaN,
       plusDI,
@@ -767,23 +1140,12 @@ function dmiAdx(
   }
 
   let adx =
-    dx
-      .slice(0, length)
-      .reduce(
-        (a, b) =>
-          a + b,
-        0
-      ) / length;
+    average(dx.slice(0, length));
 
-  for (
-    let i = length;
-    i < dx.length;
-    i++
-  ) {
+  for (let i = length; i < dx.length; i++) {
     adx =
       (
-        adx *
-        (length - 1) +
+        adx * (length - 1) +
         dx[i]
       ) / length;
   }
@@ -796,255 +1158,845 @@ function dmiAdx(
 }
 
 // ============================================================
-// RETEST CONTEXT
+// OBV
 // ============================================================
 
-function retestContext(
-  prior,
-  signal,
-  direction
-) {
-  const window =
-    prior.slice(
-      -STRATEGY.retestLookback
-    );
-
-  if (
-    !window.length
-  ) {
+function obvContext(bars, lookback = 20) {
+  if (bars.length < 3) {
     return {
-      score: 0,
-      breakout: false,
-      retest: false,
-      level: NaN
+      value: 0,
+      change: 0,
+      direction: 'FLAT'
     };
   }
 
-  const level =
-    direction === 'BUY'
-      ? highestHigh(window)
-      : lowestLow(window);
+  const values = [0];
 
-  let breakout = false;
-  let retest = false;
+  for (let i = 1; i < bars.length; i++) {
+    const previous =
+      values[values.length - 1];
 
-  if (
-    direction ===
-    'BUY'
-  ) {
-    breakout =
-      signal.close >
-      level;
-
-    retest =
-      signal.low <=
-        level &&
-      signal.close >
-        level;
-  } else {
-    breakout =
-      signal.close <
-      level;
-
-    retest =
-      signal.high >=
-        level &&
-      signal.close <
-        level;
+    if (bars[i].close > bars[i - 1].close) {
+      values.push(
+        previous + n(bars[i].volume, 0)
+      );
+    } else if (bars[i].close < bars[i - 1].close) {
+      values.push(
+        previous - n(bars[i].volume, 0)
+      );
+    } else {
+      values.push(previous);
+    }
   }
 
-  return {
-    score:
-      Number(breakout) +
-      Number(retest),
+  const current =
+    values[values.length - 1];
 
-    breakout,
-    retest,
-    level
+  const previousIndex =
+    Math.max(
+      0,
+      values.length - 1 - lookback
+    );
+
+  const previous =
+    values[previousIndex];
+
+  const change =
+    current - previous;
+
+  return {
+    value: current,
+    change,
+
+    direction:
+      change > 0
+        ? 'UP'
+        : change < 0
+          ? 'DOWN'
+          : 'FLAT'
   };
 }
 
 // ============================================================
-// FIBONACCI CONTEXT
+// MFI
 // ============================================================
 
-function fibContext(
-  prior,
-  signal,
-  atr,
-  direction
-) {
+function mfiLast(bars, length = 14) {
+  if (bars.length < length + 1) {
+    return NaN;
+  }
+
+  let positive = 0;
+  let negative = 0;
+
+  const start =
+    bars.length - length;
+
+  for (let i = start; i < bars.length; i++) {
+    if (i <= 0) {
+      continue;
+    }
+
+    const typical =
+      (
+        bars[i].high +
+        bars[i].low +
+        bars[i].close
+      ) / 3;
+
+    const previousTypical =
+      (
+        bars[i - 1].high +
+        bars[i - 1].low +
+        bars[i - 1].close
+      ) / 3;
+
+    const flow =
+      typical *
+      Math.max(0, n(bars[i].volume, 0));
+
+    if (typical > previousTypical) {
+      positive += flow;
+    } else if (typical < previousTypical) {
+      negative += flow;
+    }
+  }
+
+  if (negative === 0) {
+    return positive > 0 ? 100 : 50;
+  }
+
+  const ratio =
+    positive / negative;
+
+  return 100 - 100 / (1 + ratio);
+}
+
+// ============================================================
+// ROLLING VWAP
+// ============================================================
+
+function rollingVwap(bars, lookback = 50) {
+  if (!bars.length) {
+    return NaN;
+  }
+
   const window =
-    prior.slice(
-      -STRATEGY.fibLookback
+    bars.slice(-lookback);
+
+  let numerator = 0;
+  let denominator = 0;
+
+  for (const bar of window) {
+    const volume =
+      Math.max(0, n(bar.volume, 0));
+
+    const typical =
+      (
+        bar.high +
+        bar.low +
+        bar.close
+      ) / 3;
+
+    numerator +=
+      typical * volume;
+
+    denominator +=
+      volume;
+  }
+
+  if (denominator <= 0) {
+    return NaN;
+  }
+
+  return numerator / denominator;
+}
+
+// ============================================================
+// CANDLE / PRICE ACTION
+// ============================================================
+
+function candleContext(bars) {
+  if (!bars.length) {
+    return null;
+  }
+
+  const current =
+    bars[bars.length - 1];
+
+  const previous =
+    bars.length >= 2
+      ? bars[bars.length - 2]
+      : null;
+
+  const range =
+    current.high - current.low;
+
+  const body =
+    Math.abs(
+      current.close - current.open
     );
 
-  if (
-    window.length <
-      10 ||
-    !Number.isFinite(atr)
-  ) {
+  const bodyRatio =
+    range > 0
+      ? body / range
+      : 0;
+
+  const upperWick =
+    range > 0
+      ? (
+          current.high -
+          Math.max(
+            current.open,
+            current.close
+          )
+        ) / range
+      : 0;
+
+  const lowerWick =
+    range > 0
+      ? (
+          Math.min(
+            current.open,
+            current.close
+          ) -
+          current.low
+        ) / range
+      : 0;
+
+  const closeLocation =
+    range > 0
+      ? (
+          current.close -
+          current.low
+        ) / range
+      : 0.5;
+
+  let bullishEngulfing = false;
+  let bearishEngulfing = false;
+
+  if (previous) {
+    bullishEngulfing =
+      previous.close < previous.open &&
+      current.close > current.open &&
+      current.open <= previous.close &&
+      current.close >= previous.open;
+
+    bearishEngulfing =
+      previous.close > previous.open &&
+      current.close < current.open &&
+      current.open >= previous.close &&
+      current.close <= previous.open;
+  }
+
+  return {
+    direction:
+      current.close > current.open
+        ? 'BULL'
+        : current.close < current.open
+          ? 'BEAR'
+          : 'DOJI',
+
+    range,
+    body,
+    bodyRatio,
+    upperWick,
+    lowerWick,
+    closeLocation,
+
+    bullishEngulfing,
+    bearishEngulfing,
+
+    bullishRejection:
+      lowerWick >= 0.45 &&
+      closeLocation >= 0.60,
+
+    bearishRejection:
+      upperWick >= 0.45 &&
+      closeLocation <= 0.40
+  };
+}
+
+// ============================================================
+// SUPPORT / RESISTANCE
+// ============================================================
+
+function supportResistance(
+  bars,
+  lookback = 40
+) {
+  if (bars.length < 5) {
     return {
-      score: 0,
-      valid: false,
-      goldenZone: false,
-      nearFib: false
+      support: NaN,
+      resistance: NaN,
+      distanceToSupport: NaN,
+      distanceToResistance: NaN
     };
   }
 
-  const low =
-    lowestLow(window);
+  const current =
+    bars[bars.length - 1];
+
+  const prior =
+    bars.slice(
+      Math.max(
+        0,
+        bars.length - 1 - lookback
+      ),
+      -1
+    );
+
+  if (!prior.length) {
+    return {
+      support: NaN,
+      resistance: NaN,
+      distanceToSupport: NaN,
+      distanceToResistance: NaN
+    };
+  }
+
+  const support =
+    lowestLow(prior);
+
+  const resistance =
+    highestHigh(prior);
+
+  return {
+    support,
+    resistance,
+
+    distanceToSupport:
+      current.close - support,
+
+    distanceToResistance:
+      resistance - current.close
+  };
+}
+
+// ============================================================
+// SWING DETECTION
+// ============================================================
+
+function findSwings(
+  bars,
+  left = 3,
+  right = 3
+) {
+  const highs = [];
+  const lows = [];
+
+  if (
+    bars.length <
+    left + right + 1
+  ) {
+    return {
+      highs,
+      lows
+    };
+  }
+
+  for (
+    let i = left;
+    i < bars.length - right;
+    i++
+  ) {
+    let isHigh = true;
+    let isLow = true;
+
+    for (
+      let j = i - left;
+      j <= i + right;
+      j++
+    ) {
+      if (j === i) {
+        continue;
+      }
+
+      if (bars[j].high >= bars[i].high) {
+        isHigh = false;
+      }
+
+      if (bars[j].low <= bars[i].low) {
+        isLow = false;
+      }
+
+      if (!isHigh && !isLow) {
+        break;
+      }
+    }
+
+    if (isHigh) {
+      highs.push({
+        index: i,
+        price: bars[i].high,
+        time: bars[i].openTime
+      });
+    }
+
+    if (isLow) {
+      lows.push({
+        index: i,
+        price: bars[i].low,
+        time: bars[i].openTime
+      });
+    }
+  }
+
+  return {
+    highs,
+    lows
+  };
+}
+
+// ============================================================
+// MARKET STRUCTURE — HH/HL/LH/LL + BOS
+// ============================================================
+
+function marketStructure(bars) {
+  const swings =
+    findSwings(
+      bars,
+      TECH.swingLeft,
+      TECH.swingRight
+    );
+
+  const recentHighs =
+    swings.highs.slice(-2);
+
+  const recentLows =
+    swings.lows.slice(-2);
+
+  const current =
+    bars[bars.length - 1];
+
+  let highStructure = 'UNKNOWN';
+  let lowStructure = 'UNKNOWN';
+
+  if (recentHighs.length >= 2) {
+    highStructure =
+      recentHighs[1].price >
+      recentHighs[0].price
+        ? 'HH'
+        : 'LH';
+  }
+
+  if (recentLows.length >= 2) {
+    lowStructure =
+      recentLows[1].price >
+      recentLows[0].price
+        ? 'HL'
+        : 'LL';
+  }
+
+  let structure = 'MIXED';
+
+  if (
+    highStructure === 'HH' &&
+    lowStructure === 'HL'
+  ) {
+    structure = 'BULL';
+  } else if (
+    highStructure === 'LH' &&
+    lowStructure === 'LL'
+  ) {
+    structure = 'BEAR';
+  }
+
+  const lastSwingHigh =
+    recentHighs.length
+      ? recentHighs[
+          recentHighs.length - 1
+        ].price
+      : NaN;
+
+  const lastSwingLow =
+    recentLows.length
+      ? recentLows[
+          recentLows.length - 1
+        ].price
+      : NaN;
+
+  const bullishBos =
+    Number.isFinite(lastSwingHigh) &&
+    current.close > lastSwingHigh;
+
+  const bearishBos =
+    Number.isFinite(lastSwingLow) &&
+    current.close < lastSwingLow;
+
+  return {
+    structure,
+    highStructure,
+    lowStructure,
+
+    lastSwingHigh,
+    lastSwingLow,
+
+    bullishBos,
+    bearishBos,
+
+    swingHighCount:
+      swings.highs.length,
+
+    swingLowCount:
+      swings.lows.length
+  };
+}
+
+// ============================================================
+// LIQUIDITY SWEEP
+// ============================================================
+
+function liquidityContext(
+  bars,
+  lookback = 20
+) {
+  if (bars.length < lookback + 1) {
+    return {
+      bullishSweep: false,
+      bearishSweep: false,
+      priorHigh: NaN,
+      priorLow: NaN
+    };
+  }
+
+  const current =
+    bars[bars.length - 1];
+
+  const prior =
+    bars.slice(
+      -lookback - 1,
+      -1
+    );
+
+  const priorHigh =
+    highestHigh(prior);
+
+  const priorLow =
+    lowestLow(prior);
+
+  const bullishSweep =
+    current.low < priorLow &&
+    current.close > priorLow;
+
+  const bearishSweep =
+    current.high > priorHigh &&
+    current.close < priorHigh;
+
+  return {
+    bullishSweep,
+    bearishSweep,
+    priorHigh,
+    priorLow
+  };
+}
+
+// ============================================================
+// FAIR VALUE GAP
+// ============================================================
+
+function fvgContext(bars) {
+  if (bars.length < 3) {
+    return {
+      bullish: false,
+      bearish: false,
+      bullGapLow: NaN,
+      bullGapHigh: NaN,
+      bearGapLow: NaN,
+      bearGapHigh: NaN
+    };
+  }
+
+  const first =
+    bars[bars.length - 3];
+
+  const third =
+    bars[bars.length - 1];
+
+  const bullish =
+    third.low > first.high;
+
+  const bearish =
+    third.high < first.low;
+
+  return {
+    bullish,
+    bearish,
+
+    bullGapLow:
+      bullish
+        ? first.high
+        : NaN,
+
+    bullGapHigh:
+      bullish
+        ? third.low
+        : NaN,
+
+    bearGapLow:
+      bearish
+        ? third.high
+        : NaN,
+
+    bearGapHigh:
+      bearish
+        ? first.low
+        : NaN
+  };
+}
+
+// ============================================================
+// FIBONACCI
+// ============================================================
+
+function fibonacciContext(
+  bars,
+  lookback = 60
+) {
+  if (bars.length < 10) {
+    return null;
+  }
+
+  const window =
+    bars.slice(-lookback);
 
   const high =
     highestHigh(window);
 
+  const low =
+    lowestLow(window);
+
   const range =
     high - low;
 
-  if (
-    !(range > 0)
-  ) {
-    return {
-      score: 0,
-      valid: false,
-      goldenZone: false,
-      nearFib: false
-    };
+  if (!(range > 0)) {
+    return null;
   }
 
-  const levels =
-    direction === 'BUY'
-      ? {
-          level382:
-            high -
-            range *
-              0.382,
+  const current =
+    bars[bars.length - 1].close;
 
-          level500:
-            high -
-            range *
-              0.500,
+  const retracementFromHigh = {
+    r382:
+      high - range * 0.382,
 
-          level618:
-            high -
-            range *
-              0.618,
+    r500:
+      high - range * 0.500,
 
-          level786:
-            high -
-            range *
-              0.786
-        }
-      : {
-          level382:
-            low +
-            range *
-              0.382,
+    r618:
+      high - range * 0.618,
 
-          level500:
-            low +
-            range *
-              0.500,
+    r786:
+      high - range * 0.786
+  };
 
-          level618:
-            low +
-            range *
-              0.618,
+  const retracementFromLow = {
+    r382:
+      low + range * 0.382,
 
-          level786:
-            low +
-            range *
-              0.786
-        };
+    r500:
+      low + range * 0.500,
 
-  const price =
-    signal.close;
+    r618:
+      low + range * 0.618,
 
-  const tolerance =
-    atr *
-    STRATEGY.fibToleranceAtr;
+    r786:
+      low + range * 0.786
+  };
 
-  const goldenLow =
-    Math.min(
-      levels.level500,
-      levels.level618
-    );
+  const extensionUp = {
+    e1272:
+      low + range * 1.272,
 
-  const goldenHigh =
-    Math.max(
-      levels.level500,
-      levels.level618
-    );
+    e1618:
+      low + range * 1.618
+  };
 
-  const goldenZone =
-    price >=
-      goldenLow -
-        tolerance &&
-    price <=
-      goldenHigh +
-        tolerance;
+  const extensionDown = {
+    e1272:
+      high - range * 1.272,
 
-  const nearFib =
-    Object.values(
-      levels
-    ).some(
-      level =>
-        Math.abs(
-          price -
-          level
-        ) <=
-        tolerance
-    );
+    e1618:
+      high - range * 1.618
+  };
 
   return {
-    score:
-      goldenZone
-        ? 2
-        : nearFib
-          ? 1
-          : 0,
-
-    valid: true,
-    goldenZone,
-    nearFib,
-
-    swingLow: low,
     swingHigh: high,
+    swingLow: low,
+    range,
+    current,
 
-    ...levels
+    retracementFromHigh,
+    retracementFromLow,
+
+    extensionUp,
+    extensionDown
   };
 }
 
 // ============================================================
-// SMC CONTEXT
+// VOLUME CONTEXT
 // ============================================================
 
-function smcContext(
-  bars,
-  direction
-) {
-  const signal =
-    bars[
-      bars.length -
-      1
-    ];
+function volumeContext(bars) {
+  if (!bars.length) {
+    return {
+      current: 0,
+      average: 0,
+      ratio: NaN,
+      spike: false
+    };
+  }
 
-  const prior =
-    bars.slice(
-      0,
-      -1
+  const current =
+    n(
+      bars[bars.length - 1].volume,
+      0
     );
 
+  const prior =
+    bars
+      .slice(
+        -TECH.volumeLen - 1,
+        -1
+      )
+      .map(bar =>
+        n(bar.volume, 0)
+      );
+
+  const avg =
+    average(prior);
+
+  const ratio =
+    Number.isFinite(avg) &&
+    avg > 0
+      ? current / avg
+      : NaN;
+
+  return {
+    current,
+    average:
+      Number.isFinite(avg)
+        ? avg
+        : 0,
+
+    ratio,
+
+    spike:
+      Number.isFinite(ratio) &&
+      ratio >= 1.5
+  };
+}
+
+// ============================================================
+// VOLATILITY REGIME
+// ============================================================
+
+function volatilityContext(bars) {
+  const atr =
+    atrLast(
+      bars,
+      TECH.atrLen
+    );
+
+  const current =
+    bars[bars.length - 1];
+
+  const atrPct =
+    Number.isFinite(atr) &&
+    current.close > 0
+      ? atr / current.close * 100
+      : NaN;
+
+  const historical = [];
+
+  const minimum =
+    Math.max(
+      TECH.atrLen + 2,
+      bars.length - 50
+    );
+
+  for (
+    let i = minimum;
+    i <= bars.length;
+    i++
+  ) {
+    const sample =
+      bars.slice(0, i);
+
+    const value =
+      atrLast(
+        sample,
+        TECH.atrLen
+      );
+
+    if (Number.isFinite(value)) {
+      historical.push(value);
+    }
+  }
+
+  const avgAtr =
+    average(historical);
+
+  const ratio =
+    Number.isFinite(avgAtr) &&
+    avgAtr > 0 &&
+    Number.isFinite(atr)
+      ? atr / avgAtr
+      : NaN;
+
+  let regime = 'NORMAL';
+
+  if (Number.isFinite(ratio)) {
+    if (ratio >= 1.50) {
+      regime = 'HIGH';
+    } else if (ratio <= 0.70) {
+      regime = 'LOW';
+    }
+  }
+
+  return {
+    atr,
+    atrPct,
+    averageAtr: avgAtr,
+    atrRatio: ratio,
+    regime
+  };
+}
+
+// ============================================================
+// TREND CONTEXT
+// ============================================================
+
+function trendContext(bars) {
   const closes =
-    bars.map(
-      bar =>
-        bar.close
+    bars.map(bar => bar.close);
+
+  const close =
+    closes[closes.length - 1];
+
+  const ema9 =
+    emaLast(
+      closes,
+      TECH.emaFast
+    );
+
+  const ema21 =
+    emaLast(
+      closes,
+      TECH.emaMedium
     );
 
   const ema50 =
     emaLast(
       closes,
-      STRATEGY.smcFastEmaLen
+      TECH.emaTrend
+    );
+
+  const ema100 =
+    emaLast(
+      closes,
+      TECH.emaLong
     );
 
   const ema200 =
@@ -1052,587 +2004,402 @@ function smcContext(
     EMA200_CONTEXT_HISTORY
       ? emaLast(
           closes,
-          STRATEGY.smcSlowEmaLen
+          TECH.emaMacro
         )
       : NaN;
 
-  const dmi =
-    dmiAdx(
-      bars,
-      STRATEGY.adxLen
-    );
-
-  const reasons = [];
-
-  let score = 0;
+  let alignment = 'MIXED';
 
   if (
-    Number.isFinite(
-      ema200
-    )
+    Number.isFinite(ema50) &&
+    close > ema9 &&
+    ema9 > ema21 &&
+    ema21 > ema50
   ) {
-    const aligned =
-      direction === 'BUY'
-        ? (
-            signal.close >
-              ema50 &&
-            ema50 >
-              ema200
-          )
-        : (
-            signal.close <
-              ema50 &&
-            ema50 <
-              ema200
-          );
-
-    if (
-      aligned
-    ) {
-      score++;
-
-      reasons.push(
-        direction === 'BUY'
-          ? 'EMA-TREND-BULL'
-          : 'EMA-TREND-BEAR'
-      );
-    }
-  } else {
-    reasons.push(
-      'EMA200-WARMUP'
-    );
+    alignment = 'BULL';
+  } else if (
+    Number.isFinite(ema50) &&
+    close < ema9 &&
+    ema9 < ema21 &&
+    ema21 < ema50
+  ) {
+    alignment = 'BEAR';
   }
 
-  const adxAligned =
-    Number.isFinite(
-      dmi.adx
-    ) &&
-    dmi.adx >=
-      STRATEGY.adxThreshold &&
-    (
-      direction === 'BUY'
-        ? dmi.plusDI >
-          dmi.minusDI
-        : dmi.minusDI >
-          dmi.plusDI
-    );
+  let macro = 'UNKNOWN';
 
-  if (
-    adxAligned
-  ) {
-    score++;
-
-    reasons.push(
-      direction === 'BUY'
-        ? 'ADX-BULL'
-        : 'ADX-BEAR'
-    );
-  }
-
-  const sweepWindow =
-    prior.slice(-10);
-
-  let liquiditySweep =
-    false;
-
-  if (
-    sweepWindow.length >=
-    5
-  ) {
-    if (
-      direction ===
-      'BUY'
-    ) {
-      const previousLow =
-        lowestLow(
-          sweepWindow
-        );
-
-      liquiditySweep =
-        signal.low <
-          previousLow &&
-        signal.close >
-          previousLow;
-    } else {
-      const previousHigh =
-        highestHigh(
-          sweepWindow
-        );
-
-      liquiditySweep =
-        signal.high >
-          previousHigh &&
-        signal.close <
-          previousHigh;
-    }
-  }
-
-  if (
-    liquiditySweep
-  ) {
-    score += 3;
-
-    reasons.push(
-      'LIQUIDITY-SWEEP'
-    );
-  }
-
-  let bullFvg = false;
-  let bearFvg = false;
-
-  if (
-    bars.length >=
-    3
-  ) {
-    const first =
-      bars[
-        bars.length -
-        3
-      ];
-
-    const third =
-      bars[
-        bars.length -
-        1
-      ];
-
-    bullFvg =
-      third.low >
-      first.high;
-
-    bearFvg =
-      third.high <
-      first.low;
-  }
-
-  if (
-    direction ===
-      'BUY' &&
-    bullFvg
-  ) {
-    score++;
-
-    reasons.push(
-      'BULL-FVG'
-    );
-  }
-
-  if (
-    direction ===
-      'SELL' &&
-    bearFvg
-  ) {
-    score++;
-
-    reasons.push(
-      'BEAR-FVG'
-    );
+  if (Number.isFinite(ema200)) {
+    macro =
+      close > ema200
+        ? 'BULL'
+        : close < ema200
+          ? 'BEAR'
+          : 'FLAT';
+  } else if (Number.isFinite(ema100)) {
+    macro =
+      close > ema100
+        ? 'BULL'
+        : 'BEAR';
   }
 
   return {
-    score,
-    reasons,
-
+    close,
+    ema9,
+    ema21,
     ema50,
+    ema100,
     ema200,
-
-    adx:
-      dmi.adx,
-
-    plusDI:
-      dmi.plusDI,
-
-    minusDI:
-      dmi.minusDI,
-
-    liquiditySweep,
-
-    bullFvg,
-    bearFvg
+    alignment,
+    macro
   };
 }
 
 // ============================================================
-// MAIN STRATEGY ANALYSIS
+// MOMENTUM CONTEXT
 // ============================================================
 
-function analyzeBars(
+function momentumContext(bars) {
+  const closes =
+    bars.map(bar => bar.close);
+
+  const macd =
+    macdLast(closes);
+
+  const stochastic =
+    stochasticLast(
+      bars,
+      TECH.stochasticLen,
+      TECH.stochasticSmooth
+    );
+
+  return {
+    rsi:
+      rsiLast(
+        closes,
+        TECH.rsiLen
+      ),
+
+    cmo:
+      cmoLast(
+        closes,
+        TECH.cmoLen
+      ),
+
+    macd,
+
+    stochastic,
+
+    williamsR:
+      williamsRLast(
+        bars,
+        TECH.stochasticLen
+      ),
+
+    roc:
+      rocLast(
+        closes,
+        TECH.rocLen
+      )
+  };
+}
+
+// ============================================================
+// COMPLETE TECHNICAL INTELLIGENCE ENGINE
+// ============================================================
+
+function buildTechnicalIntelligence(
   symbol,
-  bars,
-  memory
+  bars
 ) {
   if (
     !Array.isArray(bars) ||
-    bars.length <
-    CORE_MIN_HISTORY
+    bars.length < CORE_MIN_HISTORY
   ) {
     return null;
   }
 
-  const signal =
-    bars[
-      bars.length -
-      1
-    ];
-
-  const prior =
-    bars.slice(
-      0,
-      -1
-    );
+  const current =
+    bars[bars.length - 1];
 
   const closes =
-    bars.map(
-      bar =>
-        bar.close
-    );
+    bars.map(bar => bar.close);
 
-  const ema9 =
-    emaLast(
-      closes,
-      STRATEGY.fastEmaLen
-    );
-
-  const ema21 =
-    emaLast(
-      closes,
-      STRATEGY.slowEmaLen
-    );
+  const trend =
+    trendContext(bars);
 
   const momentum =
-    cmoLast(
+    momentumContext(bars);
+
+  const dmi =
+    dmiAdx(
+      bars,
+      TECH.adxLen
+    );
+
+  const volatility =
+    volatilityContext(bars);
+
+  const bollinger =
+    bollingerLast(
       closes,
-      STRATEGY.cmoLen
+      TECH.bbLen,
+      TECH.bbStd
+    );
+
+  const keltner =
+    keltnerLast(
+      bars,
+      TECH.keltnerLen,
+      TECH.keltnerAtrLen,
+      TECH.keltnerMult
+    );
+
+  const volume =
+    volumeContext(bars);
+
+  const obv =
+    obvContext(bars);
+
+  const mfi =
+    mfiLast(
+      bars,
+      TECH.mfiLen
+    );
+
+  const vwap =
+    rollingVwap(
+      bars,
+      TECH.vwapLookback
+    );
+
+  const candles =
+    candleContext(bars);
+
+  const sr =
+    supportResistance(
+      bars,
+      TECH.srLen
+    );
+
+  const structure =
+    marketStructure(bars);
+
+  const liquidity =
+    liquidityContext(
+      bars,
+      TECH.liquidityLookback
+    );
+
+  const fvg =
+    fvgContext(bars);
+
+  const fibonacci =
+    fibonacciContext(
+      bars,
+      TECH.fibLookback
     );
 
   const atr =
-    atrLast(
-      bars,
-      STRATEGY.atrLen
-    );
-
-  const volumeAverage =
-    sma(
-      prior.map(
-        bar =>
-          bar.volume
-      ),
-      STRATEGY.volLen
-    );
-
-  const volumeRatio =
-    volumeAverage >
-    0
-      ? signal.volume /
-        volumeAverage
-      : NaN;
+    volatility.atr;
 
   const range =
-    signal.high -
-    signal.low;
+    current.high -
+    current.low;
 
-  const bodyRatio =
-    range >
-    0
-      ? Math.abs(
-          signal.close -
-          signal.open
-        ) /
-        range
-      : 0;
+  const rangeAtr =
+    Number.isFinite(atr) &&
+    atr > 0
+      ? range / atr
+      : NaN;
 
-  const strongBull =
-    signal.close >
-      signal.open &&
-    bodyRatio >=
-      STRATEGY.bodyRatioMin;
+  const distanceFromVwapAtr =
+    Number.isFinite(vwap) &&
+    Number.isFinite(atr) &&
+    atr > 0
+      ? (
+          current.close -
+          vwap
+        ) / atr
+      : NaN;
 
-  const strongBear =
-    signal.close <
-      signal.open &&
-    bodyRatio >=
-      STRATEGY.bodyRatioMin;
+  let directionalBias = 'MIXED';
+  let bullScore = 0;
+  let bearScore = 0;
 
-  const highVolume =
-    volumeAverage >
-      0 &&
-    signal.volume >
-      volumeAverage *
-      STRATEGY.volMult;
+  if (trend.alignment === 'BULL') {
+    bullScore += 2;
+  }
 
-  const rawBuy =
-    strongBull &&
-    highVolume &&
-    momentum >
-      STRATEGY.cmoBuyThresh &&
-    ema9 >
-      ema21;
+  if (trend.alignment === 'BEAR') {
+    bearScore += 2;
+  }
 
-  const rawSell =
-    strongBear &&
-    highVolume &&
-    momentum <
-      STRATEGY.cmoSellThresh &&
-    ema9 <
-      ema21;
+  if (trend.macro === 'BULL') {
+    bullScore++;
+  }
 
-  let direction =
-    null;
-
-  if (
-    rawBuy &&
-    memory.lastSignal !==
-      1
-  ) {
-    direction =
-      'BUY';
+  if (trend.macro === 'BEAR') {
+    bearScore++;
   }
 
   if (
-    rawSell &&
-    memory.lastSignal !==
-      -1
+    Number.isFinite(dmi.plusDI) &&
+    Number.isFinite(dmi.minusDI)
   ) {
-    direction =
-      'SELL';
+    if (dmi.plusDI > dmi.minusDI) {
+      bullScore++;
+    } else if (dmi.minusDI > dmi.plusDI) {
+      bearScore++;
+    }
   }
 
   if (
-    direction ===
-    'BUY'
+    Number.isFinite(momentum.macd.histogram)
   ) {
-    memory.lastSignal =
-      1;
+    if (momentum.macd.histogram > 0) {
+      bullScore++;
+    } else if (momentum.macd.histogram < 0) {
+      bearScore++;
+    }
   }
 
-  if (
-    direction ===
-    'SELL'
-  ) {
-    memory.lastSignal =
-      -1;
+  if (structure.structure === 'BULL') {
+    bullScore += 2;
   }
 
-  const common = {
-    symbol,
-
-    signalBarTime:
-      signal.openTime,
-
-    signalClose:
-      signal.close,
-
-    ema9,
-    ema21,
-
-    cmo:
-      momentum,
-
-    atr,
-
-    bodyRatio,
-
-    volume:
-      signal.volume,
-
-    volumeAvg:
-      volumeAverage,
-
-    volumeRatio,
-
-    rawBuy,
-    rawSell
-  };
-
-  if (
-    !direction
-  ) {
-    return {
-      ...common,
-      direction: null
-    };
+  if (structure.structure === 'BEAR') {
+    bearScore += 2;
   }
 
-  const srWindow =
-    prior.slice(
-      -STRATEGY.srLen
-    );
-
-  const support =
-    srWindow.length
-      ? lowestLow(
-          srWindow
-        )
-      : signal.low;
-
-  const resistance =
-    srWindow.length
-      ? highestHigh(
-          srWindow
-        )
-      : signal.high;
-
-  const retest =
-    retestContext(
-      prior,
-      signal,
-      direction
-    );
-
-  const fib =
-    fibContext(
-      prior,
-      signal,
-      atr,
-      direction
-    );
-
-  const smc =
-    smcContext(
-      bars,
-      direction
-    );
-
-  if (
-    retest.breakout
-  ) {
-    smc.reasons.push(
-      'BREAKOUT'
-    );
+  if (structure.bullishBos) {
+    bullScore += 2;
   }
 
-  if (
-    retest.retest
-  ) {
-    smc.reasons.push(
-      'RETEST'
-    );
+  if (structure.bearishBos) {
+    bearScore += 2;
   }
 
-  if (
-    fib.goldenZone
-  ) {
-    smc.reasons.push(
-      'FIB-GOLDEN'
-    );
-  } else if (
-    fib.nearFib
-  ) {
-    smc.reasons.push(
-      'FIB'
-    );
+  if (liquidity.bullishSweep) {
+    bullScore += 2;
   }
 
-  const qualityScore =
-    clamp(
-      retest.score +
-      fib.score +
-      smc.score,
-      0,
-      12
-    );
+  if (liquidity.bearishSweep) {
+    bearScore += 2;
+  }
 
-  const quality =
-    qualityScore >=
-    7
-      ? 'STRONG'
-      : qualityScore >=
-        4
-        ? 'GOOD'
-        : 'NEUTRAL';
+  if (candles?.bullishEngulfing) {
+    bullScore++;
+  }
+
+  if (candles?.bearishEngulfing) {
+    bearScore++;
+  }
+
+  if (candles?.bullishRejection) {
+    bullScore++;
+  }
+
+  if (candles?.bearishRejection) {
+    bearScore++;
+  }
+
+  if (bullScore >= bearScore + 3) {
+    directionalBias = 'BULL';
+  } else if (bearScore >= bullScore + 3) {
+    directionalBias = 'BEAR';
+  }
 
   return {
-    ...common,
+    symbol,
 
-    direction,
+    timeframe:
+      TIMEFRAME,
 
-    support,
-    resistance,
+    barTime:
+      current.openTime,
 
-    retest,
-    fib,
-    smc,
+    price: {
+      open:
+        current.open,
 
-    reasons:
-      smc.reasons,
+      high:
+        current.high,
 
-    qualityScore,
-    quality
+      low:
+        current.low,
+
+      close:
+        current.close,
+
+      range,
+      rangeAtr
+    },
+
+    trend,
+
+    momentum,
+
+    dmi,
+
+    volatility,
+
+    bollinger,
+
+    keltner,
+
+    volume,
+
+    obv,
+
+    mfi,
+
+    vwap,
+
+    distanceFromVwapAtr,
+
+    candles,
+
+    supportResistance:
+      sr,
+
+    structure,
+
+    liquidity,
+
+    fvg,
+
+    fibonacci,
+
+    internalBias: {
+      directionalBias,
+      bullScore,
+      bearScore
+    }
   };
 }
 
 // ============================================================
-// FROZEN ENTRY PROTECTION
+// END PART 1 / 4
+// Next part starts with:
+// HTTP CLIENT + MARKET DATA + MONGODB + AI MEMORY + GEMINI QUEUE
 // ============================================================
-
-function entryProtectionReason(
-  analysis
-) {
-  if (
-    !analysis?.direction
-  ) {
-    return '';
-  }
-
-  const reasons =
-    Array.isArray(
-      analysis.reasons
-    )
-      ? analysis.reasons
-      : [];
-
-  if (
-    analysis.direction ===
-    'BUY'
-  ) {
-    if (
-      STRATEGY.rejectBullFvgBuys &&
-      reasons.includes(
-        'BULL-FVG'
-      )
-    ) {
-      return 'BUY_BULL_FVG_FILTER';
-    }
-
-    if (
-      Number.isFinite(
-        analysis.cmo
-      ) &&
-      analysis.cmo >=
-        STRATEGY.buyCmoMax
-    ) {
-      return 'BUY_CMO_OVEREXTENDED';
-    }
-  }
-
-  if (
-    analysis.direction ===
-      'SELL' &&
-    Number.isFinite(
-      analysis.cmo
-    ) &&
-    analysis.cmo >
-      STRATEGY.sellCmoMax
-  ) {
-    return 'SELL_CMO_WEAK';
-  }
-
-  return '';
-}
+// ============================================================
+// PART 2 / 4
+// HTTP CLIENT + MARKET DATA + MONGODB + MEMORY + GEMINI
+// ============================================================
 
 // ============================================================
 // HTTP CLIENT
 // ============================================================
 
-const http =
-  axios.create({
-    timeout: 12000,
+const http = axios.create({
+  timeout: 12000,
 
-    headers: {
-      'User-Agent':
-        'LOMY-Forex-AI-Trader/1.3'
-    }
-  });
+  headers: {
+    'User-Agent':
+      'LOMY-Forex-Gemini-Commander/1.4'
+  }
+});
 
 // ============================================================
 // MARKET DATA
@@ -1654,30 +2421,22 @@ async function fetchOhlc(
       }
     );
 
-  const body =
-    response.data;
+  const body = response.data;
 
   const raw =
     Array.isArray(body)
       ? body
-      : Array.isArray(
-          body?.bars
-        )
+      : Array.isArray(body?.bars)
         ? body.bars
-        : Array.isArray(
-            body?.data?.bars
-          )
+        : Array.isArray(body?.data?.bars)
           ? body.data.bars
-          : Array.isArray(
-              body?.data
-            )
+          : Array.isArray(body?.data)
             ? body.data
             : [];
 
   return closedBarsOnly(
-    normalizeBars(
-      raw
-    )
+    normalizeBars(raw),
+    interval
   );
 }
 
@@ -1696,10 +2455,7 @@ function normalizeQuote(
       raw?.mid,
       Number.isFinite(bid) &&
       Number.isFinite(ask)
-        ? (
-            bid +
-            ask
-          ) / 2
+        ? (bid + ask) / 2
         : NaN
     );
 
@@ -1708,13 +2464,10 @@ function normalizeQuote(
       bid,
       ask,
       mid
-    ].every(
-      Number.isFinite
-    ) ||
+    ].every(Number.isFinite) ||
     bid <= 0 ||
     ask <= 0 ||
-    ask <
-      bid
+    ask < bid
   ) {
     return null;
   }
@@ -1727,8 +2480,7 @@ function normalizeQuote(
     mid,
 
     spread:
-      ask -
-      bid,
+      ask - bid,
 
     timestamp:
       raw?.timestamp ||
@@ -1752,12 +2504,10 @@ async function fetchSingleQuote(
 
     return normalizeQuote(
       response.data?.data ||
-        response.data,
+      response.data,
       symbol
     );
-  } catch (
-    error
-  ) {
+  } catch (error) {
     state.lastMarketError =
       `${symbol} quote: ${safeError(error)}`;
 
@@ -1768,9 +2518,7 @@ async function fetchSingleQuote(
 async function fetchLatestQuotes(
   symbols
 ) {
-  if (
-    !symbols.length
-  ) {
+  if (!symbols.length) {
     return new Map();
   }
 
@@ -1778,10 +2526,7 @@ async function fetchLatestQuotes(
     const params =
       new URLSearchParams();
 
-    for (
-      const symbol
-      of symbols
-    ) {
+    for (const symbol of symbols) {
       params.append(
         'symbols',
         symbol
@@ -1805,19 +2550,11 @@ async function fetchLatestQuotes(
     const output =
       new Map();
 
-    if (
-      Array.isArray(
-        body
-      )
-    ) {
-      for (
-        const row
-        of body
-      ) {
+    if (Array.isArray(body)) {
+      for (const row of body) {
         const symbol =
           String(
-            row?.symbol ||
-            ''
+            row?.symbol || ''
           ).toUpperCase();
 
         const quote =
@@ -1826,9 +2563,7 @@ async function fetchLatestQuotes(
             symbol
           );
 
-        if (
-          quote
-        ) {
+        if (quote) {
           output.set(
             symbol,
             quote
@@ -1837,25 +2572,20 @@ async function fetchLatestQuotes(
       }
     } else if (
       body &&
-      typeof body ===
-        'object'
+      typeof body === 'object'
     ) {
-      for (
-        const symbol
-        of symbols
-      ) {
+      for (const symbol of symbols) {
+        const raw =
+          body[symbol] ||
+          body[symbol.toLowerCase()];
+
         const quote =
           normalizeQuote(
-            body[symbol] ||
-              body[
-                symbol.toLowerCase()
-              ],
+            raw,
             symbol
           );
 
-        if (
-          quote
-        ) {
+        if (quote) {
           output.set(
             symbol,
             quote
@@ -1865,9 +2595,7 @@ async function fetchLatestQuotes(
     }
 
     return output;
-  } catch (
-    error
-  ) {
+  } catch (error) {
     state.lastMarketError =
       `latest quotes: ${safeError(error)}`;
 
@@ -1885,24 +2613,15 @@ async function mapWithConcurrency(
   worker
 ) {
   const results =
-    new Array(
-      items.length
-    );
+    new Array(items.length);
 
-  let next =
-    0;
+  let next = 0;
 
   async function run() {
-    while (
-      true
-    ) {
-      const index =
-        next++;
+    while (true) {
+      const index = next++;
 
-      if (
-        index >=
-        items.length
-      ) {
+      if (index >= items.length) {
         break;
       }
 
@@ -1912,9 +2631,7 @@ async function mapWithConcurrency(
             items[index],
             index
           );
-      } catch (
-        error
-      ) {
+      } catch (error) {
         results[index] = {
           error
         };
@@ -1939,7 +2656,7 @@ async function mapWithConcurrency(
 }
 
 // ============================================================
-// MONGODB SCHEMAS
+// DATABASE SCHEMAS
 // ============================================================
 
 const accountSchema =
@@ -2037,6 +2754,9 @@ const tradeSchema =
       riskAmount:
         Number,
 
+      maxCapitalRiskPct:
+        Number,
+
       quantity:
         Number,
 
@@ -2045,34 +2765,6 @@ const tradeSchema =
 
       signalBarTime:
         String,
-
-      qualityScore:
-        Number,
-
-      quality:
-        String,
-
-      reasons: [
-        String
-      ],
-
-      volume:
-        Number,
-
-      volumeAvg:
-        Number,
-
-      volumeRatio:
-        Number,
-
-      cmo:
-        Number,
-
-      atr:
-        Number,
-
-      bodyRatio:
-        Number,
 
       openedAt:
         Date,
@@ -2125,7 +2817,10 @@ const tradeSchema =
       aiLastManagement:
         mongoose.Schema.Types.Mixed,
 
-      analysis:
+      technicalSnapshot:
+        mongoose.Schema.Types.Mixed,
+
+      multiTimeframeSnapshot:
         mongoose.Schema.Types.Mixed
     },
     {
@@ -2144,11 +2839,19 @@ const signalSchema =
         index: true
       },
 
-      symbol:
-        String,
+      symbol: {
+        type: String,
+        index: true
+      },
 
       direction:
         String,
+
+      decision:
+        String,
+
+      confidence:
+        Number,
 
       signalPrice:
         Number,
@@ -2156,33 +2859,11 @@ const signalSchema =
       signalBarTime:
         String,
 
-      cmo:
+      aiStopLoss:
         Number,
 
-      atr:
+      calculatedTakeProfit:
         Number,
-
-      bodyRatio:
-        Number,
-
-      volume:
-        Number,
-
-      volumeAvg:
-        Number,
-
-      volumeRatio:
-        Number,
-
-      qualityScore:
-        Number,
-
-      quality:
-        String,
-
-      reasons: [
-        String
-      ],
 
       createdAt:
         Date,
@@ -2196,7 +2877,10 @@ const signalSchema =
       aiDecision:
         mongoose.Schema.Types.Mixed,
 
-      analysis:
+      technicalSnapshot:
+        mongoose.Schema.Types.Mixed,
+
+      multiTimeframeSnapshot:
         mongoose.Schema.Types.Mixed
     },
     {
@@ -2250,33 +2934,33 @@ const journalSchema =
 // ============================================================
 
 const Account =
-  mongoose.models.LomyForexPaperAccountV13 ||
+  mongoose.models.LomyForexPaperAccountV14 ||
   mongoose.model(
-    'LomyForexPaperAccountV13',
+    'LomyForexPaperAccountV14',
     accountSchema,
-    'lomyforexpaperaccountsv13'
+    'lomyforexpaperaccountsv14'
   );
 
 const Trade =
-  mongoose.models.LomyForexTradeV13 ||
+  mongoose.models.LomyForexTradeV14 ||
   mongoose.model(
-    'LomyForexTradeV13',
+    'LomyForexTradeV14',
     tradeSchema,
-    'lomyforextradesv13'
+    'lomyforextradesv14'
   );
 
 const Signal =
-  mongoose.models.LomyForexSignalV13 ||
+  mongoose.models.LomyForexSignalV14 ||
   mongoose.model(
-    'LomyForexSignalV13',
+    'LomyForexSignalV14',
     signalSchema,
-    'lomyforexsignalsv13'
+    'lomyforexsignalsv14'
   );
 
 const Journal =
-  mongoose.models.LomyForexJournalV13 ||
+  mongoose.models.LomyForexJournalV14 ||
   mongoose.model(
-    'LomyForexJournalV13',
+    'LomyForexJournalV14',
     journalSchema,
     JOURNAL_COLLECTION
   );
@@ -2298,6 +2982,10 @@ async function journal(
     data = {}
   } = {}
 ) {
+  if (!state.mongoReady) {
+    return;
+  }
+
   try {
     await Journal.create({
       version:
@@ -2320,9 +3008,7 @@ async function journal(
     });
 
     state.journalEvents++;
-  } catch (
-    error
-  ) {
+  } catch (error) {
     console.error(
       'Journal:',
       safeError(error)
@@ -2331,13 +3017,11 @@ async function journal(
 }
 
 // ============================================================
-// MONGO INIT
+// MONGODB INITIALIZATION
 // ============================================================
 
 async function initMongo() {
-  if (
-    !MONGODB_URI
-  ) {
+  if (!MONGODB_URI) {
     throw new Error(
       'MONGODB_URI is missing'
     );
@@ -2351,8 +3035,7 @@ async function initMongo() {
     }
   );
 
-  state.mongoReady =
-    true;
+  state.mongoReady = true;
 
   console.log(
     '✅ MongoDB connected'
@@ -2364,9 +3047,7 @@ async function initMongo() {
         PAPER.accountKey
     });
 
-  if (
-    !account
-  ) {
+  if (!account) {
     account =
       await Account.create({
         accountKey:
@@ -2413,10 +3094,7 @@ async function initMongo() {
         'OPEN'
     }).lean();
 
-  for (
-    const trade
-    of openTrades
-  ) {
+  for (const trade of openTrades) {
     trade.mfeR =
       n(
         trade.mfeR,
@@ -2443,7 +3121,7 @@ async function initMongo() {
     'MONGO_READY',
     {
       message:
-        'Mongo connected and account restored',
+        'Mongo connected and V1.4 account restored',
 
       data: {
         balance:
@@ -2457,9 +3135,7 @@ async function initMongo() {
 }
 
 async function saveAccount() {
-  if (
-    !account
-  ) {
+  if (!account) {
     return;
   }
 
@@ -2470,12 +3146,102 @@ async function saveAccount() {
 }
 
 // ============================================================
+// BASIC ACCOUNT / RISK HELPERS
+// ============================================================
+
+function accountBalance() {
+  return n(
+    account?.balance,
+    PAPER.startingBalance
+  );
+}
+
+function maxPerTradeCapitalRiskUsd() {
+  return (
+    accountBalance() *
+    PAPER.maxCapitalRiskPct /
+    100
+  );
+}
+
+function portfolioRiskCapUsd() {
+  return (
+    accountBalance() *
+    PAPER.portfolioRiskCapPct /
+    100
+  );
+}
+
+function currentPortfolioRiskUsd() {
+  let total = 0;
+
+  for (
+    const trade
+    of state.openTrades.values()
+  ) {
+    const entry =
+      n(trade.entryPrice);
+
+    const stop =
+      n(trade.stopLoss);
+
+    const initialDistance =
+      n(trade.riskDistance);
+
+    const originalRiskAmount =
+      n(
+        trade.riskAmount,
+        0
+      );
+
+    if (
+      !Number.isFinite(entry) ||
+      !Number.isFinite(stop) ||
+      !(initialDistance > 0) ||
+      !(originalRiskAmount > 0)
+    ) {
+      continue;
+    }
+
+    // If SL has reached entry or crossed into profit,
+    // no initial account capital remains at risk.
+    let remainingDistance;
+
+    if (trade.direction === 'BUY') {
+      remainingDistance =
+        Math.max(
+          0,
+          entry - stop
+        );
+    } else {
+      remainingDistance =
+        Math.max(
+          0,
+          stop - entry
+        );
+    }
+
+    const fraction =
+      clamp(
+        remainingDistance /
+        initialDistance,
+        0,
+        1
+      );
+
+    total +=
+      originalRiskAmount *
+      fraction;
+  }
+
+  return total;
+}
+
+// ============================================================
 // TELEGRAM
 // ============================================================
 
-async function sendTelegram(
-  text
-) {
+async function sendTelegram(text) {
   if (
     !bot ||
     !account?.telegramChatId
@@ -2488,9 +3254,7 @@ async function sendTelegram(
       account.telegramChatId,
       text
     );
-  } catch (
-    error
-  ) {
+  } catch (error) {
     console.error(
       'Telegram send:',
       safeError(error)
@@ -2507,105 +3271,8 @@ function pairReadyCount() {
   ).length;
 }
 
-// ============================================================
-// RISK MANAGER
-// ============================================================
-
-function currentPortfolioRiskUsd() {
-  let total =
-    0;
-
-  for (
-    const trade
-    of state.openTrades.values()
-  ) {
-    if (
-      trade.breakEvenActive
-    ) {
-      continue;
-    }
-
-    const entry =
-      n(
-        trade.entryPrice
-      );
-
-    const stop =
-      n(
-        trade.stopLoss
-      );
-
-    const distance =
-      n(
-        trade.riskDistance
-      );
-
-    const riskAmount =
-      n(
-        trade.riskAmount,
-        0
-      );
-
-    if (
-      !Number.isFinite(entry) ||
-      !Number.isFinite(stop) ||
-      !(distance > 0) ||
-      !(riskAmount > 0)
-    ) {
-      continue;
-    }
-
-    const remainingFraction =
-      Math.min(
-        1,
-        Math.max(
-          0,
-          Math.abs(
-            entry -
-            stop
-          ) /
-          distance
-        )
-      );
-
-    total +=
-      riskAmount *
-      remainingFraction;
-  }
-
-  return total;
-}
-
-function portfolioRiskCapUsd() {
-  return (
-    n(
-      account?.balance,
-      PAPER.startingBalance
-    ) *
-    PAPER.portfolioRiskCapPct /
-    100
-  );
-}
-
-function perTradeRiskUsd() {
-  return (
-    n(
-      account?.balance,
-      PAPER.startingBalance
-    ) *
-    PAPER.riskPctPerTrade /
-    100
-  );
-}
-
-// ============================================================
-// TELEGRAM COMMANDS
-// ============================================================
-
 async function initTelegram() {
-  if (
-    !TELEGRAM_BOT_TOKEN
-  ) {
+  if (!TELEGRAM_BOT_TOKEN) {
     console.warn(
       '⚠️ TELEGRAM_BOT_TOKEN missing'
     );
@@ -2621,18 +3288,18 @@ async function initTelegram() {
   bot.start(
     async ctx => {
       account.telegramChatId =
-        String(
-          ctx.chat.id
-        );
+        String(ctx.chat.id);
 
       await saveAccount();
 
       await ctx.reply(
         `✅ ${VERSION}\n` +
-        `PAPER ONLY\n` +
-        `Balance: ${fmtMoney(account.balance)}\n` +
-        `Risk: ${PAPER.riskPctPerTrade}%\n` +
-        `RR: 1:${STRATEGY.riskReward}`
+        `🧪 PAPER ONLY\n` +
+        `Balance: ${fmtMoney(accountBalance())}\n` +
+        `R:R = 1:${RULES.riskReward.toFixed(0)}\n` +
+        `Capital-risk safety cap: ${PAPER.maxCapitalRiskPct}% / trade\n` +
+        `Portfolio safety cap: ${PAPER.portfolioRiskCapPct}%\n` +
+        `Gemini: COMMANDER`
       );
     }
   );
@@ -2645,17 +3312,18 @@ async function initTelegram() {
         `Mode: PAPER\n` +
         `LIVE: OFF\n` +
         `Market: ${state.marketReady ? 'READY' : 'WAIT'}\n` +
-        `Gemini: ${state.geminiReady ? 'READY' : 'OFF'}\n` +
+        `Gemini: ${state.geminiReady ? 'READY' : 'WAIT'}\n` +
         `Pairs: ${pairReadyCount()}/${INSTRUMENTS.length}\n` +
-        `Open: ${state.openTrades.size}\n` +
-        `Signals: ${state.rawSignals}\n` +
+        `Open trades: ${state.openTrades.size}\n` +
         `Executed: ${state.executedSignals}\n` +
         `Skipped: ${state.skippedSignals}\n` +
-        `AI approved: ${state.aiApprovedEntries}\n` +
-        `AI rejected: ${state.aiRejectedEntries}\n` +
-        `BE moves: ${state.breakEvenMoves}\n` +
-        `Risk: ${PAPER.riskPctPerTrade}%\n` +
-        `RR: 1:${STRATEGY.riskReward}\n` +
+        `AI BUY: ${state.aiBuyDecisions}\n` +
+        `AI SELL: ${state.aiSellDecisions}\n` +
+        `AI NO_TRADE: ${state.aiNoTradeDecisions}\n` +
+        `AI HOLD: ${state.aiHoldDecisions}\n` +
+        `AI CLOSE: ${state.aiCloseDecisions}\n` +
+        `R:R: 1:${RULES.riskReward.toFixed(0)}\n` +
+        `Max capital-risk safety: ${PAPER.maxCapitalRiskPct}%\n` +
         `Portfolio cap: ${PAPER.portfolioRiskCapPct}%`
       );
     }
@@ -2665,13 +3333,48 @@ async function initTelegram() {
     'balance',
     async ctx => {
       await ctx.reply(
-        `💰 PAPER BALANCE\n` +
-        `Balance: ${fmtMoney(account?.balance)}\n` +
+        `💰 PAPER ACCOUNT\n` +
+        `Balance: ${fmtMoney(accountBalance())}\n` +
         `Realized PnL: ${fmtMoney(account?.realizedPnl)}\n` +
-        `Risk/Trade: ${fmtMoney(perTradeRiskUsd())}\n` +
-        `Open Risk: ${fmtMoney(currentPortfolioRiskUsd())}\n` +
-        `Portfolio Cap: ${fmtMoney(portfolioRiskCapUsd())}`
+        `Maximum capital at risk / new trade: ${fmtMoney(maxPerTradeCapitalRiskUsd())}\n` +
+        `Current portfolio risk: ${fmtMoney(currentPortfolioRiskUsd())}\n` +
+        `Portfolio risk cap: ${fmtMoney(portfolioRiskCapUsd())}`
       );
+    }
+  );
+
+  bot.command(
+    'positions',
+    async ctx => {
+      const positions =
+        [
+          ...state.openTrades.values()
+        ];
+
+      if (!positions.length) {
+        await ctx.reply(
+          '📭 No open PAPER trades'
+        );
+
+        return;
+      }
+
+      const text =
+        positions
+          .map(
+            trade =>
+              `${trade.symbol} ${trade.direction}\n` +
+              `Entry: ${fmtPrice(trade.entryPrice, trade.symbol)}\n` +
+              `SL: ${fmtPrice(trade.stopLoss, trade.symbol)}\n` +
+              `TP: ${fmtPrice(trade.takeProfit, trade.symbol)}\n` +
+              `R:R 1:${RULES.riskReward.toFixed(0)} | ` +
+              `BE ${trade.breakEvenActive ? 'ON' : 'OFF'}\n` +
+              `MFE ${n(trade.mfeR, 0).toFixed(2)}R | ` +
+              `MAE ${n(trade.maeR, 0).toFixed(2)}R`
+          )
+          .join('\n\n');
+
+      await ctx.reply(text);
     }
   );
 
@@ -2685,8 +3388,8 @@ async function initTelegram() {
         `Losses: ${account?.losses || 0}\n` +
         `BE: ${account?.breakeven || 0}\n` +
         `Realized: ${fmtMoney(account?.realizedPnl || 0)}\n` +
-        `AI Entry Calls: ${state.aiEntryCalls}\n` +
-        `AI Manage Calls: ${state.aiManageCalls}`
+        `Gemini entry calls: ${state.aiEntryCalls}\n` +
+        `Gemini management calls: ${state.aiManageCalls}`
       );
     }
   );
@@ -2697,44 +3400,6 @@ async function initTelegram() {
       await ctx.reply(
         `📡 ${INSTRUMENTS.length} instruments\n` +
         INSTRUMENTS.join(', ')
-      );
-    }
-  );
-
-  bot.command(
-    'positions',
-    async ctx => {
-      const positions =
-        [
-          ...state.openTrades.values()
-        ];
-
-      if (
-        !positions.length
-      ) {
-        await ctx.reply(
-          '📭 No open PAPER trades'
-        );
-
-        return;
-      }
-
-      const message =
-        positions
-          .map(
-            trade =>
-              `${trade.symbol} ${trade.direction}\n` +
-              `Entry ${fmtPrice(trade.entryPrice, trade.symbol)} | ` +
-              `SL ${fmtPrice(trade.stopLoss, trade.symbol)} | ` +
-              `TP ${fmtPrice(trade.takeProfit, trade.symbol)}\n` +
-              `BE ${trade.breakEvenActive ? 'ON' : 'OFF'} | ` +
-              `MFE ${n(trade.mfeR, 0).toFixed(2)}R | ` +
-              `MAE ${n(trade.maeR, 0).toFixed(2)}R`
-          )
-          .join('\n\n');
-
-      await ctx.reply(
-        message
       );
     }
   );
@@ -2751,15 +3416,12 @@ async function initTelegram() {
             'CLOSED'
         })
           .sort({
-            closedAt:
-              -1
+            closedAt: -1
           })
           .limit(10)
           .lean();
 
-      if (
-        !rows.length
-      ) {
+      if (!rows.length) {
         await ctx.reply(
           '📭 No closed trades'
         );
@@ -2771,10 +3433,10 @@ async function initTelegram() {
         rows
           .map(
             trade =>
-              `${trade.symbol} ${trade.direction} ` +
-              `${trade.exitReason} ` +
+              `${trade.symbol} ${trade.direction} | ` +
+              `${trade.exitReason} | ` +
               `${n(trade.resultR, 0).toFixed(2)}R | ` +
-              `PnL ${fmtMoney(trade.pnl)} | ` +
+              `${fmtMoney(trade.pnl)} | ` +
               `MFE ${n(trade.mfeR, 0).toFixed(2)}R | ` +
               `MAE ${n(trade.maeR, 0).toFixed(2)}R`
           )
@@ -2785,16 +3447,14 @@ async function initTelegram() {
 
   await bot.telegram.getMe();
 
-  state.telegramReady =
-    true;
+  state.telegramReady = true;
 
   console.log(
     '✅ Telegram authenticated'
   );
 
   bot.launch({
-    dropPendingUpdates:
-      true
+    dropPendingUpdates: true
   })
     .then(
       () => {
@@ -2821,7 +3481,7 @@ async function getAiMemory(
   symbol = ''
 ) {
   try {
-    const query = {
+    const baseQuery = {
       accountKey:
         PAPER.accountKey,
 
@@ -2829,76 +3489,51 @@ async function getAiMemory(
         'CLOSED'
     };
 
-    if (
-      symbol
-    ) {
-      query.symbol =
-        symbol;
-    }
+    const projection = {
+      symbol: 1,
+      direction: 1,
+      resultR: 1,
+      pnl: 1,
+      exitReason: 1,
+      mfeR: 1,
+      maeR: 1,
+      openedAt: 1,
+      closedAt: 1,
+      aiEntryDecision: 1,
+      aiLastManagement: 1
+    };
 
-    let rows =
-      await Trade.find(
-        query,
-        {
-          symbol: 1,
-          direction: 1,
-          resultR: 1,
-          pnl: 1,
-          exitReason: 1,
-          quality: 1,
-          qualityScore: 1,
-          cmo: 1,
-          volumeRatio: 1,
-          bodyRatio: 1,
-          mfeR: 1,
-          maeR: 1,
-          openedAt: 1,
-          closedAt: 1
-        }
-      )
-        .sort({
-          closedAt:
-            -1
-        })
-        .limit(
-          AI.memoryClosedTrades
-        )
-        .lean();
+    let rows = [];
 
-    if (
-      rows.length <
-      8 &&
-      symbol
-    ) {
+    if (symbol) {
       rows =
         await Trade.find(
           {
-            accountKey:
-              PAPER.accountKey,
-
-            status:
-              'CLOSED'
+            ...baseQuery,
+            symbol
           },
-          {
-            symbol: 1,
-            direction: 1,
-            resultR: 1,
-            pnl: 1,
-            exitReason: 1,
-            quality: 1,
-            qualityScore: 1,
-            cmo: 1,
-            volumeRatio: 1,
-            bodyRatio: 1,
-            mfeR: 1,
-            maeR: 1,
-            openedAt: 1,
-            closedAt: 1
-          }
+          projection
         )
           .sort({
-            closedAt:
-              -1
+            closedAt: -1
+          })
+          .limit(
+            AI.memoryClosedTrades
+          )
+          .lean();
+    }
+
+    if (
+      !symbol ||
+      rows.length < 8
+    ) {
+      rows =
+        await Trade.find(
+          baseQuery,
+          projection
+        )
+          .sort({
+            closedAt: -1
           })
           .limit(
             AI.memoryClosedTrades
@@ -2908,75 +3543,63 @@ async function getAiMemory(
 
     const wins =
       rows.filter(
-        x =>
-          n(
-            x.resultR,
-            0
-          ) >
+        trade =>
+          n(trade.resultR, 0) >
           0.10
       ).length;
 
     const losses =
       rows.filter(
-        x =>
-          n(
-            x.resultR,
-            0
-          ) <
+        trade =>
+          n(trade.resultR, 0) <
           -0.10
       ).length;
 
-    const be =
+    const breakeven =
       rows.length -
       wins -
       losses;
 
     const totalR =
       rows.reduce(
-        (
-          total,
-          x
-        ) =>
+        (total, trade) =>
           total +
           n(
-            x.resultR,
+            trade.resultR,
             0
           ),
         0
       );
 
+    const avgR =
+      rows.length
+        ? totalR / rows.length
+        : 0;
+
     const avgMfe =
       rows.length
-        ? rows.reduce(
-            (
-              total,
-              x
-            ) =>
-              total +
-              n(
-                x.mfeR,
-                0
-              ),
-            0
-          ) /
-          rows.length
+        ? (
+            rows.reduce(
+              (total, trade) =>
+                total +
+                n(trade.mfeR, 0),
+              0
+            ) /
+            rows.length
+          )
         : 0;
 
     const avgMae =
       rows.length
-        ? rows.reduce(
-            (
-              total,
-              x
-            ) =>
-              total +
-              n(
-                x.maeR,
-                0
-              ),
-            0
-          ) /
-          rows.length
+        ? (
+            rows.reduce(
+              (total, trade) =>
+                total +
+                n(trade.maeR, 0),
+              0
+            ) /
+            rows.length
+          )
         : 0;
 
     return {
@@ -2985,83 +3608,71 @@ async function getAiMemory(
 
       wins,
       losses,
-      breakeven:
-        be,
+      breakeven,
 
       winRate:
         rows.length
-          ? wins /
-            rows.length *
-            100
+          ? wins / rows.length * 100
           : 0,
 
       totalR,
-
-      avgR:
-        rows.length
-          ? totalR /
-            rows.length
-          : 0,
-
+      avgR,
       avgMfe,
       avgMae,
 
       recent:
-        rows.slice(0, 12).map(
-          x => ({
-            symbol:
-              x.symbol,
+        rows
+          .slice(0, 12)
+          .map(
+            trade => ({
+              symbol:
+                trade.symbol,
 
-            direction:
-              x.direction,
+              direction:
+                trade.direction,
 
-            resultR:
-              n(
-                x.resultR,
-                0
-              ),
+              resultR:
+                n(
+                  trade.resultR,
+                  0
+                ),
 
-            exitReason:
-              x.exitReason,
+              pnl:
+                n(
+                  trade.pnl,
+                  0
+                ),
 
-            quality:
-              x.quality,
+              exitReason:
+                trade.exitReason,
 
-            qualityScore:
-              n(
-                x.qualityScore,
-                0
-              ),
+              mfeR:
+                n(
+                  trade.mfeR,
+                  0
+                ),
 
-            cmo:
-              n(
-                x.cmo,
-                0
-              ),
+              maeR:
+                n(
+                  trade.maeR,
+                  0
+                ),
 
-            volumeRatio:
-              n(
-                x.volumeRatio,
-                0
-              ),
+              entryReason:
+                trade.aiEntryDecision?.reason ||
+                '',
 
-            mfeR:
-              n(
-                x.mfeR,
-                0
-              ),
+              setup:
+                trade.aiEntryDecision?.setup ||
+                '',
 
-            maeR:
-              n(
-                x.maeR,
-                0
-              )
-          })
-        )
+              managementReason:
+                trade.aiLastManagement?.reason ||
+                ''
+            })
+          )
     };
-  } catch (
-    error
-  ) {
+  } catch (error) {
     console.error(
       'AI memory:',
       safeError(error)
@@ -3083,11 +3694,115 @@ async function getAiMemory(
 }
 
 // ============================================================
-// MULTI-TIMEFRAME AI CONTEXT
+// HIGHER TIMEFRAME TECHNICAL CONTEXT
 // ============================================================
 
-async function buildHigherTimeframeContext(
-  symbol
+function compactTechnicalContext(
+  technical
+) {
+  if (!technical) {
+    return null;
+  }
+
+  return {
+    timeframe:
+      technical.timeframe,
+
+    barTime:
+      technical.barTime,
+
+    price:
+      technical.price,
+
+    trend:
+      technical.trend,
+
+    momentum:
+      technical.momentum,
+
+    dmi:
+      technical.dmi,
+
+    volatility:
+      technical.volatility,
+
+    bollinger:
+      technical.bollinger,
+
+    keltner:
+      technical.keltner,
+
+    volume:
+      technical.volume,
+
+    obv:
+      technical.obv,
+
+    mfi:
+      technical.mfi,
+
+    vwap:
+      technical.vwap,
+
+    distanceFromVwapAtr:
+      technical.distanceFromVwapAtr,
+
+    candles:
+      technical.candles,
+
+    supportResistance:
+      technical.supportResistance,
+
+    structure:
+      technical.structure,
+
+    liquidity:
+      technical.liquidity,
+
+    fvg:
+      technical.fvg,
+
+    fibonacci:
+      technical.fibonacci,
+
+    internalBias:
+      technical.internalBias
+  };
+}
+
+function buildContextForBars(
+  symbol,
+  bars,
+  timeframe
+) {
+  if (
+    !Array.isArray(bars) ||
+    bars.length < CORE_MIN_HISTORY
+  ) {
+    return null;
+  }
+
+  const technical =
+    buildTechnicalIntelligence(
+      symbol,
+      bars
+    );
+
+  if (!technical) {
+    return null;
+  }
+
+  technical.timeframe =
+    timeframe;
+
+  return compactTechnicalContext(
+    technical
+  );
+}
+
+async function buildMultiTimeframeContext(
+  symbol,
+  current15mBars = null
 ) {
   const result = {
     m15: null,
@@ -3095,137 +3810,24 @@ async function buildHigherTimeframeContext(
     h4: null
   };
 
-  const getContext =
-    bars => {
-      if (
-        !bars ||
-        bars.length <
-        30
-      ) {
-        return null;
-      }
-
-      const closes =
-        bars.map(
-          x =>
-            x.close
-        );
-
-      const signal =
-        bars[
-          bars.length -
-          1
-        ];
-
-      const ema9 =
-        emaLast(
-          closes,
-          9
-        );
-
-      const ema21 =
-        emaLast(
-          closes,
-          21
-        );
-
-      const ema50 =
-        emaLast(
-          closes,
-          50
-        );
-
-      const atr =
-        atrLast(
-          bars,
-          14
-        );
-
-      const cmo =
-        cmoLast(
-          closes,
-          9
-        );
-
-      const dmi =
-        dmiAdx(
-          bars,
-          14
-        );
-
-      const trend =
-        Number.isFinite(
-          ema50
-        )
-          ? signal.close >
-            ema50
-            ? 'BULL'
-            : signal.close <
-              ema50
-              ? 'BEAR'
-              : 'FLAT'
-          : 'UNKNOWN';
-
-      const shortTrend =
-        Number.isFinite(
-          ema9
-        ) &&
-        Number.isFinite(
-          ema21
-        )
-          ? ema9 >
-            ema21
-            ? 'BULL'
-            : 'BEAR'
-          : 'UNKNOWN';
-
-      return {
-        close:
-          signal.close,
-
-        ema9,
-        ema21,
-        ema50,
-
-        trend,
-        shortTrend,
-
-        cmo,
-        atr,
-
-        adx:
-          dmi.adx,
-
-        plusDI:
-          dmi.plusDI,
-
-        minusDI:
-          dmi.minusDI,
-
-        high20:
-          highestHigh(
-            bars.slice(-20)
-          ),
-
-        low20:
-          lowestLow(
-            bars.slice(-20)
-          )
-      };
-    };
-
   try {
     const memory =
-      state.pairState.get(
-        symbol
-      );
+      state.pairState.get(symbol);
+
+    const bars15 =
+      current15mBars?.length
+        ? current15mBars
+        : memory?.bars || [];
 
     if (
-      memory?.bars?.length
+      bars15.length >=
+      CORE_MIN_HISTORY
     ) {
       result.m15 =
-        getContext(
-          memory.bars
+        buildContextForBars(
+          symbol,
+          bars15,
+          '15m'
         );
     }
 
@@ -3237,32 +3839,58 @@ async function buildHigherTimeframeContext(
         fetchOhlc(
           symbol,
           '1h',
-          150
+          220
         ).catch(
-          () => []
+          error => {
+            console.error(
+              `1H ${symbol}:`,
+              safeError(error)
+            );
+
+            return [];
+          }
         ),
 
         fetchOhlc(
           symbol,
           '4h',
-          150
+          220
         ).catch(
-          () => []
+          error => {
+            console.error(
+              `4H ${symbol}:`,
+              safeError(error)
+            );
+
+            return [];
+          }
         )
       ]);
 
-    result.h1 =
-      getContext(
-        bars1h
-      );
+    if (
+      bars1h.length >=
+      CORE_MIN_HISTORY
+    ) {
+      result.h1 =
+        buildContextForBars(
+          symbol,
+          bars1h,
+          '1h'
+        );
+    }
 
-    result.h4 =
-      getContext(
-        bars4h
-      );
-  } catch (
-    error
-  ) {
+    if (
+      bars4h.length >=
+      CORE_MIN_HISTORY
+    ) {
+      result.h4 =
+        buildContextForBars(
+          symbol,
+          bars4h,
+          '4h'
+        );
+    }
+  } catch (error) {
     console.error(
       `MTF ${symbol}:`,
       safeError(error)
@@ -3273,7 +3901,7 @@ async function buildHigherTimeframeContext(
 }
 
 // ============================================================
-// GEMINI HELPERS
+// GEMINI RESPONSE PARSING
 // ============================================================
 
 function extractGeminiText(
@@ -3283,9 +3911,7 @@ function extractGeminiText(
     response?.data?.candidates;
 
   if (
-    !Array.isArray(
-      candidates
-    ) ||
+    !Array.isArray(candidates) ||
     !candidates.length
   ) {
     return '';
@@ -3294,17 +3920,14 @@ function extractGeminiText(
   const parts =
     candidates[0]?.content?.parts;
 
-  if (
-    !Array.isArray(parts)
-  ) {
+  if (!Array.isArray(parts)) {
     return '';
   }
 
   return parts
     .map(
       part =>
-        typeof part?.text ===
-        'string'
+        typeof part?.text === 'string'
           ? part.text
           : ''
     )
@@ -3312,16 +3935,12 @@ function extractGeminiText(
     .trim();
 }
 
-function parseJsonFromText(
-  text
-) {
-  if (
-    !text
-  ) {
+function parseJsonFromText(text) {
+  if (!text) {
     return null;
   }
 
-  let cleaned =
+  const cleaned =
     String(text)
       .trim()
       .replace(
@@ -3339,9 +3958,7 @@ function parseJsonFromText(
       .trim();
 
   try {
-    return JSON.parse(
-      cleaned
-    );
+    return JSON.parse(cleaned);
   } catch {}
 
   const first =
@@ -3352,8 +3969,7 @@ function parseJsonFromText(
 
   if (
     first !== -1 &&
-    last >
-    first
+    last > first
   ) {
     try {
       return JSON.parse(
@@ -3368,223 +3984,324 @@ function parseJsonFromText(
   return null;
 }
 
+// ============================================================
+// GEMINI RATE-LIMIT QUEUE
+// ============================================================
+
+function enqueueGemini(task) {
+  const execute =
+    async () => {
+      const elapsed =
+        Date.now() -
+        state.geminiLastCallAt;
+
+      const wait =
+        GEMINI_MIN_CALL_GAP_MS -
+        elapsed;
+
+      if (wait > 0) {
+        await sleep(wait);
+      }
+
+      state.geminiLastCallAt =
+        Date.now();
+
+      return task();
+    };
+
+  const result =
+    state.geminiQueue.then(
+      execute,
+      execute
+    );
+
+  // Keep queue alive even if one request fails.
+  state.geminiQueue =
+    result.catch(() => {});
+
+  return result;
+}
+
+// ============================================================
+// GEMINI JSON
+// FAIL-CLOSED
+// ============================================================
+
 async function geminiJson(
   systemInstruction,
   payload
 ) {
-  if (
-    !GEMINI_API_KEY
-  ) {
+  if (!GEMINI_API_KEY) {
+    state.geminiReady = false;
+
+    state.lastAiError =
+      'GEMINI_API_KEY missing';
+
     return null;
   }
 
-  const url =
-    `${GEMINI_BASE}/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
+  return enqueueGemini(
+    async () => {
+      const url =
+        `${GEMINI_BASE}/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
 
-  try {
-    const response =
-      await axios.post(
-        url,
-        {
-          system_instruction: {
-            parts: [
-              {
-                text:
-                  systemInstruction
-              }
-            ]
-          },
-
-          contents: [
+      try {
+        const response =
+          await axios.post(
+            url,
             {
-              role:
-                'user',
+              system_instruction: {
+                parts: [
+                  {
+                    text:
+                      systemInstruction
+                  }
+                ]
+              },
 
-              parts: [
+              contents: [
                 {
-                  text:
-                    JSON.stringify(
-                      payload
-                    )
+                  role:
+                    'user',
+
+                  parts: [
+                    {
+                      text:
+                        JSON.stringify(
+                          payload
+                        )
+                    }
+                  ]
                 }
-              ]
+              ],
+
+              generationConfig: {
+                temperature:
+                  AI.temperature,
+
+                response_mime_type:
+                  'application/json'
+              }
+            },
+            {
+              timeout:
+                AI.timeoutMs,
+
+              headers: {
+                'Content-Type':
+                  'application/json',
+
+                'x-goog-api-key':
+                  GEMINI_API_KEY
+              }
             }
-          ],
+          );
 
-          generationConfig: {
-            temperature:
-              AI.temperature,
+        const text =
+          extractGeminiText(
+            response
+          );
 
-            response_mime_type:
-              'application/json'
-          }
-        },
-        {
-          timeout:
-            AI.timeoutMs,
+        const json =
+          parseJsonFromText(
+            text
+          );
 
-          headers: {
-            'Content-Type':
-              'application/json',
-
-            'x-goog-api-key':
-              GEMINI_API_KEY
-          }
+        if (
+          !json ||
+          typeof json !== 'object'
+        ) {
+          throw new Error(
+            'Gemini returned invalid JSON'
+          );
         }
-      );
 
-    const text =
-      extractGeminiText(
-        response
-      );
+        state.geminiReady = true;
+        state.lastAiError = null;
 
-    const json =
-      parseJsonFromText(
-        text
-      );
+        return json;
+      } catch (error) {
+        state.geminiReady = false;
 
-    if (
-      !json
-    ) {
-      throw new Error(
-        'Gemini returned invalid JSON'
-      );
+        state.lastAiError =
+          safeError(error);
+
+        console.error(
+          'Gemini:',
+          state.lastAiError
+        );
+
+        return null;
+      }
     }
-
-    state.geminiReady =
-      true;
-
-    state.lastAiError =
-      null;
-
-    return json;
-  } catch (
-    error
-  ) {
-    state.lastAiError =
-      safeError(error);
-
-    console.error(
-      'Gemini:',
-      state.lastAiError
-    );
-
-    return null;
-  }
+  );
 }
 
 // ============================================================
-// AI ENTRY DECISION
+// AI ENTRY COMMANDER
+//
+// Gemini is now the directional decision maker.
+//
+// It receives technical intelligence.
+// It may choose:
+// BUY
+// SELL
+// NO_TRADE
+//
+// For BUY/SELL it MUST propose a technical stop-loss PRICE.
+//
+// It does NOT choose:
+// - quantity
+// - account risk
+// - TP
+//
+// TP is mechanically calculated by the bot at exactly 2R.
 // ============================================================
 
-async function aiEntryDecision(
-  analysis,
+async function aiEntryCommander(
+  symbol,
+  technical,
+  multiTimeframe,
   quote
 ) {
+  state.aiEntryCalls++;
+
   if (
     !AI.enabled ||
-    !AI.entryDecisionEnabled
-  ) {
-    return {
-      decision:
-        'APPROVE',
-
-      confidence:
-        100,
-
-      reason:
-        'AI_DISABLED',
-
-      fallback:
-        true
-    };
-  }
-
-  if (
+    !AI.entryCommanderEnabled ||
     !GEMINI_API_KEY
   ) {
+    state.aiNoTradeDecisions++;
+
     return {
       decision:
-        'APPROVE',
+        'NO_TRADE',
 
       confidence:
         0,
 
-      reason:
-        'GEMINI_KEY_MISSING_STRATEGY_FALLBACK',
+      stopLoss:
+        null,
 
-      fallback:
+      reason:
+        'AI_UNAVAILABLE_FAIL_CLOSED',
+
+      setup:
+        'NONE',
+
+      invalidation:
+        '',
+
+      marketRegime:
+        'UNCLEAR',
+
+      warnings: [
+        'Gemini unavailable'
+      ],
+
+      failClosed:
         true
     };
   }
 
-  state.aiEntryCalls++;
+  const memory =
+    await getAiMemory(
+      symbol
+    );
 
-  const [
-    mtf,
-    memory
-  ] =
-    await Promise.all([
-      buildHigherTimeframeContext(
-        analysis.symbol
-      ),
+  const systemInstruction = `
+You are the trading commander of LOMY FOREX V1.4.
 
-      getAiMemory(
-        analysis.symbol
-      )
-    ]);
+This system is PAPER ONLY.
 
-  const systemInstruction =
-    `
-You are LOMY Forex V1.3 AI Decision Layer.
+You are responsible for the directional trading decision.
 
-You are NOT the risk manager.
-You cannot change:
-- account balance
-- position size
-- stop loss
-- take profit
-- risk percentage
-- portfolio risk cap
-- API keys
-- trading mode
-- code
-- strategy protections
+You receive:
+- current bid/ask/spread
+- 15-minute technical intelligence
+- 1-hour technical intelligence
+- 4-hour technical intelligence
+- recent closed-trade memory
 
-The system is PAPER ONLY.
+You must independently decide exactly one:
+BUY
+SELL
+NO_TRADE
 
-A technical strategy has already produced a candidate BUY or SELL.
-Your job is only to decide whether that candidate has sufficient market confirmation.
+Do not mechanically follow the internal directional bias.
+The internal bias is only one analytical input.
 
-Analyze:
-15m, 1H and 4H trend alignment,
-market structure,
-liquidity,
-momentum,
-volume,
-candle quality,
-support/resistance,
-Fibonacci,
-FVG,
-ADX,
-historical performance memory,
-MFE/MAE behavior.
+Analyze confluence and conflict between:
+- EMA 9/21/50/100/200
+- RSI
+- CMO
+- MACD
+- Stochastic
+- Williams %R
+- ROC
+- ADX and +DI/-DI
+- ATR and volatility regime
+- Bollinger Bands
+- Keltner Channel
+- volume ratio/spikes
+- OBV
+- MFI
+- rolling VWAP
+- support and resistance
+- HH/HL/LH/LL market structure
+- BOS
+- liquidity sweeps
+- fair value gaps
+- Fibonacci retracements/extensions
+- candle body/wicks/rejection/engulfing
+- 15m / 1H / 4H alignment
+- recent MFE/MAE and trade outcomes
 
-Return JSON only.
+QUALITY OVER FREQUENCY.
+NO_TRADE is a valid and desirable decision when evidence is weak,
+conflicted, spread is poor, structure is unclear, or the setup lacks
+a technically defensible invalidation point.
 
-Required JSON:
+If decision is BUY:
+stopLoss MUST be a numeric PRICE below the current ask.
+Place it at a technically meaningful invalidation level.
+
+If decision is SELL:
+stopLoss MUST be a numeric PRICE above the current bid.
+Place it at a technically meaningful invalidation level.
+
+The stop must be based on structure, swing, liquidity, support/resistance,
+ATR or another defensible technical invalidation.
+
+Do NOT calculate account risk.
+Do NOT calculate quantity.
+Do NOT choose take profit.
+Do NOT change R:R.
+Do NOT request wider risk.
+Do NOT enable LIVE trading.
+Do NOT change code or API settings.
+
+The bot will calculate take-profit mechanically at exactly 2R from
+the final validated stop-loss distance.
+
+Return JSON only in this exact conceptual structure:
+
 {
-  "decision":"APPROVE" or "REJECT",
+  "decision":"BUY|SELL|NO_TRADE",
   "confidence":0-100,
-  "reason":"short explanation",
-  "marketRegime":"TRENDING|RANGING|VOLATILE|UNCLEAR",
+  "stopLoss":number|null,
+  "reason":"concise trading rationale",
+  "setup":"short setup name",
+  "invalidation":"what invalidates the setup",
+  "marketRegime":"TRENDING|RANGING|VOLATILE|TRANSITION|UNCLEAR",
   "trend15m":"BULL|BEAR|MIXED",
   "trend1h":"BULL|BEAR|MIXED",
   "trend4h":"BULL|BEAR|MIXED",
   "warnings":[]
 }
 
-Do not propose different SL, TP, risk or quantity.
+Never output APPROVE or REJECT.
+Only BUY, SELL or NO_TRADE.
 `;
 
   const payload = {
@@ -3594,52 +4311,7 @@ Do not propose different SL, TP, risk or quantity.
     mode:
       MODE,
 
-    candidate: {
-      symbol:
-        analysis.symbol,
-
-      direction:
-        analysis.direction,
-
-      signalPrice:
-        analysis.signalClose,
-
-      quality:
-        analysis.quality,
-
-      qualityScore:
-        analysis.qualityScore,
-
-      cmo:
-        analysis.cmo,
-
-      atr:
-        analysis.atr,
-
-      bodyRatio:
-        analysis.bodyRatio,
-
-      volumeRatio:
-        analysis.volumeRatio,
-
-      support:
-        analysis.support,
-
-      resistance:
-        analysis.resistance,
-
-      reasons:
-        analysis.reasons,
-
-      retest:
-        analysis.retest,
-
-      fib:
-        analysis.fib,
-
-      smc:
-        analysis.smc
-    },
+    symbol,
 
     quote: {
       bid:
@@ -3648,31 +4320,41 @@ Do not propose different SL, TP, risk or quantity.
       ask:
         quote.ask,
 
+      mid:
+        quote.mid,
+
       spread:
         quote.spread
     },
 
-    multiTimeframe:
-      mtf,
+    technical15m:
+      compactTechnicalContext(
+        technical
+      ),
 
-    aiMemory:
+    multiTimeframe,
+
+    tradeMemory:
       memory,
 
-    immutableRiskRules: {
-      riskPctPerTrade:
-        PAPER.riskPctPerTrade,
+    immutableExecutionRules: {
+      riskReward:
+        `1:${RULES.riskReward}`,
+
+      breakEvenTriggerR:
+        RULES.breakEvenTriggerR,
+
+      maxCapitalRiskSafetyPct:
+        PAPER.maxCapitalRiskPct,
 
       portfolioRiskCapPct:
         PAPER.portfolioRiskCapPct,
 
-      riskReward:
-        STRATEGY.riskReward,
-
-      breakEvenTriggerR:
-        STRATEGY.breakEvenTriggerR,
-
       liveTrading:
-        LIVE_TRADING
+        false,
+
+      note:
+        'Capital risk percentage is a safety cap only. TP is determined from price-distance R:R, not account percentage.'
     }
   };
 
@@ -3682,29 +4364,52 @@ Do not propose different SL, TP, risk or quantity.
       payload
     );
 
-  if (
-    !response
-  ) {
+  // ==========================================================
+  // FAIL CLOSED:
+  // Gemini error/malformed response = NO TRADE.
+  // ==========================================================
+
+  if (!response) {
+    state.aiNoTradeDecisions++;
+
     return {
       decision:
-        'APPROVE',
+        'NO_TRADE',
 
       confidence:
         0,
 
-      reason:
-        'AI_UNAVAILABLE_STRATEGY_FALLBACK',
+      stopLoss:
+        null,
 
-      fallback:
+      reason:
+        'GEMINI_UNAVAILABLE_FAIL_CLOSED',
+
+      setup:
+        'NONE',
+
+      invalidation:
+        '',
+
+      marketRegime:
+        'UNCLEAR',
+
+      warnings: [
+        state.lastAiError ||
+        'Gemini unavailable'
+      ],
+
+      failClosed:
         true
     };
   }
 
-  const decision =
+  let decision =
     String(
-      response.decision ||
-      ''
-    ).toUpperCase();
+      response.decision || ''
+    )
+      .trim()
+      .toUpperCase();
 
   const confidence =
     clamp(
@@ -3717,43 +4422,441 @@ Do not propose different SL, TP, risk or quantity.
     );
 
   if (
-    decision ===
-      'APPROVE' &&
-    confidence >=
-      AI.entryMinConfidence
+    ![
+      'BUY',
+      'SELL',
+      'NO_TRADE'
+    ].includes(decision)
   ) {
-    state.aiApprovedEntries++;
-
-    return {
-      ...response,
-
-      decision:
-        'APPROVE',
-
-      confidence,
-
-      fallback:
-        false
-    };
+    decision =
+      'NO_TRADE';
   }
 
-  state.aiRejectedEntries++;
+  // Confidence gate belongs to the safety/execution layer.
+  if (
+    (
+      decision === 'BUY' ||
+      decision === 'SELL'
+    ) &&
+    confidence <
+    RULES.minEntryConfidence
+  ) {
+    decision =
+      'NO_TRADE';
+  }
+
+  let stopLoss =
+    n(
+      response.stopLoss,
+      NaN
+    );
+
+  if (decision === 'NO_TRADE') {
+    stopLoss = null;
+    state.aiNoTradeDecisions++;
+  } else if (decision === 'BUY') {
+    state.aiBuyDecisions++;
+  } else if (decision === 'SELL') {
+    state.aiSellDecisions++;
+  }
 
   return {
-    ...response,
-
-    decision:
-      'REJECT',
-
+    decision,
     confidence,
+    stopLoss,
 
-    fallback:
+    reason:
+      String(
+        response.reason ||
+        'No reason supplied'
+      ).slice(0, 1000),
+
+    setup:
+      String(
+        response.setup ||
+        ''
+      ).slice(0, 300),
+
+    invalidation:
+      String(
+        response.invalidation ||
+        ''
+      ).slice(0, 600),
+
+    marketRegime:
+      String(
+        response.marketRegime ||
+        'UNCLEAR'
+      ).toUpperCase(),
+
+    trend15m:
+      String(
+        response.trend15m ||
+        'MIXED'
+      ).toUpperCase(),
+
+    trend1h:
+      String(
+        response.trend1h ||
+        'MIXED'
+      ).toUpperCase(),
+
+    trend4h:
+      String(
+        response.trend4h ||
+        'MIXED'
+      ).toUpperCase(),
+
+    warnings:
+      Array.isArray(
+        response.warnings
+      )
+        ? response.warnings
+            .slice(0, 10)
+            .map(
+              warning =>
+                String(warning).slice(0, 300)
+            )
+        : [],
+
+    failClosed:
       false
   };
 }
 
 // ============================================================
-// AI OPEN TRADE MANAGEMENT
+// VALIDATE GEMINI STOP
+//
+// AI proposes the technical stop.
+// Risk Manager validates it.
+//
+// Risk Manager NEVER widens or invents a different AI stop.
+// If invalid -> reject the trade.
+// ============================================================
+
+function validateAiStopLoss(
+  decision,
+  quote,
+  technical
+) {
+  if (
+    !decision ||
+    ![
+      'BUY',
+      'SELL'
+    ].includes(
+      decision.decision
+    )
+  ) {
+    return {
+      valid: false,
+      reason: 'NO_DIRECTION'
+    };
+  }
+
+  const direction =
+    decision.decision;
+
+  const stopLoss =
+    n(
+      decision.stopLoss,
+      NaN
+    );
+
+  if (!Number.isFinite(stopLoss)) {
+    return {
+      valid: false,
+      reason: 'AI_SL_MISSING'
+    };
+  }
+
+  const entry =
+    direction === 'BUY'
+      ? quote.ask
+      : quote.bid;
+
+  if (
+    direction === 'BUY' &&
+    !(stopLoss < entry)
+  ) {
+    return {
+      valid: false,
+      reason: 'BUY_SL_NOT_BELOW_ENTRY'
+    };
+  }
+
+  if (
+    direction === 'SELL' &&
+    !(stopLoss > entry)
+  ) {
+    return {
+      valid: false,
+      reason: 'SELL_SL_NOT_ABOVE_ENTRY'
+    };
+  }
+
+  const riskDistance =
+    Math.abs(
+      entry - stopLoss
+    );
+
+  const atr =
+    n(
+      technical?.volatility?.atr,
+      NaN
+    );
+
+  if (
+    !Number.isFinite(atr) ||
+    !(atr > 0)
+  ) {
+    return {
+      valid: false,
+      reason: 'ATR_UNAVAILABLE'
+    };
+  }
+
+  const stopAtr =
+    riskDistance / atr;
+
+  if (
+    stopAtr <
+    RULES.minStopAtr
+  ) {
+    return {
+      valid: false,
+      reason: 'AI_SL_TOO_TIGHT',
+      stopAtr
+    };
+  }
+
+  if (
+    stopAtr >
+    RULES.maxStopAtr
+  ) {
+    return {
+      valid: false,
+      reason: 'AI_SL_TOO_WIDE',
+      stopAtr
+    };
+  }
+
+  const spreadFraction =
+    quote.spread /
+    riskDistance;
+
+  if (
+    !Number.isFinite(spreadFraction) ||
+    spreadFraction >
+    RULES.maxSpreadRiskFraction
+  ) {
+    return {
+      valid: false,
+      reason: 'SPREAD_TOO_LARGE_VS_RISK',
+      spreadFraction
+    };
+  }
+
+  const takeProfit =
+    direction === 'BUY'
+      ? (
+          entry +
+          riskDistance *
+          RULES.riskReward
+        )
+      : (
+          entry -
+          riskDistance *
+          RULES.riskReward
+        );
+
+  const breakEvenTriggerPrice =
+    direction === 'BUY'
+      ? (
+          entry +
+          riskDistance *
+          RULES.breakEvenTriggerR
+        )
+      : (
+          entry -
+          riskDistance *
+          RULES.breakEvenTriggerR
+        );
+
+  const validOrder =
+    direction === 'BUY'
+      ? (
+          stopLoss <
+          entry &&
+          entry <
+          breakEvenTriggerPrice &&
+          breakEvenTriggerPrice <
+          takeProfit
+        )
+      : (
+          takeProfit <
+          breakEvenTriggerPrice &&
+          breakEvenTriggerPrice <
+          entry &&
+          entry <
+          stopLoss
+        );
+
+  if (!validOrder) {
+    return {
+      valid: false,
+      reason: 'INVALID_PRICE_ORDER'
+    };
+  }
+
+  return {
+    valid: true,
+
+    direction,
+
+    entry,
+
+    stopLoss,
+
+    riskDistance,
+
+    stopAtr,
+
+    spreadFraction,
+
+    takeProfit,
+
+    breakEvenTriggerPrice
+  };
+}
+
+// ============================================================
+// SIGNAL / AI DECISION RECORD
+// ============================================================
+
+async function recordSignal(
+  {
+    symbol,
+    technical,
+    multiTimeframe,
+    aiDecision,
+    executionLevels = null,
+    executed = false,
+    skipReason = ''
+  }
+) {
+  const direction =
+    aiDecision?.decision || 'NO_TRADE';
+
+  const signalPrice =
+    n(
+      technical?.price?.close,
+      NaN
+    );
+
+  const signalBarTime =
+    String(
+      technical?.barTime ||
+      ''
+    );
+
+  if (state.mongoReady) {
+    try {
+      await Signal.create({
+        version:
+          VERSION,
+
+        accountKey:
+          PAPER.accountKey,
+
+        symbol,
+
+        direction:
+          direction === 'NO_TRADE'
+            ? ''
+            : direction,
+
+        decision:
+          direction,
+
+        confidence:
+          n(
+            aiDecision?.confidence,
+            0
+          ),
+
+        signalPrice,
+
+        signalBarTime,
+
+        aiStopLoss:
+          Number.isFinite(
+            n(
+              aiDecision?.stopLoss,
+              NaN
+            )
+          )
+            ? n(aiDecision.stopLoss)
+            : null,
+
+        calculatedTakeProfit:
+          executionLevels?.takeProfit ??
+          null,
+
+        createdAt:
+          new Date(),
+
+        executed,
+
+        skipReason,
+
+        aiDecision,
+
+        technicalSnapshot:
+          technical,
+
+        multiTimeframeSnapshot:
+          multiTimeframe
+      });
+    } catch (error) {
+      console.error(
+        'Signal record:',
+        safeError(error)
+      );
+    }
+  }
+
+  await journal(
+    executed
+      ? 'AI_TRADE_EXECUTED'
+      : 'AI_DECISION',
+    {
+      symbol,
+
+      direction:
+        direction === 'NO_TRADE'
+          ? ''
+          : direction,
+
+      message:
+        executed
+          ? 'EXECUTED'
+          : skipReason ||
+            direction,
+
+      data: {
+        aiDecision,
+        executionLevels,
+        technical,
+        multiTimeframe,
+        skipReason
+      }
+    }
+  );
+}
+
+// ============================================================
+// AI OPEN-TRADE MANAGEMENT
 // ============================================================
 
 async function aiManagementDecision(
@@ -3765,17 +4868,33 @@ async function aiManagementDecision(
     !AI.managementEnabled ||
     !GEMINI_API_KEY
   ) {
-    return null;
+    // Mechanical SL/TP/BE remains active.
+    return {
+      decision:
+        'HOLD',
+
+      confidence:
+        0,
+
+      reason:
+        'AI_UNAVAILABLE_MECHANICAL_PROTECTION_ACTIVE',
+
+      setupInvalidated:
+        false,
+
+      failClosed:
+        true
+    };
   }
 
   state.aiManageCalls++;
 
   const [
-    mtf,
+    multiTimeframe,
     memory
   ] =
     await Promise.all([
-      buildHigherTimeframeContext(
+      buildMultiTimeframeContext(
         trade.symbol
       ),
 
@@ -3790,64 +4909,91 @@ async function aiManagementDecision(
       quote
     );
 
-  const systemInstruction =
-    `
-You manage an already-open PAPER forex trade.
+  const systemInstruction = `
+You manage an already-open PAPER forex trade for LOMY FOREX V1.4.
 
-You may return only HOLD or CLOSE.
+You may choose only:
+HOLD
+CLOSE
 
-You must NEVER:
+You may NOT:
 - move stop loss
+- widen risk
 - move take profit
-- change position size
-- add to position
+- change R:R
+- change quantity
+- add to the position
 - reverse the position
-- change risk
-- change account settings
-- change API keys
+- open another trade
 - enable live trading
+- modify account settings
 
-Risk Manager controls SL, TP, break-even and position size.
+The mechanical Risk Manager always retains control of:
+- original SL
+- exact 1:2 TP
+- +0.60R break-even
+- position size
+- capital-risk safety limits
 
-Use current trade R, MFE, MAE, 15m/1H/4H context,
-market structure, liquidity and historical memory.
+Use:
+- current R
+- MFE / MAE
+- original Gemini setup and rationale
+- 15m / 1H / 4H technical intelligence
+- structure
+- momentum
+- volatility
+- liquidity
+- recent trading memory
 
-Do not close merely because the trade is slightly negative.
-Prefer CLOSE only when the original setup is materially invalidated
-or the market structure strongly reverses.
+CLOSE is a discretionary risk-reducing action.
+Use CLOSE when the original thesis has materially failed,
+a strong structural reversal has developed,
+or the market now presents a materially adverse condition.
+
+Do not close a trade merely because of normal noise or a small drawdown.
 
 Return JSON only:
+
 {
-  "decision":"HOLD" or "CLOSE",
+  "decision":"HOLD|CLOSE",
   "confidence":0-100,
-  "reason":"short explanation",
+  "reason":"concise explanation",
   "setupInvalidated":true|false,
   "warnings":[]
 }
 `;
 
   const payload = {
+    version:
+      VERSION,
+
     symbol:
       trade.symbol,
 
     direction:
       trade.direction,
 
-    trade: {
+    currentTrade: {
       entryPrice:
         trade.entryPrice,
-
-      currentR:
-        r,
 
       stopLoss:
         trade.stopLoss,
 
+      initialStopLoss:
+        trade.initialStopLoss,
+
       takeProfit:
         trade.takeProfit,
 
+      currentR:
+        r,
+
       breakEvenActive:
-        trade.breakEvenActive,
+        Boolean(
+          trade.breakEvenActive
+        ),
 
       mfeR:
         n(
@@ -3861,14 +5007,9 @@ Return JSON only:
           0
         ),
 
-      quality:
-        trade.quality,
-
-      qualityScore:
-        trade.qualityScore,
-
-      originalReasons:
-        trade.reasons
+      originalAiDecision:
+        trade.aiEntryDecision ||
+        null
     },
 
     quote: {
@@ -3878,24 +5019,29 @@ Return JSON only:
       ask:
         quote.ask,
 
+      mid:
+        quote.mid,
+
       spread:
         quote.spread
     },
 
-    multiTimeframe:
-      mtf,
+    multiTimeframe,
 
     memory,
 
-    immutableRiskRules: {
-      riskPctPerTrade:
-        PAPER.riskPctPerTrade,
-
+    immutableRules: {
       riskReward:
-        STRATEGY.riskReward,
+        '1:2',
 
       breakEvenTriggerR:
-        STRATEGY.breakEvenTriggerR
+        RULES.breakEvenTriggerR,
+
+      maxCapitalRiskSafetyPct:
+        PAPER.maxCapitalRiskPct,
+
+      liveTrading:
+        false
     }
   };
 
@@ -3905,17 +5051,41 @@ Return JSON only:
       payload
     );
 
-  if (
-    !response
-  ) {
-    return null;
+  // AI failure must NEVER disable hard trade protection.
+  // HOLD means mechanical SL/TP/BE continue normally.
+  if (!response) {
+    state.aiHoldDecisions++;
+
+    return {
+      decision:
+        'HOLD',
+
+      confidence:
+        0,
+
+      reason:
+        'GEMINI_UNAVAILABLE_MECHANICAL_PROTECTION_ACTIVE',
+
+      setupInvalidated:
+        false,
+
+      warnings: [
+        state.lastAiError ||
+        'Gemini unavailable'
+      ],
+
+      failClosed:
+        true
+    };
   }
 
-  const decision =
+  let decision =
     String(
       response.decision ||
       ''
-    ).toUpperCase();
+    )
+      .trim()
+      .toUpperCase();
 
   const confidence =
     clamp(
@@ -3928,323 +5098,197 @@ Return JSON only:
     );
 
   if (
-    decision ===
-      'CLOSE' &&
-    confidence >=
-      AI.managementMinConfidence
+    ![
+      'HOLD',
+      'CLOSE'
+    ].includes(decision)
   ) {
+    decision =
+      'HOLD';
+  }
+
+  if (
+    decision === 'CLOSE' &&
+    confidence <
+    RULES.minCloseConfidence
+  ) {
+    decision =
+      'HOLD';
+  }
+
+  if (decision === 'CLOSE') {
     state.aiCloseDecisions++;
+  } else {
+    state.aiHoldDecisions++;
+  }
 
+  return {
+    decision,
+    confidence,
+
+    reason:
+      String(
+        response.reason ||
+        'No reason supplied'
+      ).slice(0, 1000),
+
+    setupInvalidated:
+      response.setupInvalidated === true,
+
+    warnings:
+      Array.isArray(
+        response.warnings
+      )
+        ? response.warnings
+            .slice(0, 10)
+            .map(
+              warning =>
+                String(warning).slice(0, 300)
+            )
+        : [],
+
+    failClosed:
+      false
+  };
+}
+
+// ============================================================
+// END PART 2 / 4
+//
+// PART 3 STARTS WITH:
+// PAPER EXECUTION
+// MFE / MAE
+// BREAK EVEN
+// SL / TP
+// AI TRADE MANAGEMENT
+// 15M GEMINI SCANNER
+// ============================================================
+// ============================================================
+// PART 3 / 4
+// PAPER EXECUTION + TRADE MANAGEMENT + GEMINI SCANNER
+// ============================================================
+
+// ============================================================
+// PAPER POSITION SIZING
+//
+// IMPORTANT:
+// 1% is ONLY the maximum account-capital risk safety cap.
+// It is NOT the profit target.
+//
+// TP is based strictly on PRICE DISTANCE:
+// R:R = 1:2
+// ============================================================
+
+function calculatePositionSize(
+  entryPrice,
+  stopLoss
+) {
+  const riskDistance =
+    Math.abs(
+      entryPrice - stopLoss
+    );
+
+  if (
+    !Number.isFinite(riskDistance) ||
+    riskDistance <= 0
+  ) {
+    return null;
+  }
+
+  const riskAmount =
+    maxPerTradeCapitalRiskUsd();
+
+  if (
+    !Number.isFinite(riskAmount) ||
+    riskAmount <= 0
+  ) {
+    return null;
+  }
+
+  const quantity =
+    riskAmount /
+    riskDistance;
+
+  if (
+    !Number.isFinite(quantity) ||
+    quantity <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    riskDistance,
+    riskAmount,
+    quantity
+  };
+}
+
+// ============================================================
+// CHECK WHETHER NEW TRADE IS ALLOWED
+// ============================================================
+
+function canOpenNewTrade(
+  symbol,
+  proposedRiskAmount
+) {
+  if (MODE !== 'PAPER') {
     return {
-      ...response,
-
-      decision:
-        'CLOSE',
-
-      confidence
+      allowed: false,
+      reason: 'PAPER_ONLY'
     };
   }
 
-  state.aiHoldDecisions++;
-
-  return {
-    ...response,
-
-    decision:
-      'HOLD',
-
-    confidence
-  };
-}
-
-// ============================================================
-// SIGNAL RECORD
-// ============================================================
-
-async function recordSignal(
-  analysis,
-  executed,
-  skipReason = '',
-  aiDecision = null
-) {
-  const payload = {
-    version:
-      VERSION,
-
-    accountKey:
-      PAPER.accountKey,
-
-    symbol:
-      analysis.symbol,
-
-    direction:
-      analysis.direction,
-
-    signalPrice:
-      analysis.signalClose,
-
-    signalBarTime:
-      String(
-        analysis.signalBarTime ||
-        ''
-      ),
-
-    cmo:
-      analysis.cmo,
-
-    atr:
-      analysis.atr,
-
-    bodyRatio:
-      analysis.bodyRatio,
-
-    volume:
-      analysis.volume,
-
-    volumeAvg:
-      analysis.volumeAvg,
-
-    volumeRatio:
-      analysis.volumeRatio,
-
-    qualityScore:
-      analysis.qualityScore,
-
-    quality:
-      analysis.quality,
-
-    reasons:
-      analysis.reasons ||
-      [],
-
-    createdAt:
-      new Date(),
-
-    executed,
-
-    skipReason,
-
-    aiDecision,
-
-    analysis
-  };
-
-  try {
-    await Signal.create(
-      payload
-    );
-  } catch (
-    error
-  ) {
-    console.error(
-      'Signal journal:',
-      safeError(error)
-    );
+  if (LIVE_TRADING) {
+    return {
+      allowed: false,
+      reason: 'LIVE_TRADING_FORBIDDEN'
+    };
   }
 
-  await journal(
-    executed
-      ? 'SIGNAL_EXECUTED'
-      : 'SIGNAL_REJECTED',
-    {
-      symbol:
-        analysis.symbol,
-
-      direction:
-        analysis.direction,
-
-      message:
-        skipReason ||
-        'EXECUTED',
-
-      data: {
-        signalPrice:
-          analysis.signalClose,
-
-        cmo:
-          analysis.cmo,
-
-        atr:
-          analysis.atr,
-
-        bodyRatio:
-          analysis.bodyRatio,
-
-        volume:
-          analysis.volume,
-
-        volumeAvg:
-          analysis.volumeAvg,
-
-        volumeRatio:
-          analysis.volumeRatio,
-
-        qualityScore:
-          analysis.qualityScore,
-
-        quality:
-          analysis.quality,
-
-        reasons:
-          analysis.reasons ||
-          [],
-
-        aiDecision,
-
-        skipReason
-      }
-    }
-  );
-}
-
-// ============================================================
-// EXECUTION LEVELS
-// ============================================================
-
-function buildExecutionLevels(
-  analysis,
-  quote
-) {
-  const direction =
-    analysis.direction;
-
-  const atr =
-    analysis.atr;
-
   if (
-    !Number.isFinite(atr) ||
-    atr <= 0
+    state.openTrades.has(symbol)
   ) {
-    return null;
+    return {
+      allowed: false,
+      reason: 'SYMBOL_ALREADY_OPEN'
+    };
   }
 
-  const entry =
-    direction === 'BUY'
-      ? quote.ask
-      : quote.bid;
-
-  let stopLoss;
-
   if (
-    direction ===
-    'BUY'
+    state.openTrades.size >=
+    PAPER.maxOpenTrades
   ) {
-    stopLoss =
-      n(
-        analysis.support
-      ) -
-      atr *
-      STRATEGY.atrMargin;
-
-    if (
-      !(stopLoss < entry)
-    ) {
-      stopLoss =
-        analysis.signalClose -
-        atr;
-    }
-
-    if (
-      !(stopLoss < entry)
-    ) {
-      stopLoss =
-        entry -
-        atr;
-    }
-  } else {
-    stopLoss =
-      n(
-        analysis.resistance
-      ) +
-      atr *
-      STRATEGY.atrMargin;
-
-    if (
-      !(stopLoss > entry)
-    ) {
-      stopLoss =
-        analysis.signalClose +
-        atr;
-    }
-
-    if (
-      !(stopLoss > entry)
-    ) {
-      stopLoss =
-        entry +
-        atr;
-    }
+    return {
+      allowed: false,
+      reason: 'MAX_OPEN_TRADES'
+    };
   }
 
-  const riskDistance =
-    Math.abs(
-      entry -
-      stopLoss
-    );
+  const currentRisk =
+    currentPortfolioRiskUsd();
+
+  const cap =
+    portfolioRiskCapUsd();
 
   if (
-    !(riskDistance > 0)
+    currentRisk +
+    proposedRiskAmount >
+    cap + 1e-9
   ) {
-    return null;
-  }
-
-  // ==========================================================
-  // TP is exactly 2R from entry.
-  // Therefore:
-  // -1R = approximately -1% account
-  // +2R = approximately +2% account
-  // before real execution friction/spread.
-  // ==========================================================
-
-  const takeProfit =
-    direction === 'BUY'
-      ? entry +
-        riskDistance *
-        STRATEGY.riskReward
-      : entry -
-        riskDistance *
-        STRATEGY.riskReward;
-
-  const breakEvenTriggerPrice =
-    direction === 'BUY'
-      ? entry +
-        riskDistance *
-        STRATEGY.breakEvenTriggerR
-      : entry -
-        riskDistance *
-        STRATEGY.breakEvenTriggerR;
-
-  const valid =
-    direction === 'BUY'
-      ? (
-          stopLoss <
-            entry &&
-          entry <
-            breakEvenTriggerPrice &&
-          breakEvenTriggerPrice <
-            takeProfit
-        )
-      : (
-          takeProfit <
-            breakEvenTriggerPrice &&
-          breakEvenTriggerPrice <
-            entry &&
-          entry <
-            stopLoss
-        );
-
-  if (
-    !valid
-  ) {
-    return null;
+    return {
+      allowed: false,
+      reason: 'PORTFOLIO_RISK_CAP',
+      currentRisk,
+      proposedRiskAmount,
+      cap
+    };
   }
 
   return {
-    entry,
-    stopLoss,
-    takeProfit,
-    riskDistance,
-    breakEvenTriggerPrice
+    allowed: true,
+    currentRisk,
+    proposedRiskAmount,
+    cap
   };
 }
 
@@ -4252,321 +5296,176 @@ function buildExecutionLevels(
 // OPEN PAPER TRADE
 // ============================================================
 
-async function openPaperTrade(
-  analysis,
+async function openPaperTrade({
+  symbol,
+  technical,
+  multiTimeframe,
   quote,
-  aiDecision
-) {
-  const symbol =
-    analysis.symbol;
+  aiDecision,
+  executionLevels
+}) {
+  const {
+    direction,
+    entry,
+    stopLoss,
+    riskDistance,
+    takeProfit,
+    breakEvenTriggerPrice
+  } = executionLevels;
 
-  const direction =
-    analysis.direction;
-
-  if (
-    LIVE_TRADING
-  ) {
-    throw new Error(
-      'LIVE_TRADING must remain false in V1.3'
+  const sizing =
+    calculatePositionSize(
+      entry,
+      stopLoss
     );
+
+  if (!sizing) {
+    return {
+      opened: false,
+      reason: 'POSITION_SIZE_FAILED'
+    };
   }
 
-  if (
-    state.openTrades.has(
-      symbol
-    )
-  ) {
-    state.skippedSignals++;
-
-    await recordSignal(
-      analysis,
-      false,
-      'POSITION_ALREADY_OPEN',
-      aiDecision
-    );
-
-    return false;
-  }
-
-  if (
-    state.openTrades.size >=
-    PAPER.maxOpenTrades
-  ) {
-    state.skippedSignals++;
-
-    await recordSignal(
-      analysis,
-      false,
-      'MAX_OPEN_TRADES',
-      aiDecision
-    );
-
-    return false;
-  }
-
-  const executionPrice =
-    direction === 'BUY'
-      ? quote.ask
-      : quote.bid;
-
-  const moveFromSignal =
-    Math.abs(
-      executionPrice -
-      analysis.signalClose
-    );
-
-  if (
-    Number.isFinite(
-      analysis.atr
-    ) &&
-    analysis.atr >
-      0 &&
-    moveFromSignal >
-      analysis.atr *
-      STRATEGY.maxEntryMoveAtr
-  ) {
-    state.skippedSignals++;
-
-    await recordSignal(
-      analysis,
-      false,
-      'ENTRY_TOO_FAR_FROM_SIGNAL',
-      aiDecision
-    );
-
-    return false;
-  }
-
-  const levels =
-    buildExecutionLevels(
-      analysis,
-      quote
-    );
-
-  if (
-    !levels
-  ) {
-    state.skippedSignals++;
-
-    await recordSignal(
-      analysis,
-      false,
-      'INVALID_LEVELS',
-      aiDecision
-    );
-
-    return false;
-  }
-
-  const balance =
-    n(
-      account?.balance,
-      PAPER.startingBalance
-    );
-
-  // ==========================================================
-  // HARD RISK RULE:
-  // exactly 1% of current PAPER balance.
-  // AI cannot change this.
-  // ==========================================================
-
-  const riskAmount =
-    balance *
-    PAPER.riskPctPerTrade /
-    100;
-
-  const currentRisk =
-    currentPortfolioRiskUsd();
-
-  const riskCap =
-    portfolioRiskCapUsd();
-
-  if (
-    currentRisk +
-    riskAmount >
-    riskCap +
-    0.000000001
-  ) {
-    state.skippedSignals++;
-    state.portfolioRiskRejects++;
-
-    await recordSignal(
-      analysis,
-      false,
-      'PORTFOLIO_RISK_CAP',
-      aiDecision
-    );
-
-    await journal(
-      'PORTFOLIO_RISK_REJECT',
-      {
-        symbol,
-        direction,
-
-        message:
-          'Portfolio risk cap blocked entry',
-
-        data: {
-          balance,
-          currentRisk,
-
-          requestedRisk:
-            riskAmount,
-
-          riskCap
-        }
-      }
-    );
-
-    return false;
-  }
-
-  const quantity =
-    riskAmount /
-    levels.riskDistance;
-
-  if (
-    !Number.isFinite(
-      quantity
-    ) ||
-    quantity <=
-    0
-  ) {
-    state.skippedSignals++;
-
-    await recordSignal(
-      analysis,
-      false,
-      'INVALID_POSITION_SIZE',
-      aiDecision
-    );
-
-    return false;
-  }
-
-  const now =
-    new Date();
-
-  const tradeDocument =
-    await Trade.create({
-      version:
-        VERSION,
-
-      accountKey:
-        PAPER.accountKey,
-
+  const riskCheck =
+    canOpenNewTrade(
       symbol,
-      direction,
+      sizing.riskAmount
+    );
 
-      status:
-        'OPEN',
+  if (!riskCheck.allowed) {
+    return {
+      opened: false,
+      reason: riskCheck.reason
+    };
+  }
 
-      timeframe:
-        TIMEFRAME,
+  const tradeData = {
+    version:
+      VERSION,
 
-      entryPrice:
-        levels.entry,
+    accountKey:
+      PAPER.accountKey,
 
-      stopLoss:
-        levels.stopLoss,
+    symbol,
 
-      initialStopLoss:
-        levels.stopLoss,
+    direction,
 
-      takeProfit:
-        levels.takeProfit,
+    status:
+      'OPEN',
 
-      breakEvenTriggerPrice:
-        levels.breakEvenTriggerPrice,
+    timeframe:
+      TIMEFRAME,
 
-      breakEvenActive:
-        false,
+    entryPrice:
+      entry,
 
-      riskDistance:
-        levels.riskDistance,
+    stopLoss,
 
-      riskAmount,
+    initialStopLoss:
+      stopLoss,
 
-      quantity,
+    takeProfit,
 
-      signalPrice:
-        analysis.signalClose,
+    breakEvenTriggerPrice,
 
-      signalBarTime:
-        String(
-          analysis.signalBarTime ||
-          ''
-        ),
+    breakEvenActive:
+      false,
 
-      qualityScore:
-        analysis.qualityScore,
+    riskDistance,
 
-      quality:
-        analysis.quality,
+    riskAmount:
+      sizing.riskAmount,
 
-      reasons:
-        analysis.reasons ||
-        [],
+    maxCapitalRiskPct:
+      PAPER.maxCapitalRiskPct,
 
-      volume:
-        analysis.volume,
+    quantity:
+      sizing.quantity,
 
-      volumeAvg:
-        analysis.volumeAvg,
+    signalPrice:
+      technical.price.close,
 
-      volumeRatio:
-        analysis.volumeRatio,
+    signalBarTime:
+      String(
+        technical.barTime || ''
+      ),
 
-      cmo:
-        analysis.cmo,
+    openedAt:
+      new Date(),
 
-      atr:
-        analysis.atr,
+    closedAt:
+      null,
 
-      bodyRatio:
-        analysis.bodyRatio,
+    exitPrice:
+      null,
 
-      openedAt:
-        now,
+    exitReason:
+      '',
 
-      mfeR:
-        0,
+    pnl:
+      0,
 
-      maeR:
-        0,
+    resultR:
+      0,
 
-      mfePrice:
-        levels.entry,
+    mfeR:
+      0,
 
-      maePrice:
-        levels.entry,
+    maeR:
+      0,
 
-      mfeAt:
-        now,
+    mfePrice:
+      entry,
 
-      maeAt:
-        now,
+    maePrice:
+      entry,
 
-      beActivatedAt:
-        null,
+    mfeAt:
+      new Date(),
 
-      lastMarkPrice:
-        levels.entry,
+    maeAt:
+      new Date(),
 
-      lastMarkAt:
-        now,
+    beActivatedAt:
+      null,
 
-      aiEntryDecision:
-        aiDecision,
+    lastMarkPrice:
+      entry,
 
-      aiLastManagement:
-        null,
+    lastMarkAt:
+      new Date(),
 
-      analysis
-    });
+    aiEntryDecision:
+      aiDecision,
 
-  const trade =
-    tradeDocument.toObject();
+    aiLastManagement:
+      null,
+
+    technicalSnapshot:
+      technical,
+
+    multiTimeframeSnapshot:
+      multiTimeframe
+  };
+
+  let trade;
+
+  if (state.mongoReady) {
+    trade =
+      await Trade.create(
+        tradeData
+      );
+
+    trade =
+      trade.toObject();
+  } else {
+    trade = {
+      ...tradeData,
+
+      _id:
+        `paper_${Date.now()}_${symbol}`
+    };
+  }
 
   state.openTrades.set(
     symbol,
@@ -4574,13 +5473,6 @@ async function openPaperTrade(
   );
 
   state.executedSignals++;
-
-  await recordSignal(
-    analysis,
-    true,
-    '',
-    aiDecision
-  );
 
   await journal(
     'TRADE_OPEN',
@@ -4592,155 +5484,137 @@ async function openPaperTrade(
         trade._id,
 
       message:
-        'Paper trade opened',
+        `${direction} PAPER trade opened`,
 
       data: {
-        entry:
-          levels.entry,
+        entry,
+        stopLoss,
+        takeProfit,
+        breakEvenTriggerPrice,
 
-        stopLoss:
-          levels.stopLoss,
+        riskReward:
+          `1:${RULES.riskReward}`,
 
-        takeProfit:
-          levels.takeProfit,
+        riskDistance,
 
-        breakEvenTriggerPrice:
-          levels.breakEvenTriggerPrice,
+        riskAmount:
+          sizing.riskAmount,
 
-        riskDistance:
-          levels.riskDistance,
+        maxCapitalRiskPct:
+          PAPER.maxCapitalRiskPct,
 
-        riskAmount,
+        quantity:
+          sizing.quantity,
 
-        theoreticalLossPct:
-          PAPER.riskPctPerTrade,
-
-        theoreticalTargetPct:
-          PAPER.riskPctPerTrade *
-          STRATEGY.riskReward,
-
-        quantity,
-
-        portfolioRiskBefore:
-          currentRisk,
-
-        portfolioRiskAfter:
-          currentRisk +
-          riskAmount,
-
-        portfolioRiskCap:
-          riskCap,
-
-        aiDecision,
-
-        cmo:
-          analysis.cmo,
-
-        volume:
-          analysis.volume,
-
-        volumeAvg:
-          analysis.volumeAvg,
-
-        volumeRatio:
-          analysis.volumeRatio,
-
-        bodyRatio:
-          analysis.bodyRatio,
-
-        quality:
-          analysis.quality,
-
-        qualityScore:
-          analysis.qualityScore,
-
-        reasons:
-          analysis.reasons ||
-          []
+        aiDecision
       }
     }
   );
 
   await sendTelegram(
-    `${direction === 'BUY' ? '🟢' : '🔴'} ${symbol} ${direction} — PAPER\n` +
-    `Entry: ${fmtPrice(levels.entry, symbol)}\n` +
-    `SL: ${fmtPrice(levels.stopLoss, symbol)}\n` +
-    `TP: ${fmtPrice(levels.takeProfit, symbol)} (+2R)\n` +
-    `BE: ${fmtPrice(levels.breakEvenTriggerPrice, symbol)} (+0.60R)\n` +
-    `Risk: ${fmtMoney(riskAmount)} = ${PAPER.riskPctPerTrade}%\n` +
-    `Target: ≈ ${fmtMoney(riskAmount * 2)} = 2R\n` +
-    `Quality: ${analysis.quality} ${analysis.qualityScore}/12\n` +
-    `CMO: ${n(analysis.cmo, 0).toFixed(1)}\n` +
-    `Volume: ${
-      Number.isFinite(
-        analysis.volumeRatio
-      )
-        ? analysis.volumeRatio.toFixed(2) + 'x'
-        : 'n/a'
-    }\n` +
-    `AI: ${aiDecision?.decision || 'FALLBACK'} ` +
-    `${n(aiDecision?.confidence, 0).toFixed(0)}%\n` +
-    `AI reason: ${aiDecision?.reason || 'n/a'}\n` +
-    `Reasons: ${
-      (
-        analysis.reasons ||
-        []
-      ).join(', ') ||
-      'none'
-    }\n\n` +
-    `🔒 PAPER ONLY`
+    `🚀 PAPER TRADE OPENED\n\n` +
+    `${symbol} ${direction}\n` +
+    `Entry: ${fmtPrice(entry, symbol)}\n` +
+    `SL: ${fmtPrice(stopLoss, symbol)}\n` +
+    `TP: ${fmtPrice(takeProfit, symbol)}\n` +
+    `BE trigger: ${fmtPrice(breakEvenTriggerPrice, symbol)} (+${RULES.breakEvenTriggerR.toFixed(2)}R)\n\n` +
+    `R:R = 1:${RULES.riskReward.toFixed(0)}\n` +
+    `Capital-risk safety cap: ${PAPER.maxCapitalRiskPct}%\n` +
+    `Risk budget: ${fmtMoney(sizing.riskAmount)}\n` +
+    `Gemini confidence: ${n(aiDecision.confidence, 0).toFixed(0)}%\n` +
+    `Setup: ${aiDecision.setup || 'N/A'}\n` +
+    `Reason: ${aiDecision.reason}`
   );
 
-  return true;
+  console.log(
+    `🚀 ${symbol} ${direction} | ` +
+    `Entry=${fmtPrice(entry, symbol)} | ` +
+    `SL=${fmtPrice(stopLoss, symbol)} | ` +
+    `TP=${fmtPrice(takeProfit, symbol)} | ` +
+    `RR=1:${RULES.riskReward}`
+  );
+
+  return {
+    opened: true,
+    trade
+  };
 }
 
 // ============================================================
-// TRADE MARK / R
+// CURRENT EXIT/MARK PRICE
+//
+// BUY:
+// entry = ASK
+// current liquidation/exit = BID
+//
+// SELL:
+// entry = BID
+// current liquidation/exit = ASK
+//
+// This keeps PAPER execution spread-aware.
 // ============================================================
 
-function markPriceForTrade(
+function tradeMarkPrice(
   trade,
   quote
 ) {
-  return trade.direction ===
-    'BUY'
-    ? quote.bid
-    : quote.ask;
+  if (trade.direction === 'BUY') {
+    return quote.bid;
+  }
+
+  return quote.ask;
 }
+
+// ============================================================
+// CURRENT R
+// ============================================================
 
 function currentR(
   trade,
   quote
 ) {
-  const price =
-    markPriceForTrade(
+  const mark =
+    tradeMarkPrice(
       trade,
       quote
     );
 
-  const move =
-    trade.direction ===
-      'BUY'
-      ? price -
-        trade.entryPrice
-      : trade.entryPrice -
-        price;
+  const entry =
+    n(trade.entryPrice);
 
-  return move /
-    trade.riskDistance;
+  const riskDistance =
+    n(trade.riskDistance);
+
+  if (
+    !Number.isFinite(mark) ||
+    !Number.isFinite(entry) ||
+    !Number.isFinite(riskDistance) ||
+    riskDistance <= 0
+  ) {
+    return 0;
+  }
+
+  if (trade.direction === 'BUY') {
+    return (
+      mark - entry
+    ) / riskDistance;
+  }
+
+  return (
+    entry - mark
+  ) / riskDistance;
 }
 
 // ============================================================
-// MFE / MAE
+// UPDATE MFE / MAE
 // ============================================================
 
-async function updateExcursions(
-  symbol,
+async function updateTradeExcursions(
   trade,
   quote
 ) {
-  const price =
-    markPriceForTrade(
+  const mark =
+    tradeMarkPrice(
       trade,
       quote
     );
@@ -4751,102 +5625,101 @@ async function updateExcursions(
       quote
     );
 
-  const now =
-    new Date();
-
-  let changed =
-    false;
+  let changed = false;
 
   trade.lastMarkPrice =
-    price;
+    mark;
 
   trade.lastMarkAt =
-    now;
+    new Date();
 
   if (
-    !Number.isFinite(
-      trade.mfeR
-    ) ||
     r >
-      trade.mfeR
+    n(
+      trade.mfeR,
+      0
+    )
   ) {
     trade.mfeR =
       r;
 
     trade.mfePrice =
-      price;
+      mark;
 
     trade.mfeAt =
-      now;
+      new Date();
 
-    changed =
-      true;
+    changed = true;
   }
 
   if (
-    !Number.isFinite(
-      trade.maeR
-    ) ||
     r <
-      trade.maeR
+    n(
+      trade.maeR,
+      0
+    )
   ) {
     trade.maeR =
       r;
 
     trade.maePrice =
-      price;
+      mark;
 
     trade.maeAt =
-      now;
+      new Date();
 
-    changed =
-      true;
+    changed = true;
   }
 
-  state.openTrades.set(
-    symbol,
-    trade
-  );
-
   if (
-    changed
+    state.mongoReady &&
+    trade._id
   ) {
-    await Trade.updateOne(
-      {
-        _id:
-          trade._id,
+    const update = {
+      lastMarkPrice:
+        trade.lastMarkPrice,
 
-        status:
-          'OPEN'
-      },
-      {
-        $set: {
-          mfeR:
-            trade.mfeR,
+      lastMarkAt:
+        trade.lastMarkAt
+    };
 
-          maeR:
-            trade.maeR,
+    if (changed) {
+      update.mfeR =
+        trade.mfeR;
 
-          mfePrice:
-            trade.mfePrice,
+      update.maeR =
+        trade.maeR;
 
-          maePrice:
-            trade.maePrice,
+      update.mfePrice =
+        trade.mfePrice;
 
-          mfeAt:
-            trade.mfeAt,
+      update.maePrice =
+        trade.maePrice;
 
-          maeAt:
-            trade.maeAt,
+      update.mfeAt =
+        trade.mfeAt;
 
-          lastMarkPrice:
-            price,
+      update.maeAt =
+        trade.maeAt;
+    }
 
-          lastMarkAt:
-            now
+    try {
+      await Trade.updateOne(
+        {
+          _id:
+            trade._id
+        },
+        {
+          $set:
+            update
         }
-      }
-    );
+      );
+    } catch (error) {
+      console.error(
+        `Excursion save ${trade.symbol}:`,
+        safeError(error)
+      );
+    }
   }
 }
 
@@ -4855,7 +5728,6 @@ async function updateExcursions(
 // ============================================================
 
 async function activateBreakEven(
-  symbol,
   trade
 ) {
   if (
@@ -4867,45 +5739,43 @@ async function activateBreakEven(
   trade.breakEvenActive =
     true;
 
+  // Mechanical SL move to exact entry.
+  // Gemini cannot override this.
   trade.stopLoss =
     trade.entryPrice;
 
   trade.beActivatedAt =
     new Date();
 
-  state.breakEvenMoves++;
+  if (
+    state.mongoReady &&
+    trade._id
+  ) {
+    await Trade.updateOne(
+      {
+        _id:
+          trade._id
+      },
+      {
+        $set: {
+          breakEvenActive:
+            true,
 
-  state.openTrades.set(
-    symbol,
-    trade
-  );
+          stopLoss:
+            trade.entryPrice,
 
-  await Trade.updateOne(
-    {
-      _id:
-        trade._id,
-
-      status:
-        'OPEN'
-    },
-    {
-      $set: {
-        breakEvenActive:
-          true,
-
-        stopLoss:
-          trade.entryPrice,
-
-        beActivatedAt:
-          trade.beActivatedAt
+          beActivatedAt:
+            trade.beActivatedAt
+        }
       }
-    }
-  );
+    );
+  }
 
   await journal(
     'BREAK_EVEN_ACTIVATED',
     {
-      symbol,
+      symbol:
+        trade.symbol,
 
       direction:
         trade.direction,
@@ -4914,107 +5784,220 @@ async function activateBreakEven(
         trade._id,
 
       message:
-        'Stop moved to exact entry',
+        `Break even activated at +${RULES.breakEvenTriggerR.toFixed(2)}R`,
 
       data: {
-        entry:
+        entryPrice:
           trade.entryPrice,
 
-        mfeR:
-          n(
-            trade.mfeR,
-            0
-          ),
-
-        maeR:
-          n(
-            trade.maeR,
-            0
-          )
+        newStopLoss:
+          trade.entryPrice
       }
     }
   );
 
   await sendTelegram(
-    `🛡️ BREAK-EVEN ACTIVATED\n` +
-    `${symbol} ${trade.direction}\n` +
-    `SL moved to Entry: ${fmtPrice(trade.entryPrice, symbol)}`
+    `🛡️ BREAK EVEN ACTIVATED\n\n` +
+    `${trade.symbol} ${trade.direction}\n` +
+    `Trigger: +${RULES.breakEvenTriggerR.toFixed(2)}R\n` +
+    `SL moved to entry: ${fmtPrice(trade.entryPrice, trade.symbol)}`
+  );
+
+  console.log(
+    `🛡️ ${trade.symbol} BE ACTIVE`
   );
 }
 
 // ============================================================
-// CLOSE TRADE
+// PAPER PNL
+// ============================================================
+
+function calculateTradePnl(
+  trade,
+  exitPrice
+) {
+  const entry =
+    n(trade.entryPrice);
+
+  const quantity =
+    n(trade.quantity);
+
+  if (
+    !Number.isFinite(entry) ||
+    !Number.isFinite(exitPrice) ||
+    !Number.isFinite(quantity)
+  ) {
+    return 0;
+  }
+
+  const move =
+    trade.direction === 'BUY'
+      ? exitPrice - entry
+      : entry - exitPrice;
+
+  return (
+    move *
+    quantity
+  );
+}
+
+function calculateResultR(
+  trade,
+  exitPrice
+) {
+  const riskDistance =
+    n(trade.riskDistance);
+
+  if (
+    !Number.isFinite(riskDistance) ||
+    riskDistance <= 0
+  ) {
+    return 0;
+  }
+
+  if (trade.direction === 'BUY') {
+    return (
+      exitPrice -
+      trade.entryPrice
+    ) / riskDistance;
+  }
+
+  return (
+    trade.entryPrice -
+    exitPrice
+  ) / riskDistance;
+}
+
+// ============================================================
+// CLOSE PAPER TRADE
 // ============================================================
 
 async function closePaperTrade(
-  symbol,
   trade,
   exitPrice,
-  reason
+  reason,
+  extra = {}
 ) {
-  if (
-    !state.openTrades.has(
-      symbol
-    ) ||
-    state.closingTrades.has(
-      symbol
-    )
-  ) {
-    return false;
+  if (!trade) {
+    return null;
   }
 
-  state.closingTrades.add(
-    symbol
+  const liveTrade =
+    state.openTrades.get(
+      trade.symbol
+    );
+
+  if (!liveTrade) {
+    return null;
+  }
+
+  exitPrice =
+    n(
+      exitPrice,
+      NaN
+    );
+
+  if (
+    !Number.isFinite(exitPrice) ||
+    exitPrice <= 0
+  ) {
+    return null;
+  }
+
+  const pnl =
+    calculateTradePnl(
+      liveTrade,
+      exitPrice
+    );
+
+  const resultR =
+    calculateResultR(
+      liveTrade,
+      exitPrice
+    );
+
+  const closedAt =
+    new Date();
+
+  liveTrade.status =
+    'CLOSED';
+
+  liveTrade.closedAt =
+    closedAt;
+
+  liveTrade.exitPrice =
+    exitPrice;
+
+  liveTrade.exitReason =
+    reason;
+
+  liveTrade.pnl =
+    pnl;
+
+  liveTrade.resultR =
+    resultR;
+
+  if (
+    extra.aiManagement
+  ) {
+    liveTrade.aiLastManagement =
+      extra.aiManagement;
+  }
+
+  state.openTrades.delete(
+    liveTrade.symbol
   );
 
-  try {
-    const liveTrade =
-      state.openTrades.get(
-        symbol
-      );
+  if (account) {
+    account.balance =
+      accountBalance() +
+      pnl;
 
-    if (
-      !liveTrade ||
-      String(
-        liveTrade._id
-      ) !==
-      String(
-        trade._id
-      )
-    ) {
-      return false;
+    account.realizedPnl =
+      n(
+        account.realizedPnl,
+        0
+      ) +
+      pnl;
+
+    account.totalTrades =
+      n(
+        account.totalTrades,
+        0
+      ) + 1;
+
+    if (resultR > 0.10) {
+      account.wins =
+        n(
+          account.wins,
+          0
+        ) + 1;
+    } else if (resultR < -0.10) {
+      account.losses =
+        n(
+          account.losses,
+          0
+        ) + 1;
+    } else {
+      account.breakeven =
+        n(
+          account.breakeven,
+          0
+        ) + 1;
     }
 
-    trade =
-      liveTrade;
+    await saveAccount();
+  }
 
-    const move =
-      trade.direction ===
-        'BUY'
-        ? exitPrice -
-          trade.entryPrice
-        : trade.entryPrice -
-          exitPrice;
-
-    const resultR =
-      move /
-      trade.riskDistance;
-
-    const pnl =
-      trade.riskAmount *
-      resultR;
-
-    const closedAt =
-      new Date();
-
-    const update =
+  if (
+    state.mongoReady &&
+    liveTrade._id
+  ) {
+    try {
       await Trade.updateOne(
         {
           _id:
-            trade._id,
-
-          status:
-            'OPEN'
+            liveTrade._id
         },
         {
           $set: {
@@ -5032,134 +6015,354 @@ async function closePaperTrade(
 
             resultR,
 
-            stopLoss:
-              trade.stopLoss,
-
-            breakEvenActive:
-              trade.breakEvenActive,
-
             mfeR:
-              n(
-                trade.mfeR,
-                0
-              ),
+              liveTrade.mfeR,
 
             maeR:
-              n(
-                trade.maeR,
-                0
-              ),
+              liveTrade.maeR,
 
             mfePrice:
-              trade.mfePrice,
+              liveTrade.mfePrice,
 
             maePrice:
-              trade.maePrice,
+              liveTrade.maePrice,
 
-            mfeAt:
-              trade.mfeAt,
-
-            maeAt:
-              trade.maeAt,
+            aiLastManagement:
+              liveTrade.aiLastManagement,
 
             lastMarkPrice:
               exitPrice,
 
             lastMarkAt:
-              closedAt,
-
-            aiLastManagement:
-              trade.aiLastManagement ||
-              null
+              closedAt
           }
         }
       );
-
-    if (
-      !update.modifiedCount
-    ) {
-      return false;
+    } catch (error) {
+      console.error(
+        `Trade close DB ${liveTrade.symbol}:`,
+        safeError(error)
+      );
     }
+  }
 
-    account.balance =
-      n(
-        account.balance,
-        PAPER.startingBalance
-      ) +
-      pnl;
+  await journal(
+    'TRADE_CLOSE',
+    {
+      symbol:
+        liveTrade.symbol,
 
-    account.realizedPnl =
-      n(
-        account.realizedPnl,
-        0
-      ) +
-      pnl;
+      direction:
+        liveTrade.direction,
 
-    account.totalTrades =
-      n(
-        account.totalTrades,
-        0
-      ) +
-      1;
+      tradeId:
+        liveTrade._id,
 
-    if (
-      reason ===
-        'BREAK_EVEN' ||
-      Math.abs(
-        resultR
-      ) <
-        0.10
-    ) {
-      account.breakeven =
-        n(
-          account.breakeven,
-          0
-        ) +
-        1;
-    } else if (
-      pnl >
-      0
-    ) {
-      account.wins =
-        n(
-          account.wins,
-          0
-        ) +
-        1;
-    } else {
-      account.losses =
-        n(
-          account.losses,
-          0
-        ) +
-        1;
+      message:
+        reason,
+
+      data: {
+        exitPrice,
+        pnl,
+        resultR,
+
+        mfeR:
+          liveTrade.mfeR,
+
+        maeR:
+          liveTrade.maeR,
+
+        breakEvenActive:
+          liveTrade.breakEvenActive,
+
+        aiManagement:
+          extra.aiManagement ||
+          null
+      }
     }
+  );
 
-    await saveAccount();
+  const icon =
+    resultR > 0.10
+      ? '✅'
+      : resultR < -0.10
+        ? '❌'
+        : '➖';
 
-    state.openTrades.delete(
-      symbol
+  await sendTelegram(
+    `${icon} PAPER TRADE CLOSED\n\n` +
+    `${liveTrade.symbol} ${liveTrade.direction}\n` +
+    `Reason: ${reason}\n` +
+    `Exit: ${fmtPrice(exitPrice, liveTrade.symbol)}\n` +
+    `Result: ${resultR.toFixed(2)}R\n` +
+    `PnL: ${fmtMoney(pnl)}\n` +
+    `MFE: ${n(liveTrade.mfeR, 0).toFixed(2)}R\n` +
+    `MAE: ${n(liveTrade.maeR, 0).toFixed(2)}R\n` +
+    `Balance: ${fmtMoney(accountBalance())}`
+  );
+
+  console.log(
+    `${icon} ${liveTrade.symbol} CLOSED | ` +
+    `${reason} | ` +
+    `${resultR.toFixed(2)}R | ` +
+    `${fmtMoney(pnl)}`
+  );
+
+  return {
+    ...liveTrade,
+    pnl,
+    resultR,
+    exitPrice,
+    exitReason:
+      reason
+  };
+}
+
+// ============================================================
+// HARD MECHANICAL TRADE PROTECTION
+//
+// Priority:
+// 1. Stop Loss
+// 2. Take Profit
+// 3. Break Even activation
+//
+// This runs independently from Gemini.
+// ============================================================
+
+async function applyMechanicalProtection(
+  trade,
+  quote
+) {
+  const mark =
+    tradeMarkPrice(
+      trade,
+      quote
     );
 
-    state.aiLastManageByTrade.delete(
-      String(
-        trade._id
+  if (
+    !Number.isFinite(mark)
+  ) {
+    return {
+      closed: false
+    };
+  }
+
+  // ==========================================================
+  // BUY
+  // ==========================================================
+
+  if (trade.direction === 'BUY') {
+    if (
+      mark <=
+      n(trade.stopLoss)
+    ) {
+      const reason =
+        trade.breakEvenActive
+          ? 'BREAK_EVEN'
+          : 'STOP_LOSS';
+
+      await closePaperTrade(
+        trade,
+        mark,
+        reason
+      );
+
+      return {
+        closed: true,
+        reason
+      };
+    }
+
+    if (
+      mark >=
+      n(trade.takeProfit)
+    ) {
+      await closePaperTrade(
+        trade,
+        mark,
+        'TAKE_PROFIT'
+      );
+
+      return {
+        closed: true,
+        reason:
+          'TAKE_PROFIT'
+      };
+    }
+
+    if (
+      !trade.breakEvenActive &&
+      mark >=
+      n(
+        trade.breakEvenTriggerPrice
       )
-    );
+    ) {
+      await activateBreakEven(
+        trade
+      );
+    }
+  }
 
-    const durationMinutes =
-      (
-        closedAt.getTime() -
-        new Date(
-          trade.openedAt
-        ).getTime()
-      ) /
-      60000;
+  // ==========================================================
+  // SELL
+  // ==========================================================
+
+  if (trade.direction === 'SELL') {
+    if (
+      mark >=
+      n(trade.stopLoss)
+    ) {
+      const reason =
+        trade.breakEvenActive
+          ? 'BREAK_EVEN'
+          : 'STOP_LOSS';
+
+      await closePaperTrade(
+        trade,
+        mark,
+        reason
+      );
+
+      return {
+        closed: true,
+        reason
+      };
+    }
+
+    if (
+      mark <=
+      n(trade.takeProfit)
+    ) {
+      await closePaperTrade(
+        trade,
+        mark,
+        'TAKE_PROFIT'
+      );
+
+      return {
+        closed: true,
+        reason:
+          'TAKE_PROFIT'
+      };
+    }
+
+    if (
+      !trade.breakEvenActive &&
+      mark <=
+      n(
+        trade.breakEvenTriggerPrice
+      )
+    ) {
+      await activateBreakEven(
+        trade
+      );
+    }
+  }
+
+  return {
+    closed: false
+  };
+}
+
+// ============================================================
+// AI MANAGEMENT SCHEDULER
+// ============================================================
+
+function shouldRunAiManagement(
+  trade
+) {
+  const last =
+    state.lastManageAt.get(
+      trade.symbol
+    ) || 0;
+
+  if (
+    Date.now() -
+    last <
+    AI.managementIntervalMs
+  ) {
+    return false;
+  }
+
+  if (
+    state.managementLocks.has(
+      trade.symbol
+    )
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+// ============================================================
+// RUN GEMINI MANAGEMENT
+// ============================================================
+
+async function manageTradeWithAi(
+  trade,
+  quote
+) {
+  if (
+    !shouldRunAiManagement(
+      trade
+    )
+  ) {
+    return;
+  }
+
+  state.managementLocks.add(
+    trade.symbol
+  );
+
+  state.lastManageAt.set(
+    trade.symbol,
+    Date.now()
+  );
+
+  try {
+    // Trade may have been mechanically closed
+    // while waiting in AI queue.
+    if (
+      !state.openTrades.has(
+        trade.symbol
+      )
+    ) {
+      return;
+    }
+
+    const decision =
+      await aiManagementDecision(
+        trade,
+        quote
+      );
+
+    trade.aiLastManagement =
+      decision;
+
+    if (
+      state.mongoReady &&
+      trade._id
+    ) {
+      await Trade.updateOne(
+        {
+          _id:
+            trade._id
+        },
+        {
+          $set: {
+            aiLastManagement:
+              decision
+          }
+        }
+      );
+    }
 
     await journal(
-      'TRADE_CLOSE',
+      'AI_MANAGEMENT',
       {
-        symbol,
+        symbol:
+          trade.symbol,
 
         direction:
           trade.direction,
@@ -5168,157 +6371,162 @@ async function closePaperTrade(
           trade._id,
 
         message:
-          reason,
+          decision.decision,
 
-        data: {
-          entryPrice:
-            trade.entryPrice,
-
-          exitPrice,
-
-          resultR,
-
-          pnl,
-
-          balance:
-            account.balance,
-
-          mfeR:
-            n(
-              trade.mfeR,
-              0
-            ),
-
-          maeR:
-            n(
-              trade.maeR,
-              0
-            ),
-
-          breakEvenActive:
-            trade.breakEvenActive,
-
-          durationMinutes,
-
-          aiLastManagement:
-            trade.aiLastManagement ||
-            null
-        }
+        data:
+          decision
       }
     );
 
-    await sendTelegram(
-      `${pnl >= 0 ? '✅' : '❌'} CLOSED ${symbol} ${trade.direction}\n` +
-      `Reason: ${reason}\n` +
-      `Exit: ${fmtPrice(exitPrice, symbol)}\n` +
-      `Result: ${resultR.toFixed(2)}R\n` +
-      `PnL: ${fmtMoney(pnl)}\n` +
-      `MFE: ${n(trade.mfeR, 0).toFixed(2)}R\n` +
-      `MAE: ${n(trade.maeR, 0).toFixed(2)}R\n` +
-      `Balance: ${fmtMoney(account.balance)}`
+    if (
+      decision.decision !==
+      'CLOSE'
+    ) {
+      return;
+    }
+
+    // Recheck that position still exists.
+    if (
+      !state.openTrades.has(
+        trade.symbol
+      )
+    ) {
+      return;
+    }
+
+    const freshQuote =
+      await fetchSingleQuote(
+        trade.symbol
+      );
+
+    if (!freshQuote) {
+      return;
+    }
+
+    // Mechanical protection ALWAYS gets priority.
+    const mechanical =
+      await applyMechanicalProtection(
+        trade,
+        freshQuote
+      );
+
+    if (mechanical.closed) {
+      return;
+    }
+
+    const exitPrice =
+      tradeMarkPrice(
+        trade,
+        freshQuote
+      );
+
+    await closePaperTrade(
+      trade,
+      exitPrice,
+      'AI_CLOSE',
+      {
+        aiManagement:
+          decision
+      }
+    );
+  } catch (error) {
+    console.error(
+      `AI manage ${trade.symbol}:`,
+      safeError(error)
     );
 
-    return true;
+    await journal(
+      'AI_MANAGEMENT_ERROR',
+      {
+        symbol:
+          trade.symbol,
+
+        direction:
+          trade.direction,
+
+        tradeId:
+          trade._id,
+
+        message:
+          safeError(error)
+      }
+    );
   } finally {
-    state.closingTrades.delete(
-      symbol
+    state.managementLocks.delete(
+      trade.symbol
     );
   }
 }
 
 // ============================================================
-// REVERSE STRATEGY SIGNAL
+// OPEN TRADE QUOTE LOOP
 // ============================================================
 
-async function handleReverseSignal(
-  analysis,
-  quote
-) {
-  const trade =
-    state.openTrades.get(
-      analysis.symbol
-    );
-
-  if (
-    !trade ||
-    trade.direction ===
-      analysis.direction
-  ) {
+async function quoteLoop() {
+  if (state.quoteLoopBusy) {
     return;
   }
 
-  const r =
-    currentR(
-      trade,
-      quote
-    );
-
-  // Preserve protection:
-  // do not close losing trade solely because a reverse signal appeared.
-  if (
-    r <
-      0 &&
-    !trade.breakEvenActive
-  ) {
-    return;
-  }
-
-  const exitPrice =
-    markPriceForTrade(
-      trade,
-      quote
-    );
-
-  await closePaperTrade(
-    analysis.symbol,
-    trade,
-    exitPrice,
-    'REVERSE_SIGNAL'
-  );
-}
-
-// ============================================================
-// FAST SL / TP / BE MANAGEMENT
-// ============================================================
-
-async function manageOpenTrades() {
-  const symbols =
-    [
-      ...state.openTrades.keys()
-    ];
-
-  if (
-    !symbols.length ||
-    state.quoteRunning
-  ) {
-    return;
-  }
-
-  state.quoteRunning =
-    true;
+  state.quoteLoopBusy = true;
 
   try {
-    state.totalQuotePolls++;
+    const symbols =
+      [
+        ...state.openTrades.keys()
+      ];
 
-    state.lastQuotePollAt =
-      new Date();
+    if (!symbols.length) {
+      return;
+    }
 
-    const quotes =
+    let quoteMap =
       await fetchLatestQuotes(
         symbols
       );
 
-    for (
-      const symbol
-      of symbols
-    ) {
-      let trade =
+    // Fallback individually if batch endpoint
+    // did not return a symbol.
+    const missing =
+      symbols.filter(
+        symbol =>
+          !quoteMap.has(symbol)
+      );
+
+    if (missing.length) {
+      const fallback =
+        await mapWithConcurrency(
+          missing,
+          4,
+          async symbol => ({
+            symbol,
+            quote:
+              await fetchSingleQuote(
+                symbol
+              )
+          })
+        );
+
+      for (const item of fallback) {
+        if (
+          item?.quote &&
+          item?.symbol
+        ) {
+          quoteMap.set(
+            item.symbol,
+            item.quote
+          );
+        }
+      }
+    }
+
+    for (const symbol of symbols) {
+      const trade =
         state.openTrades.get(
           symbol
         );
 
       const quote =
-        quotes.get(
+        quoteMap.get(
           symbol
         );
 
@@ -5334,503 +6542,260 @@ async function manageOpenTrades() {
         quote
       );
 
-      await updateExcursions(
-        symbol,
+      await updateTradeExcursions(
         trade,
         quote
       );
 
-      trade =
-        state.openTrades.get(
-          symbol
-        ) ||
-        trade;
-
-      const exitPrice =
-        markPriceForTrade(
+      // Hard protection first.
+      const protection =
+        await applyMechanicalProtection(
           trade,
           quote
         );
 
-      if (
-        !trade.breakEvenActive
-      ) {
-        const hitBreakEven =
-          trade.direction ===
-            'BUY'
-            ? exitPrice >=
-              trade.breakEvenTriggerPrice
-            : exitPrice <=
-              trade.breakEvenTriggerPrice;
+      if (protection.closed) {
+        continue;
+      }
 
-        if (
-          hitBreakEven
-        ) {
-          await activateBreakEven(
-            symbol,
-            trade
+      // Gemini management second.
+      // Do not await here sequentially for all trades.
+      manageTradeWithAi(
+        trade,
+        quote
+      ).catch(
+        error => {
+          console.error(
+            `Manage background ${symbol}:`,
+            safeError(error)
           );
-
-          trade =
-            state.openTrades.get(
-              symbol
-            ) ||
-            trade;
         }
-      }
-
-      const stopHit =
-        trade.direction ===
-          'BUY'
-          ? exitPrice <=
-            trade.stopLoss
-          : exitPrice >=
-            trade.stopLoss;
-
-      const targetHit =
-        trade.direction ===
-          'BUY'
-          ? exitPrice >=
-            trade.takeProfit
-          : exitPrice <=
-            trade.takeProfit;
-
-      if (
-        stopHit
-      ) {
-        await closePaperTrade(
-          symbol,
-          trade,
-          exitPrice,
-          trade.breakEvenActive
-            ? 'BREAK_EVEN'
-            : 'STOP_LOSS'
-        );
-      } else if (
-        targetHit
-      ) {
-        await closePaperTrade(
-          symbol,
-          trade,
-          exitPrice,
-          'TAKE_PROFIT'
-        );
-      }
+      );
     }
-  } catch (
-    error
-  ) {
-    state.lastMarketError =
-      `quote loop: ${safeError(error)}`;
-
+  } catch (error) {
     console.error(
       'Quote loop:',
-      state.lastMarketError
-    );
-
-    await journal(
-      'ERROR',
-      {
-        message:
-          'manageOpenTrades failed',
-
-        data: {
-          error:
-            safeError(error)
-        }
-      }
+      safeError(error)
     );
   } finally {
-    state.quoteRunning =
-      false;
+    state.quoteLoopBusy = false;
   }
 }
 
 // ============================================================
-// AI POSITION MANAGEMENT LOOP
+// INITIALIZE ONE SYMBOL
 // ============================================================
 
-async function manageTradesWithAI() {
+async function initializeSymbol(
+  symbol
+) {
+  try {
+    const bars =
+      await fetchOhlc(
+        symbol,
+        TIMEFRAME,
+        HISTORY_LIMIT
+      );
+
+    if (
+      bars.length <
+      CORE_MIN_HISTORY
+    ) {
+      throw new Error(
+        `Only ${bars.length} bars`
+      );
+    }
+
+    const latest =
+      bars[bars.length - 1];
+
+    const pair = {
+      symbol,
+
+      initialized:
+        true,
+
+      bars,
+
+      lastClosedBarTime:
+        latest.time,
+
+      lastScannedBarTime:
+        null,
+
+      lastError:
+        null,
+
+      initializedAt:
+        new Date()
+    };
+
+    state.pairState.set(
+      symbol,
+      pair
+    );
+
+    console.log(
+      `✅ ${symbol} | ` +
+      `bars=${bars.length} | ` +
+      `EMA200=${bars.length >= EMA200_CONTEXT_HISTORY ? 'READY' : 'CONTEXT-WARMUP'}`
+    );
+
+    return pair;
+  } catch (error) {
+    state.pairState.set(
+      symbol,
+      {
+        symbol,
+
+        initialized:
+          false,
+
+        bars: [],
+
+        lastClosedBarTime:
+          null,
+
+        lastScannedBarTime:
+          null,
+
+        lastError:
+          safeError(error),
+
+        initializedAt:
+          null
+      }
+    );
+
+    console.error(
+      `❌ Init ${symbol}:`,
+      safeError(error)
+    );
+
+    return null;
+  }
+}
+
+// ============================================================
+// INITIALIZE MARKET
+// ============================================================
+
+async function initializeMarket() {
+  console.log(
+    `📡 Initializing ${INSTRUMENTS.length} instruments...`
+  );
+
+  await mapWithConcurrency(
+    INSTRUMENTS,
+    OHLC_CONCURRENCY,
+    initializeSymbol
+  );
+
+  const ready =
+    pairReadyCount();
+
+  state.marketReady =
+    ready > 0;
+
+  console.log(
+    `📡 Market initialized: ${ready}/${INSTRUMENTS.length}`
+  );
+
+  if (!ready) {
+    throw new Error(
+      'No instruments initialized'
+    );
+  }
+
+  await journal(
+    'MARKET_READY',
+    {
+      message:
+        `${ready}/${INSTRUMENTS.length} instruments initialized`
+    }
+  );
+}
+
+// ============================================================
+// PROCESS NEW CLOSED 15M BAR
+//
+// IMPORTANT:
+// Gemini is the trading commander.
+// There is NO legacy directional gate here.
+//
+// Technical engine -> Gemini -> Risk Manager -> PAPER trade.
+// ============================================================
+
+async function processNewClosedBar(
+  symbol,
+  bars,
+  quote
+) {
   if (
-    state.aiManageRunning ||
-    !AI.managementEnabled ||
-    !GEMINI_API_KEY ||
-    !state.openTrades.size
+    state.scanLocks.has(symbol)
   ) {
     return;
   }
 
-  state.aiManageRunning =
-    true;
-
-  state.lastAiManageAt =
-    new Date();
+  state.scanLocks.add(
+    symbol
+  );
 
   try {
-    const trades =
-      [
-        ...state.openTrades.values()
-      ];
-
-    for (
-      const originalTrade
-      of trades
+    if (
+      !Array.isArray(bars) ||
+      bars.length <
+      CORE_MIN_HISTORY
     ) {
-      const trade =
-        state.openTrades.get(
-          originalTrade.symbol
-        );
-
-      if (
-        !trade
-      ) {
-        continue;
-      }
-
-      const tradeId =
-        String(
-          trade._id
-        );
-
-      const lastManaged =
-        state.aiLastManageByTrade.get(
-          tradeId
-        ) ||
-        0;
-
-      if (
-        Date.now() -
-        lastManaged <
-        AI_MIN_MANAGE_GAP_MS
-      ) {
-        continue;
-      }
-
-      const quote =
-        await fetchSingleQuote(
-          trade.symbol
-        );
-
-      if (
-        !quote
-      ) {
-        continue;
-      }
-
-      state.latestQuotes.set(
-        trade.symbol,
-        quote
-      );
-
-      await updateExcursions(
-        trade.symbol,
-        trade,
-        quote
-      );
-
-      const liveTrade =
-        state.openTrades.get(
-          trade.symbol
-        );
-
-      if (
-        !liveTrade
-      ) {
-        continue;
-      }
-
-      const r =
-        currentR(
-          liveTrade,
-          quote
-        );
-
-      // Do not let AI interfere near hard SL or hard TP.
-      // Risk Manager remains primary.
-      if (
-        r <=
-          -0.85 ||
-        r >=
-          1.85
-      ) {
-        continue;
-      }
-
-      const decision =
-        await aiManagementDecision(
-          liveTrade,
-          quote
-        );
-
-      state.aiLastManageByTrade.set(
-        tradeId,
-        Date.now()
-      );
-
-      if (
-        !decision
-      ) {
-        continue;
-      }
-
-      liveTrade.aiLastManagement =
-        {
-          ...decision,
-
-          at:
-            new Date()
-        };
-
-      state.openTrades.set(
-        liveTrade.symbol,
-        liveTrade
-      );
-
-      await Trade.updateOne(
-        {
-          _id:
-            liveTrade._id,
-
-          status:
-            'OPEN'
-        },
-        {
-          $set: {
-            aiLastManagement:
-              liveTrade.aiLastManagement
-          }
-        }
-      );
-
-      await journal(
-        'AI_MANAGEMENT_DECISION',
-        {
-          symbol:
-            liveTrade.symbol,
-
-          direction:
-            liveTrade.direction,
-
-          tradeId:
-            liveTrade._id,
-
-          message:
-            decision.decision,
-
-          data: {
-            currentR:
-              r,
-
-            decision
-          }
-        }
-      );
-
-      if (
-        decision.decision ===
-        'CLOSE'
-      ) {
-        const latestTrade =
-          state.openTrades.get(
-            liveTrade.symbol
-          );
-
-        if (
-          !latestTrade
-        ) {
-          continue;
-        }
-
-        const exitPrice =
-          markPriceForTrade(
-            latestTrade,
-            quote
-          );
-
-        await closePaperTrade(
-          liveTrade.symbol,
-          latestTrade,
-          exitPrice,
-          'AI_CLOSE'
-        );
-      }
+      return;
     }
-  } catch (
-    error
-  ) {
-    state.lastAiError =
-      safeError(error);
 
-    console.error(
-      'AI management:',
-      state.lastAiError
-    );
+    const latestBar =
+      bars[bars.length - 1];
 
-    await journal(
-      'ERROR',
-      {
-        message:
-          'AI management failed',
-
-        data: {
-          error:
-            state.lastAiError
-        }
-      }
-    );
-  } finally {
-    state.aiManageRunning =
-      false;
-  }
-}
-
-// ============================================================
-// SCAN SYMBOL
-// ============================================================
-
-async function scanSymbol(
-  symbol
-) {
-  const memory =
-    state.pairState.get(
-      symbol
-    );
-
-  try {
-    const bars =
-      await fetchOhlc(
-        symbol
-      );
-
-    memory.bars =
-      bars;
-
-    memory.initialized =
-      bars.length >=
-      CORE_MIN_HISTORY;
+    const barKey =
+      `${symbol}:${latestBar.time}`;
 
     if (
-      !memory.initialized
+      state.processedBars.has(
+        barKey
+      )
     ) {
-      return {
-        symbol,
-        status:
-          'WARMUP'
-      };
+      return;
     }
 
-    const lastTime =
-      bars[
-        bars.length -
-        1
-      ]?.openTime;
-
-    if (
-      !lastTime ||
-      lastTime ===
-        memory.lastClosedBarTime
-    ) {
-      return {
-        symbol,
-        status:
-          'NO_NEW_BAR'
-      };
-    }
-
-    memory.lastClosedBarTime =
-      lastTime;
-
-    const analysis =
-      analyzeBars(
-        symbol,
-        bars,
-        memory
-      );
-
-    memory.lastAnalysis =
-      analysis;
-
-    if (
-      !analysis?.direction
-    ) {
-      return {
-        symbol,
-        status:
-          'NO_SIGNAL'
-      };
-    }
-
-    state.rawSignals++;
-
-    const protectionReason =
-      entryProtectionReason(
-        analysis
-      );
-
-    if (
-      protectionReason
-    ) {
-      state.skippedSignals++;
-      state.protectionRejects++;
-
-      await recordSignal(
-        analysis,
-        false,
-        protectionReason,
-        null
-      );
-
-      console.log(
-        `🛡️ FILTER ${symbol} ${analysis.direction} | ` +
-        `${protectionReason} | ` +
-        `CMO=${n(analysis.cmo, 0).toFixed(1)} | ` +
-        `Q=${analysis.qualityScore}`
-      );
-
-      return {
-        symbol,
-        status:
-          'PROTECTED',
-
-        reason:
-          protectionReason
-      };
-    }
-
-    const quote =
-      await fetchSingleQuote(
-        symbol
-      );
-
-    if (
-      !quote
-    ) {
-      state.skippedSignals++;
-
-      await recordSignal(
-        analysis,
-        false,
-        'NO_FRESH_QUOTE',
-        null
-      );
-
-      return {
-        symbol,
-        status:
-          'NO_QUOTE'
-      };
-    }
-
-    state.latestQuotes.set(
-      symbol,
-      quote
+    state.processedBars.add(
+      barKey
     );
 
-    await handleReverseSignal(
-      analysis,
-      quote
-    );
+    // Prevent unlimited Set growth.
+    if (
+      state.processedBars.size >
+      10000
+    ) {
+      state.processedBars.clear();
 
+      state.processedBars.add(
+        barKey
+      );
+    }
+
+    const technical =
+      buildTechnicalIntelligence(
+        symbol,
+        bars
+      );
+
+    if (!technical) {
+      return;
+    }
+
+    technical.timeframe =
+      TIMEFRAME;
+
+    state.scannedBars++;
+
+    // One open position per symbol.
     if (
       state.openTrades.has(
         symbol
@@ -5838,631 +6803,704 @@ async function scanSymbol(
     ) {
       state.skippedSignals++;
 
-      await recordSignal(
-        analysis,
-        false,
-        'POSITION_ALREADY_OPEN',
-        null
-      );
-
-      return {
-        symbol,
-        status:
-          'SKIP_OPEN'
-      };
-    }
-
-    console.log(
-      `🎯 STRATEGY CANDIDATE ${symbol} ${analysis.direction} | ` +
-      `CMO=${n(analysis.cmo, 0).toFixed(1)} | ` +
-      `body=${(analysis.bodyRatio * 100).toFixed(0)}% | ` +
-      `vol=${
-        Number.isFinite(
-          analysis.volumeRatio
-        )
-          ? analysis.volumeRatio.toFixed(2)
-          : 'n/a'
-      }x | ` +
-      `Q=${analysis.qualityScore}`
-    );
-
-    // ========================================================
-    // GEMINI DECISION
-    // ========================================================
-
-    const aiDecision =
-      await aiEntryDecision(
-        analysis,
-        quote
-      );
-
-    console.log(
-      `🧠 AI ${symbol}: ${aiDecision.decision} | ` +
-      `${n(aiDecision.confidence, 0).toFixed(0)}% | ` +
-      `${aiDecision.reason || 'n/a'}`
-    );
-
-    if (
-      aiDecision.decision !==
-      'APPROVE'
-    ) {
-      state.skippedSignals++;
-
-      await recordSignal(
-        analysis,
-        false,
-        'AI_REJECT',
-        aiDecision
-      );
-
       await journal(
-        'AI_ENTRY_REJECT',
+        'SCAN_SKIP',
         {
-          symbol:
-            analysis.symbol,
-
-          direction:
-            analysis.direction,
+          symbol,
 
           message:
-            aiDecision.reason ||
-            'AI rejected candidate',
-
-          data: {
-            aiDecision,
-            analysis
-          }
+            'SYMBOL_ALREADY_OPEN'
         }
       );
 
-      return {
+      return;
+    }
+
+    if (!quote) {
+      quote =
+        await fetchSingleQuote(
+          symbol
+        );
+    }
+
+    if (!quote) {
+      state.skippedSignals++;
+
+      await journal(
+        'SCAN_SKIP',
+        {
+          symbol,
+
+          message:
+            'QUOTE_UNAVAILABLE'
+        }
+      );
+
+      return;
+    }
+
+    state.latestQuotes.set(
+      symbol,
+      quote
+    );
+
+    const multiTimeframe =
+      await buildMultiTimeframeContext(
         symbol,
-        status:
-          'AI_REJECTED'
-      };
+        bars
+      );
+
+    // ========================================================
+    // GEMINI COMMANDS DIRECTION
+    // ========================================================
+
+    const aiDecision =
+      await aiEntryCommander(
+        symbol,
+        technical,
+        multiTimeframe,
+        quote
+      );
+
+    if (
+      aiDecision.decision ===
+      'NO_TRADE'
+    ) {
+      state.skippedSignals++;
+
+      await recordSignal({
+        symbol,
+        technical,
+        multiTimeframe,
+        aiDecision,
+        executed: false,
+
+        skipReason:
+          aiDecision.failClosed
+            ? 'AI_FAIL_CLOSED'
+            : 'AI_NO_TRADE'
+      });
+
+      console.log(
+        `⏭️ ${symbol} | ` +
+        `AI=NO_TRADE | ` +
+        `${n(aiDecision.confidence, 0).toFixed(0)}% | ` +
+        `${aiDecision.reason}`
+      );
+
+      return;
     }
 
     // ========================================================
-    // HARD RISK MANAGER HAS FINAL AUTHORITY
+    // RISK MANAGER VALIDATES AI STOP
+    // ========================================================
+
+    const executionLevels =
+      validateAiStopLoss(
+        aiDecision,
+        quote,
+        technical
+      );
+
+    if (!executionLevels.valid) {
+      state.skippedSignals++;
+
+      await recordSignal({
+        symbol,
+        technical,
+        multiTimeframe,
+        aiDecision,
+        executionLevels: null,
+        executed: false,
+
+        skipReason:
+          executionLevels.reason
+      });
+
+      console.log(
+        `🛑 ${symbol} ${aiDecision.decision} rejected | ` +
+        `${executionLevels.reason}`
+      );
+
+      return;
+    }
+
+    const sizing =
+      calculatePositionSize(
+        executionLevels.entry,
+        executionLevels.stopLoss
+      );
+
+    if (!sizing) {
+      state.skippedSignals++;
+
+      await recordSignal({
+        symbol,
+        technical,
+        multiTimeframe,
+        aiDecision,
+        executionLevels,
+        executed: false,
+
+        skipReason:
+          'POSITION_SIZE_FAILED'
+      });
+
+      return;
+    }
+
+    const riskCheck =
+      canOpenNewTrade(
+        symbol,
+        sizing.riskAmount
+      );
+
+    if (!riskCheck.allowed) {
+      state.skippedSignals++;
+
+      await recordSignal({
+        symbol,
+        technical,
+        multiTimeframe,
+        aiDecision,
+        executionLevels,
+        executed: false,
+
+        skipReason:
+          riskCheck.reason
+      });
+
+      console.log(
+        `🛑 ${symbol} ${aiDecision.decision} risk reject | ` +
+        `${riskCheck.reason}`
+      );
+
+      return;
+    }
+
+    // ========================================================
+    // OPEN PAPER TRADE
     // ========================================================
 
     const opened =
-      await openPaperTrade(
-        analysis,
+      await openPaperTrade({
+        symbol,
+        technical,
+        multiTimeframe,
         quote,
-        aiDecision
+        aiDecision,
+        executionLevels
+      });
+
+    if (!opened.opened) {
+      state.skippedSignals++;
+
+      await recordSignal({
+        symbol,
+        technical,
+        multiTimeframe,
+        aiDecision,
+        executionLevels,
+        executed: false,
+
+        skipReason:
+          opened.reason
+      });
+
+      return;
+    }
+
+    await recordSignal({
+      symbol,
+      technical,
+      multiTimeframe,
+      aiDecision,
+      executionLevels,
+      executed: true,
+      skipReason: ''
+    });
+  } catch (error) {
+    state.skippedSignals++;
+
+    console.error(
+      `Process ${symbol}:`,
+      safeError(error)
+    );
+
+    await journal(
+      'SCAN_ERROR',
+      {
+        symbol,
+
+        message:
+          safeError(error)
+      }
+    );
+  } finally {
+    state.scanLocks.delete(
+      symbol
+    );
+  }
+}
+
+// ============================================================
+// REFRESH ONE SYMBOL
+// ============================================================
+
+async function refreshSymbol(
+  symbol
+) {
+  let pair =
+    state.pairState.get(
+      symbol
+    );
+
+  if (!pair?.initialized) {
+    await initializeSymbol(
+      symbol
+    );
+
+    return;
+  }
+
+  try {
+    const bars =
+      await fetchOhlc(
+        symbol,
+        TIMEFRAME,
+        HISTORY_LIMIT
       );
 
-    return {
+    if (
+      bars.length <
+      CORE_MIN_HISTORY
+    ) {
+      throw new Error(
+        `Only ${bars.length} bars`
+      );
+    }
+
+    const latest =
+      bars[bars.length - 1];
+
+    pair.bars =
+      bars;
+
+    pair.lastError =
+      null;
+
+    const newClosedBar =
+      latest.time !==
+      pair.lastClosedBarTime;
+
+    if (!newClosedBar) {
+      return;
+    }
+
+    pair.lastClosedBarTime =
+      latest.time;
+
+    const quote =
+      await fetchSingleQuote(
+        symbol
+      );
+
+    await processNewClosedBar(
       symbol,
+      bars,
+      quote
+    );
 
-      status:
-        opened
-          ? 'SIGNAL'
-          : 'SKIPPED',
-
-      direction:
-        analysis.direction
-    };
-  } catch (
-    error
-  ) {
-    memory.errors++;
+    pair.lastScannedBarTime =
+      latest.time;
+  } catch (error) {
+    pair.lastError =
+      safeError(error);
 
     state.lastMarketError =
       `${symbol}: ${safeError(error)}`;
 
-    await journal(
-      'ERROR',
-      {
-        symbol,
-
-        message:
-          'scanSymbol failed',
-
-        data: {
-          error:
-            safeError(error)
-        }
-      }
+    console.error(
+      `Refresh ${symbol}:`,
+      safeError(error)
     );
-
-    return {
-      symbol,
-
-      status:
-        'ERROR',
-
-      error:
-        safeError(error)
-    };
   }
 }
 
 // ============================================================
-// 15M SIGNAL LOOP
+// MARKET SCANNER
 // ============================================================
 
-async function signalScanLoop() {
-  if (
-    state.scanRunning ||
-    state.initializing ||
-    !state.marketReady
-  ) {
+async function scanLoop() {
+  if (state.scanLoopBusy) {
     return;
   }
 
-  const now =
-    new Date();
-
-  const minute =
-    now.getUTCMinutes();
-
-  const second =
-    now.getUTCSeconds();
-
-  if (
-    minute %
-      15 !==
-      0 ||
-    second <
-      4
-  ) {
-    return;
-  }
-
-  const slot =
-    `${now.getUTCFullYear()}-` +
-    `${now.getUTCMonth() + 1}-` +
-    `${now.getUTCDate()}-` +
-    `${now.getUTCHours()}-` +
-    `${Math.floor(minute / 15)}`;
-
-  if (
-    state.lastScanSlot ===
-    slot
-  ) {
-    return;
-  }
-
-  state.lastScanSlot =
-    slot;
-
-  state.scanRunning =
-    true;
-
-  state.totalSignalScans++;
-
-  state.lastSignalScanAt =
-    new Date();
-
-  const scanNumber =
-    state.totalSignalScans;
-
-  const beforeRaw =
-    state.rawSignals;
-
-  const beforeExecuted =
-    state.executedSignals;
-
-  const beforeSkipped =
-    state.skippedSignals;
+  state.scanLoopBusy = true;
 
   try {
-    console.log(
-      `🔎 Scan #${scanNumber} | ${new Date().toISOString()}`
-    );
-
     await mapWithConcurrency(
       INSTRUMENTS,
       OHLC_CONCURRENCY,
-      scanSymbol
+      refreshSymbol
     );
-
-    console.log(
-      `✅ Scan #${scanNumber} complete | ` +
-      `raw=${state.rawSignals - beforeRaw} ` +
-      `executed=${state.executedSignals - beforeExecuted} ` +
-      `skipped=${state.skippedSignals - beforeSkipped}`
-    );
-  } catch (
-    error
-  ) {
-    await journal(
-      'ERROR',
-      {
-        message:
-          'signalScanLoop failed',
-
-        data: {
-          error:
-            safeError(error)
-        }
-      }
+  } catch (error) {
+    console.error(
+      'Scan loop:',
+      safeError(error)
     );
   } finally {
-    state.scanRunning =
-      false;
+    state.scanLoopBusy = false;
   }
 }
 
 // ============================================================
-// MARKET INITIALIZATION
+// MANUAL PAPER CLOSE
 // ============================================================
 
-async function initializeMarket() {
-  state.initializing =
-    true;
-
-  state.marketReady =
-    false;
-
-  console.log(
-    `⏳ Initializing ${INSTRUMENTS.length} instruments on ${TIMEFRAME}...`
-  );
-
-  const timeoutMs =
-    15000;
-
-  const results =
-    await mapWithConcurrency(
-      INSTRUMENTS,
-      OHLC_CONCURRENCY,
-      async symbol => {
-        const memory =
-          state.pairState.get(
-            symbol
-          );
-
-        try {
-          const bars =
-            await Promise.race([
-              fetchOhlc(
-                symbol
-              ),
-
-              new Promise(
-                (
-                  _,
-                  reject
-                ) =>
-                  setTimeout(
-                    () =>
-                      reject(
-                        new Error(
-                          `INIT_TIMEOUT_${timeoutMs}MS`
-                        )
-                      ),
-                    timeoutMs
-                  )
-              )
-            ]);
-
-          memory.bars =
-            bars;
-
-          memory.initialized =
-            bars.length >=
-            CORE_MIN_HISTORY;
-
-          memory.lastClosedBarTime =
-            bars[
-              bars.length -
-              1
-            ]?.openTime ||
-            null;
-
-          if (
-            memory.initialized
-          ) {
-            memory.errors =
-              0;
-
-            console.log(
-              `✅ INIT ${symbol}: READY | ` +
-              `bars=${bars.length} | ` +
-              `EMA200=${
-                bars.length >=
-                EMA200_CONTEXT_HISTORY
-                  ? 'READY'
-                  : 'CONTEXT-WARMUP'
-              }`
-            );
-
-            return {
-              symbol,
-              ready:
-                true,
-
-              bars:
-                bars.length
-            };
-          }
-
-          memory.errors++;
-
-          console.warn(
-            `⚠️ INIT ${symbol}: WARMUP | ` +
-            `bars=${bars.length}/${CORE_MIN_HISTORY}`
-          );
-
-          return {
-            symbol,
-            ready:
-              false,
-
-            bars:
-              bars.length
-          };
-        } catch (
-          error
-        ) {
-          memory.initialized =
-            false;
-
-          memory.errors++;
-
-          console.error(
-            `❌ INIT ${symbol}: ${safeError(error)}`
-          );
-
-          return {
-            symbol,
-            ready:
-              false,
-
-            bars:
-              0
-          };
-        }
-      }
-    );
-
-  const ready =
-    results.filter(
-      result =>
-        result?.ready
-    ).length;
-
-  const minimumReady =
-    Math.max(
-      1,
-      Math.floor(
-        INSTRUMENTS.length *
-        0.80
-      )
-    );
-
-  state.marketReady =
-    ready >=
-    minimumReady;
-
-  state.initializing =
-    false;
-
-  console.log(
-    `✅ Market initialized: ${ready}/${INSTRUMENTS.length}`
-  );
-
-  console.log(
-    state.marketReady
-      ? `✅ Market engine READY | minimum=${minimumReady}`
-      : `⚠️ Market engine PARTIAL | ready=${ready} minimum=${minimumReady}`
-  );
-
-  await journal(
-    'MARKET_INIT',
-    {
-      message:
-        state.marketReady
-          ? 'Market ready'
-          : 'Market partial',
-
-      data: {
-        ready,
-
-        total:
-          INSTRUMENTS.length,
-
-        minimumReady
-      }
-    }
-  );
-}
-
-// ============================================================
-// DASHBOARD DATA
-// ============================================================
-
-function openTradeView(
-  trade
+async function manualCloseSymbol(
+  symbol,
+  reason = 'MANUAL_CLOSE'
 ) {
+  symbol =
+    String(symbol || '')
+      .toUpperCase();
+
+  const trade =
+    state.openTrades.get(
+      symbol
+    );
+
+  if (!trade) {
+    return {
+      ok: false,
+      reason: 'NO_OPEN_TRADE'
+    };
+  }
+
   const quote =
-    state.latestQuotes.get(
-      trade.symbol
+    await fetchSingleQuote(
+      symbol
     );
 
-  let currentPrice =
-    n(
-      trade.lastMarkPrice,
-      trade.entryPrice
+  if (!quote) {
+    return {
+      ok: false,
+      reason: 'QUOTE_UNAVAILABLE'
+    };
+  }
+
+  const protection =
+    await applyMechanicalProtection(
+      trade,
+      quote
     );
 
-  let r =
-    0;
-
-  if (
-    quote
-  ) {
-    currentPrice =
-      markPriceForTrade(
-        trade,
-        quote
-      );
+  if (protection.closed) {
+    return {
+      ok: true,
+      reason:
+        protection.reason
+    };
   }
 
-  if (
-    Number.isFinite(
-      currentPrice
-    ) &&
-    n(
-      trade.riskDistance,
-      0
-    ) >
-      0
-  ) {
-    const move =
-      trade.direction ===
-        'BUY'
-        ? currentPrice -
-          trade.entryPrice
-        : trade.entryPrice -
-          currentPrice;
+  const exitPrice =
+    tradeMarkPrice(
+      trade,
+      quote
+    );
 
-    r =
-      move /
-      trade.riskDistance;
-  }
-
-  const floatingPnl =
-    n(
-      trade.riskAmount,
-      0
-    ) *
-    r;
+  const closed =
+    await closePaperTrade(
+      trade,
+      exitPrice,
+      reason
+    );
 
   return {
-    id:
-      String(
-        trade._id
-      ),
+    ok:
+      Boolean(closed),
 
-    symbol:
-      trade.symbol,
-
-    direction:
-      trade.direction,
-
-    entryPrice:
-      trade.entryPrice,
-
-    currentPrice,
-
-    stopLoss:
-      trade.stopLoss,
-
-    takeProfit:
-      trade.takeProfit,
-
-    breakEvenTriggerPrice:
-      trade.breakEvenTriggerPrice,
-
-    breakEvenActive:
-      Boolean(
-        trade.breakEvenActive
-      ),
-
-    riskAmount:
-      n(
-        trade.riskAmount,
-        0
-      ),
-
-    currentR:
-      r,
-
-    floatingPnl,
-
-    mfeR:
-      n(
-        trade.mfeR,
-        0
-      ),
-
-    maeR:
-      n(
-        trade.maeR,
-        0
-      ),
-
-    quality:
-      trade.quality ||
-      'NEUTRAL',
-
-    qualityScore:
-      n(
-        trade.qualityScore,
-        0
-      ),
-
-    aiEntryDecision:
-      trade.aiEntryDecision ||
-      null,
-
-    aiLastManagement:
-      trade.aiLastManagement ||
-      null,
-
-    openedAt:
-      trade.openedAt,
-
-    durationMinutes:
-      Math.max(
-        0,
-        (
-          Date.now() -
-          new Date(
-            trade.openedAt
-          ).getTime()
-        ) /
-        60000
-      )
+    trade:
+      closed
   };
 }
 
-async function dashboardData() {
-  const openTrades =
+// ============================================================
+// CLOSE ALL PAPER TRADES
+// ============================================================
+
+async function manualCloseAll() {
+  const symbols =
     [
-      ...state.openTrades.values()
-    ].map(
-      openTradeView
-    );
+      ...state.openTrades.keys()
+    ];
 
-  const unrealizedPnl =
-    openTrades.reduce(
-      (
-        total,
-        trade
-      ) =>
-        total +
-        trade.floatingPnl,
-      0
-    );
+  const results = [];
 
+  for (const symbol of symbols) {
+    try {
+      results.push(
+        await manualCloseSymbol(
+          symbol,
+          'MANUAL_CLOSE_ALL'
+        )
+      );
+    } catch (error) {
+      results.push({
+        ok: false,
+        symbol,
+        reason:
+          safeError(error)
+      });
+    }
+  }
+
+  return results;
+}
+
+// ============================================================
+// RUNTIME LOOP START
+// ============================================================
+
+function startRuntimeLoops() {
+  if (state.loopsStarted) {
+    return;
+  }
+
+  state.loopsStarted = true;
+
+  setInterval(
+    () => {
+      quoteLoop().catch(
+        error => {
+          console.error(
+            'Quote timer:',
+            safeError(error)
+          );
+        }
+      );
+    },
+    QUOTE_POLL_MS
+  );
+
+  setInterval(
+    () => {
+      scanLoop().catch(
+        error => {
+          console.error(
+            'Scan timer:',
+            safeError(error)
+          );
+        }
+      );
+    },
+    SCAN_TIMER_MS
+  );
+
+  console.log(
+    `✅ Quote loop: ${QUOTE_POLL_MS}ms`
+  );
+
+  console.log(
+    `✅ 15m scanner loop: ${SCAN_TIMER_MS}ms`
+  );
+
+  console.log(
+    `✅ Gemini management: ${AI.managementIntervalMs}ms/trade`
+  );
+}
+
+// ============================================================
+// END PART 3 / 4
+//
+// PART 4:
+// DASHBOARD
+// API ROUTES
+// TELEGRAM CLOSE COMMANDS
+// HEALTH
+// BOOT
+// GRACEFUL SHUTDOWN
+// ============================================================
+// ============================================================
+// PART 4 / 4
+// DASHBOARD + API + TELEGRAM + BOOT + SHUTDOWN
+// ============================================================
+
+// ============================================================
+// DASHBOARD HELPERS
+// ============================================================
+
+function getOpenTradesArray() {
+  return [...state.openTrades.values()];
+}
+
+function getOpenFloatingPnl() {
+  let total = 0;
+
+  for (const trade of state.openTrades.values()) {
+    const quote =
+      state.latestQuotes.get(
+        trade.symbol
+      );
+
+    if (!quote) {
+      continue;
+    }
+
+    const mark =
+      tradeMarkPrice(
+        trade,
+        quote
+      );
+
+    total +=
+      calculateTradePnl(
+        trade,
+        mark
+      );
+  }
+
+  return total;
+}
+
+function getOpenTradesView() {
+  return getOpenTradesArray()
+    .map(trade => {
+      const quote =
+        state.latestQuotes.get(
+          trade.symbol
+        );
+
+      const mark =
+        quote
+          ? tradeMarkPrice(
+              trade,
+              quote
+            )
+          : n(
+              trade.lastMarkPrice,
+              trade.entryPrice
+            );
+
+      const r =
+        quote
+          ? currentR(
+              trade,
+              quote
+            )
+          : 0;
+
+      const floatingPnl =
+        Number.isFinite(mark)
+          ? calculateTradePnl(
+              trade,
+              mark
+            )
+          : 0;
+
+      return {
+        id:
+          String(
+            trade._id || ''
+          ),
+
+        symbol:
+          trade.symbol,
+
+        direction:
+          trade.direction,
+
+        entryPrice:
+          trade.entryPrice,
+
+        markPrice:
+          mark,
+
+        stopLoss:
+          trade.stopLoss,
+
+        initialStopLoss:
+          trade.initialStopLoss,
+
+        takeProfit:
+          trade.takeProfit,
+
+        breakEvenTriggerPrice:
+          trade.breakEvenTriggerPrice,
+
+        breakEvenActive:
+          Boolean(
+            trade.breakEvenActive
+          ),
+
+        riskDistance:
+          trade.riskDistance,
+
+        riskAmount:
+          trade.riskAmount,
+
+        quantity:
+          trade.quantity,
+
+        currentR:
+          r,
+
+        floatingPnl,
+
+        mfeR:
+          n(
+            trade.mfeR,
+            0
+          ),
+
+        maeR:
+          n(
+            trade.maeR,
+            0
+          ),
+
+        openedAt:
+          trade.openedAt,
+
+        aiConfidence:
+          n(
+            trade.aiEntryDecision
+              ?.confidence,
+            0
+          ),
+
+        aiSetup:
+          trade.aiEntryDecision
+            ?.setup || '',
+
+        aiReason:
+          trade.aiEntryDecision
+            ?.reason || ''
+      };
+    });
+}
+
+// ============================================================
+// STATUS OBJECT
+// ============================================================
+
+function buildStatus() {
   const balance =
-    n(
-      account?.balance,
-      PAPER.startingBalance
-    );
+    accountBalance();
+
+  const floatingPnl =
+    getOpenFloatingPnl();
 
   const equity =
     balance +
-    unrealizedPnl;
+    floatingPnl;
 
-  const recentClosed =
-    await Trade.find({
-      accountKey:
-        PAPER.accountKey,
+  const openRisk =
+    currentPortfolioRiskUsd();
 
-      status:
-        'CLOSED'
-    })
-      .sort({
-        closedAt:
-          -1
-      })
-      .limit(20)
-      .lean();
+  const portfolioCap =
+    portfolioRiskCapUsd();
 
   return {
     version:
@@ -6474,228 +7512,126 @@ async function dashboardData() {
     liveTrading:
       LIVE_TRADING,
 
+    paperOnly:
+      MODE === 'PAPER' &&
+      LIVE_TRADING === false,
+
+    startedAt:
+      state.startedAt,
+
+    uptimeSeconds:
+      Math.floor(
+        process.uptime()
+      ),
+
     marketReady:
       state.marketReady,
+
+    instruments:
+      INSTRUMENTS.length,
+
+    instrumentsReady:
+      pairReadyCount(),
+
+    timeframe:
+      TIMEFRAME,
+
+    balance,
+
+    floatingPnl,
+
+    equity,
+
+    realizedPnl:
+      n(
+        account?.realizedPnl,
+        0
+      ),
+
+    startingBalance:
+      PAPER.startingBalance,
+
+    totalTrades:
+      n(
+        account?.totalTrades,
+        0
+      ),
+
+    wins:
+      n(
+        account?.wins,
+        0
+      ),
+
+    losses:
+      n(
+        account?.losses,
+        0
+      ),
+
+    breakeven:
+      n(
+        account?.breakeven,
+        0
+      ),
+
+    openTrades:
+      state.openTrades.size,
+
+    maxOpenTrades:
+      PAPER.maxOpenTrades,
+
+    capitalRiskSafetyCapPct:
+      PAPER.maxCapitalRiskPct,
+
+    portfolioRiskCapPct:
+      PAPER.portfolioRiskCapPct,
+
+    openRiskUsd:
+      openRisk,
+
+    portfolioRiskCapUsd:
+      portfolioCap,
+
+    portfolioRiskUsedPct:
+      portfolioCap > 0
+        ? (
+            openRisk /
+            portfolioCap
+          ) * 100
+        : 0,
+
+    riskReward:
+      `1:${RULES.riskReward}`,
+
+    breakEvenTriggerR:
+      RULES.breakEvenTriggerR,
+
+    scannedBars:
+      state.scannedBars,
+
+    executedSignals:
+      state.executedSignals,
+
+    skippedSignals:
+      state.skippedSignals,
 
     mongoReady:
       state.mongoReady,
 
     telegramReady:
-      state.telegramReady,
+      Boolean(bot),
 
-    geminiReady:
-      state.geminiReady,
+    geminiConfigured:
+      Boolean(
+        GEMINI_API_KEY
+      ),
 
     geminiModel:
       GEMINI_MODEL,
 
-    timeframe:
-      TIMEFRAME,
-
-    pairsReady:
-      pairReadyCount(),
-
-    pairsTotal:
-      INSTRUMENTS.length,
-
-    startedAt:
-      state.startedAt,
-
-    lastSignalScanAt:
-      state.lastSignalScanAt,
-
-    lastQuotePollAt:
-      state.lastQuotePollAt,
-
-    lastAiManageAt:
-      state.lastAiManageAt,
-
     lastMarketError:
-      state.lastMarketError,
-
-    lastAiError:
-      state.lastAiError,
-
-    account: {
-      startingBalance:
-        PAPER.startingBalance,
-
-      balance,
-
-      equity,
-
-      realizedPnl:
-        n(
-          account?.realizedPnl,
-          0
-        ),
-
-      unrealizedPnl,
-
-      totalTrades:
-        n(
-          account?.totalTrades,
-          0
-        ),
-
-      wins:
-        n(
-          account?.wins,
-          0
-        ),
-
-      losses:
-        n(
-          account?.losses,
-          0
-        ),
-
-      breakeven:
-        n(
-          account?.breakeven,
-          0
-        ),
-
-      riskPctPerTrade:
-        PAPER.riskPctPerTrade,
-
-      targetPctApprox:
-        PAPER.riskPctPerTrade *
-        STRATEGY.riskReward,
-
-      riskReward:
-        STRATEGY.riskReward,
-
-      breakEvenTriggerR:
-        STRATEGY.breakEvenTriggerR,
-
-      portfolioRiskCapPct:
-        PAPER.portfolioRiskCapPct,
-
-      riskPerTradeUsd:
-        perTradeRiskUsd(),
-
-      openRiskUsd:
-        currentPortfolioRiskUsd(),
-
-      riskCapUsd:
-        portfolioRiskCapUsd()
-    },
-
-    engine: {
-      openTrades:
-        openTrades.length,
-
-      rawSignals:
-        state.rawSignals,
-
-      executedSignals:
-        state.executedSignals,
-
-      skippedSignals:
-        state.skippedSignals,
-
-      protectionRejects:
-        state.protectionRejects,
-
-      portfolioRiskRejects:
-        state.portfolioRiskRejects,
-
-      breakEvenMoves:
-        state.breakEvenMoves,
-
-      aiEntryCalls:
-        state.aiEntryCalls,
-
-      aiManageCalls:
-        state.aiManageCalls,
-
-      aiApprovedEntries:
-        state.aiApprovedEntries,
-
-      aiRejectedEntries:
-        state.aiRejectedEntries,
-
-      aiCloseDecisions:
-        state.aiCloseDecisions,
-
-      aiHoldDecisions:
-        state.aiHoldDecisions,
-
-      journalEvents:
-        state.journalEvents
-    },
-
-    openTrades,
-
-    recentClosed:
-      recentClosed.map(
-        trade => ({
-          id:
-            String(
-              trade._id
-            ),
-
-          symbol:
-            trade.symbol,
-
-          direction:
-            trade.direction,
-
-          exitReason:
-            trade.exitReason,
-
-          entryPrice:
-            trade.entryPrice,
-
-          exitPrice:
-            trade.exitPrice,
-
-          pnl:
-            n(
-              trade.pnl,
-              0
-            ),
-
-          resultR:
-            n(
-              trade.resultR,
-              0
-            ),
-
-          mfeR:
-            n(
-              trade.mfeR,
-              0
-            ),
-
-          maeR:
-            n(
-              trade.maeR,
-              0
-            ),
-
-          quality:
-            trade.quality,
-
-          qualityScore:
-            n(
-              trade.qualityScore,
-              0
-            ),
-
-          aiEntryDecision:
-            trade.aiEntryDecision ||
-            null,
-
-          aiLastManagement:
-            trade.aiLastManagement ||
-            null,
-
-          closedAt:
-            trade.closedAt
-        })
-      )
+      state.lastMarketError || null
   };
 }
 
@@ -6713,1170 +7649,14 @@ app.disable(
 app.use(
   express.json({
     limit:
-      '100kb'
+      '250kb'
   })
 );
 
-// ============================================================
-// SIMPLE DASHBOARD
-// ============================================================
-
-app.get(
-  '/',
-  (
-    req,
-    res
-  ) => {
-    res
-      .type('html')
-      .send(
-        `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${VERSION}</title>
-
-<style>
-*{
-box-sizing:border-box
-}
-
-body{
-margin:0;
-background:#081018;
-color:#e8f0f7;
-font-family:Arial,sans-serif
-}
-
-.wrap{
-max-width:1500px;
-margin:auto;
-padding:18px
-}
-
-.top{
-display:flex;
-justify-content:space-between;
-gap:12px;
-align-items:center;
-flex-wrap:wrap
-}
-
-.badge{
-padding:7px 11px;
-border:1px solid #27445b;
-border-radius:20px;
-background:#0d1a25
-}
-
-.ok{
-color:#65e6a5
-}
-
-.bad{
-color:#ff7b7b
-}
-
-.muted{
-color:#8ea4b5
-}
-
-.grid{
-display:grid;
-grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
-gap:10px;
-margin:14px 0
-}
-
-.card{
-background:#0d1721;
-border:1px solid #1c3447;
-border-radius:12px;
-padding:14px
-}
-
-.big{
-font-size:23px;
-font-weight:700;
-margin-top:5px
-}
-
-.section{
-margin-top:18px
-}
-
-.tablewrap{
-overflow:auto;
-border:1px solid #1c3447;
-border-radius:12px
-}
-
-table{
-width:100%;
-border-collapse:collapse;
-min-width:1100px;
-background:#0d1721
-}
-
-th,td{
-padding:10px;
-border-bottom:1px solid #193044;
-text-align:left;
-white-space:nowrap
-}
-
-th{
-background:#10202d
-}
-
-.buy{
-color:#60e6a0;
-font-weight:700
-}
-
-.sell{
-color:#ff7b7b;
-font-weight:700
-}
-
-.pos{
-color:#65e6a5
-}
-
-.neg{
-color:#ff7b7b
-}
-
-.btn{
-border:0;
-border-radius:8px;
-padding:8px 11px;
-cursor:pointer;
-font-weight:700
-}
-
-.danger{
-background:#d94a4a;
-color:white
-}
-
-.toolbar{
-display:flex;
-gap:8px;
-align-items:center;
-flex-wrap:wrap
-}
-
-.small{
-font-size:12px
-}
-</style>
-</head>
-
-<body>
-
-<div class="wrap">
-
-<div class="top">
-
-<div>
-<h2 style="margin:0">${VERSION}</h2>
-
-<div class="muted">
-PAPER ONLY • AI Decision Layer • Risk Manager Locked
-</div>
-</div>
-
-<div class="toolbar">
-<span id="market" class="badge">Loading...</span>
-
-<button class="btn danger" onclick="closeAll()">
-Close All
-</button>
-</div>
-
-</div>
-
-<div class="grid" id="cards"></div>
-
-<div class="section">
-<h3>Open Positions</h3>
-
-<div class="tablewrap">
-<table>
-
-<thead>
-<tr>
-<th>Symbol</th>
-<th>Side</th>
-<th>Entry</th>
-<th>Current</th>
-<th>SL</th>
-<th>TP</th>
-<th>R</th>
-<th>PnL</th>
-<th>BE</th>
-<th>MFE</th>
-<th>MAE</th>
-<th>AI Entry</th>
-<th>AI Manage</th>
-<th>Action</th>
-</tr>
-</thead>
-
-<tbody id="openRows"></tbody>
-
-</table>
-</div>
-</div>
-
-<div class="section">
-<h3>Recent Closed Trades</h3>
-
-<div class="tablewrap">
-<table>
-
-<thead>
-<tr>
-<th>Symbol</th>
-<th>Side</th>
-<th>Reason</th>
-<th>R</th>
-<th>PnL</th>
-<th>MFE</th>
-<th>MAE</th>
-<th>Closed</th>
-</tr>
-</thead>
-
-<tbody id="closedRows"></tbody>
-
-</table>
-</div>
-</div>
-
-<div class="section small muted">
-Locked Risk Manager:
-Risk 1% • TP 2R • Break-even +0.60R • Portfolio cap 4% • LIVE OFF
-</div>
-
-</div>
-
-<script>
-
-const money = value =>
-(Number(value)||0).toLocaleString(
-undefined,
-{
-style:'currency',
-currency:'USD',
-minimumFractionDigits:2
-}
-);
-
-const num = (value,digits=2) =>
-Number.isFinite(Number(value))
-? Number(value).toFixed(digits)
-: 'n/a';
-
-const cls = value =>
-Number(value)>=0
-? 'pos'
-: 'neg';
-
-const price = (value,symbol) => {
-
-if(!Number.isFinite(Number(value))){
-return 'n/a';
-}
-
-return Number(value).toFixed(
-symbol==='XAUUSD'
-? 2
-: symbol && symbol.endsWith('JPY')
-? 3
-: 5
-);
-
-};
-
-async function load(){
-
-try{
-
-const response =
-await fetch(
-'/api/dashboard',
-{
-cache:'no-store'
-}
-);
-
-const data =
-await response.json();
-
-const market =
-document.getElementById('market');
-
-market.textContent =
-(data.marketReady ? '● MARKET READY' : '● MARKET WAIT')
-+
-' | AI '
-+
-(data.geminiReady ? 'READY' : 'OFF');
-
-market.className =
-'badge '
-+
-(data.marketReady ? 'ok' : 'bad');
-
-const a =
-data.account;
-
-const e =
-data.engine;
-
-const cards = [
-
-[
-'Balance',
-money(a.balance)
-],
-
-[
-'Equity',
-money(a.equity)
-],
-
-[
-'Risk / Trade',
-money(a.riskPerTradeUsd)
-+
-' ('
-+
-a.riskPctPerTrade
-+
-'%)'
-],
-
-[
-'Target / Trade',
-'2R ≈ '
-+
-a.targetPctApprox
-+
-'%'
-],
-
-[
-'Open Risk',
-money(a.openRiskUsd)
-+
-' / '
-+
-money(a.riskCapUsd)
-],
-
-[
-'Open Trades',
-e.openTrades
-],
-
-[
-'Wins / Losses / BE',
-a.wins
-+
-' / '
-+
-a.losses
-+
-' / '
-+
-a.breakeven
-],
-
-[
-'AI Approved / Reject',
-e.aiApprovedEntries
-+
-' / '
-+
-e.aiRejectedEntries
-],
-
-[
-'AI HOLD / CLOSE',
-e.aiHoldDecisions
-+
-' / '
-+
-e.aiCloseDecisions
-],
-
-[
-'Signals Exec / Skip',
-e.executedSignals
-+
-' / '
-+
-e.skippedSignals
-]
-
-];
-
-document.getElementById('cards').innerHTML =
-cards.map(
-item =>
-'<div class="card">'
-+
-'<div class="muted">'
-+
-item[0]
-+
-'</div>'
-+
-'<div class="big">'
-+
-item[1]
-+
-'</div>'
-+
-'</div>'
-).join('');
-
-document.getElementById('openRows').innerHTML =
-data.openTrades.length
-?
-data.openTrades.map(
-trade => {
-
-const aiEntry =
-trade.aiEntryDecision
-?
-trade.aiEntryDecision.decision
-+
-' '
-+
-num(
-trade.aiEntryDecision.confidence,
-0
-)
-+
-'%'
-:
-'—';
-
-const aiManage =
-trade.aiLastManagement
-?
-trade.aiLastManagement.decision
-+
-' '
-+
-num(
-trade.aiLastManagement.confidence,
-0
-)
-+
-'%'
-:
-'—';
-
-return '<tr>'
-+
-'<td><b>'
-+
-trade.symbol
-+
-'</b></td>'
-+
-'<td class="'
-+
-trade.direction.toLowerCase()
-+
-'">'
-+
-trade.direction
-+
-'</td>'
-+
-'<td>'
-+
-price(
-trade.entryPrice,
-trade.symbol
-)
-+
-'</td>'
-+
-'<td>'
-+
-price(
-trade.currentPrice,
-trade.symbol
-)
-+
-'</td>'
-+
-'<td>'
-+
-price(
-trade.stopLoss,
-trade.symbol
-)
-+
-'</td>'
-+
-'<td>'
-+
-price(
-trade.takeProfit,
-trade.symbol
-)
-+
-'</td>'
-+
-'<td class="'
-+
-cls(trade.currentR)
-+
-'">'
-+
-num(
-trade.currentR,
-2
-)
-+
-'R</td>'
-+
-'<td class="'
-+
-cls(trade.floatingPnl)
-+
-'">'
-+
-money(
-trade.floatingPnl
-)
-+
-'</td>'
-+
-'<td>'
-+
-(
-trade.breakEvenActive
-?
-'ON'
-:
-'OFF'
-)
-+
-'</td>'
-+
-'<td>'
-+
-num(
-trade.mfeR,
-2
-)
-+
-'R</td>'
-+
-'<td>'
-+
-num(
-trade.maeR,
-2
-)
-+
-'R</td>'
-+
-'<td>'
-+
-aiEntry
-+
-'</td>'
-+
-'<td>'
-+
-aiManage
-+
-'</td>'
-+
-'<td>'
-+
-'<button class="btn danger" onclick="closeOne(\\''
-+
-trade.id
-+
-'\\')">Close</button>'
-+
-'</td>'
-+
-'</tr>';
-
-}
-).join('')
-:
-'<tr><td colspan="14" class="muted">No open PAPER trades</td></tr>';
-
-document.getElementById('closedRows').innerHTML =
-data.recentClosed.length
-?
-data.recentClosed.map(
-trade =>
-'<tr>'
-+
-'<td><b>'
-+
-trade.symbol
-+
-'</b></td>'
-+
-'<td class="'
-+
-trade.direction.toLowerCase()
-+
-'">'
-+
-trade.direction
-+
-'</td>'
-+
-'<td>'
-+
-trade.exitReason
-+
-'</td>'
-+
-'<td class="'
-+
-cls(trade.resultR)
-+
-'">'
-+
-num(
-trade.resultR,
-2
-)
-+
-'R</td>'
-+
-'<td class="'
-+
-cls(trade.pnl)
-+
-'">'
-+
-money(
-trade.pnl
-)
-+
-'</td>'
-+
-'<td>'
-+
-num(
-trade.mfeR,
-2
-)
-+
-'R</td>'
-+
-'<td>'
-+
-num(
-trade.maeR,
-2
-)
-+
-'R</td>'
-+
-'<td>'
-+
-new Date(
-trade.closedAt
-).toLocaleString()
-+
-'</td>'
-+
-'</tr>'
-).join('')
-:
-'<tr><td colspan="8" class="muted">No closed trades yet</td></tr>';
-
-}catch(error){
-
-console.error(error);
-
-}
-
-}
-
-async function closeOne(id){
-
-if(
-!confirm(
-'Close this PAPER trade now?'
-)
-){
-return;
-}
-
-const response =
-await fetch(
-'/api/trades/'
-+
-encodeURIComponent(id)
-+
-'/close',
-{
-method:'POST',
-headers:{
-'Content-Type':'application/json'
-},
-body:JSON.stringify({
-confirm:'CLOSE'
-})
-}
-);
-
-const result =
-await response.json();
-
-if(!response.ok){
-alert(
-result.error
-||
-'Close failed'
-);
-}
-
-await load();
-
-}
-
-async function closeAll(){
-
-if(
-!confirm(
-'Close ALL open PAPER trades?'
-)
-){
-return;
-}
-
-if(
-!confirm(
-'Confirm again: close every PAPER trade?'
-)
-){
-return;
-}
-
-const response =
-await fetch(
-'/api/trades/close-all',
-{
-method:'POST',
-headers:{
-'Content-Type':'application/json'
-},
-body:JSON.stringify({
-confirm:'CLOSE_ALL'
-})
-}
-);
-
-const result =
-await response.json();
-
-if(!response.ok){
-
-alert(
-result.error
-||
-'Close all failed'
-);
-
-}else{
-
-alert(
-'Closed: '
-+
-result.closed
-+
-' | Failed: '
-+
-result.failed
-);
-
-}
-
-await load();
-
-}
-
-load();
-
-setInterval(
-load,
-3000
-);
-
-</script>
-
-</body>
-</html>`
-      );
-  }
-);
-
-// ============================================================
-// API DASHBOARD
-// ============================================================
-
-app.get(
-  '/api/dashboard',
-  async (
-    req,
-    res
-  ) => {
-    try {
-      res.json(
-        await dashboardData()
-      );
-    } catch (
-      error
-    ) {
-      res
-        .status(500)
-        .json({
-          error:
-            safeError(error)
-        });
-    }
-  }
-);
-
-// ============================================================
-// MANUAL CLOSE ONE
-// ============================================================
-
-app.post(
-  '/api/trades/:id/close',
-  async (
-    req,
-    res
-  ) => {
-    try {
-      if (
-        req.body?.confirm !==
-        'CLOSE'
-      ) {
-        return res
-          .status(400)
-          .json({
-            error:
-              'Confirmation required'
-          });
-      }
-
-      const id =
-        String(
-          req.params.id ||
-          ''
-        );
-
-      const trade =
-        [
-          ...state.openTrades.values()
-        ].find(
-          item =>
-            String(
-              item._id
-            ) ===
-            id
-        );
-
-      if (
-        !trade
-      ) {
-        return res
-          .status(404)
-          .json({
-            error:
-              'Open trade not found'
-          });
-      }
-
-      const quote =
-        await fetchSingleQuote(
-          trade.symbol
-        );
-
-      if (
-        !quote
-      ) {
-        return res
-          .status(503)
-          .json({
-            error:
-              'Fresh quote unavailable'
-          });
-      }
-
-      state.latestQuotes.set(
-        trade.symbol,
-        quote
-      );
-
-      await updateExcursions(
-        trade.symbol,
-        trade,
-        quote
-      );
-
-      const liveTrade =
-        state.openTrades.get(
-          trade.symbol
-        ) ||
-        trade;
-
-      const exitPrice =
-        markPriceForTrade(
-          liveTrade,
-          quote
-        );
-
-      const closed =
-        await closePaperTrade(
-          trade.symbol,
-          liveTrade,
-          exitPrice,
-          'MANUAL_CLOSE'
-        );
-
-      if (
-        !closed
-      ) {
-        return res
-          .status(409)
-          .json({
-            error:
-              'Trade already closing or closed'
-          });
-      }
-
-      res.json({
-        ok:
-          true,
-
-        symbol:
-          trade.symbol
-      });
-    } catch (
-      error
-    ) {
-      await journal(
-        'ERROR',
-        {
-          message:
-            'manual close failed',
-
-          data: {
-            error:
-              safeError(error)
-          }
-        }
-      );
-
-      res
-        .status(500)
-        .json({
-          error:
-            safeError(error)
-        });
-    }
-  }
-);
-
-// ============================================================
-// MANUAL CLOSE ALL
-// ============================================================
-
-app.post(
-  '/api/trades/close-all',
-  async (
-    req,
-    res
-  ) => {
-    try {
-      if (
-        req.body?.confirm !==
-        'CLOSE_ALL'
-      ) {
-        return res
-          .status(400)
-          .json({
-            error:
-              'Confirmation required'
-          });
-      }
-
-      const trades =
-        [
-          ...state.openTrades.values()
-        ];
-
-      if (
-        !trades.length
-      ) {
-        return res.json({
-          ok:
-            true,
-
-          closed:
-            0,
-
-          failed:
-            0
-        });
-      }
-
-      const quotes =
-        await fetchLatestQuotes(
-          trades.map(
-            trade =>
-              trade.symbol
-          )
-        );
-
-      let closed =
-        0;
-
-      let failed =
-        0;
-
-      for (
-        const originalTrade
-        of trades
-      ) {
-        try {
-          const liveTrade =
-            state.openTrades.get(
-              originalTrade.symbol
-            );
-
-          if (
-            !liveTrade
-          ) {
-            continue;
-          }
-
-          let quote =
-            quotes.get(
-              originalTrade.symbol
-            );
-
-          if (
-            !quote
-          ) {
-            quote =
-              await fetchSingleQuote(
-                originalTrade.symbol
-              );
-          }
-
-          if (
-            !quote
-          ) {
-            failed++;
-            continue;
-          }
-
-          state.latestQuotes.set(
-            originalTrade.symbol,
-            quote
-          );
-
-          await updateExcursions(
-            originalTrade.symbol,
-            liveTrade,
-            quote
-          );
-
-          const latestTrade =
-            state.openTrades.get(
-              originalTrade.symbol
-            ) ||
-            liveTrade;
-
-          const exitPrice =
-            markPriceForTrade(
-              latestTrade,
-              quote
-            );
-
-          const result =
-            await closePaperTrade(
-              originalTrade.symbol,
-              latestTrade,
-              exitPrice,
-              'MANUAL_CLOSE'
-            );
-
-          if (
-            result
-          ) {
-            closed++;
-          } else {
-            failed++;
-          }
-        } catch (
-          error
-        ) {
-          failed++;
-
-          console.error(
-            'Close all trade:',
-            safeError(error)
-          );
-        }
-      }
-
-      await journal(
-        'MANUAL_CLOSE_ALL',
-        {
-          message:
-            'Dashboard Close All',
-
-          data: {
-            closed,
-            failed
-          }
-        }
-      );
-
-      res.json({
-        ok:
-          true,
-
-        closed,
-        failed
-      });
-    } catch (
-      error
-    ) {
-      res
-        .status(500)
-        .json({
-          error:
-            safeError(error)
-        });
-    }
-  }
+app.use(
+  express.urlencoded({
+    extended: false
+  })
 );
 
 // ============================================================
@@ -7885,13 +7665,9 @@ app.post(
 
 app.get(
   '/health',
-  (
-    req,
-    res
-  ) => {
-    res.json({
-      ok:
-        true,
+  (req, res) => {
+    res.status(200).json({
+      ok: true,
 
       version:
         VERSION,
@@ -7905,61 +7681,17 @@ app.get(
       marketReady:
         state.marketReady,
 
-      mongoReady:
-        state.mongoReady,
-
-      telegramReady:
-        state.telegramReady,
-
-      geminiReady:
-        state.geminiReady,
-
-      geminiConfigured:
-        Boolean(
-          GEMINI_API_KEY
-        ),
-
-      geminiModel:
-        GEMINI_MODEL,
-
-      timeframe:
-        TIMEFRAME,
-
-      instruments:
-        INSTRUMENTS.length,
-
       openTrades:
         state.openTrades.size,
 
-      riskPct:
-        PAPER.riskPctPerTrade,
+      uptime:
+        Math.floor(
+          process.uptime()
+        ),
 
-      riskReward:
-        STRATEGY.riskReward,
-
-      portfolioRiskCapPct:
-        PAPER.portfolioRiskCapPct,
-
-      breakEvenTriggerR:
-        STRATEGY.breakEvenTriggerR,
-
-      startedAt:
-        state.startedAt,
-
-      lastSignalScanAt:
-        state.lastSignalScanAt,
-
-      lastQuotePollAt:
-        state.lastQuotePollAt,
-
-      lastAiManageAt:
-        state.lastAiManageAt,
-
-      lastMarketError:
-        state.lastMarketError,
-
-      lastAiError:
-        state.lastAiError
+      timestamp:
+        new Date()
+          .toISOString()
     });
   }
 );
@@ -7970,456 +7702,1768 @@ app.get(
 
 app.get(
   '/api/status',
-  (
-    req,
-    res
-  ) => {
-    res.json({
-      version:
-        VERSION,
-
-      mode:
-        MODE,
-
-      liveTrading:
-        LIVE_TRADING,
-
-      paper: {
-        startingBalance:
-          PAPER.startingBalance,
-
-        balance:
-          account?.balance ??
-          PAPER.startingBalance,
-
-        riskPctPerTrade:
-          PAPER.riskPctPerTrade,
-
-        riskReward:
-          STRATEGY.riskReward,
-
-        theoreticalTargetPct:
-          PAPER.riskPctPerTrade *
-          STRATEGY.riskReward,
-
-        breakEvenTriggerR:
-          STRATEGY.breakEvenTriggerR,
-
-        portfolioRiskCapPct:
-          PAPER.portfolioRiskCapPct,
-
-        openRiskUsd:
-          currentPortfolioRiskUsd(),
-
-        portfolioRiskCapUsd:
-          portfolioRiskCapUsd()
-      },
-
-      ai: {
-        configured:
-          Boolean(
-            GEMINI_API_KEY
-          ),
-
-        ready:
-          state.geminiReady,
-
-        model:
-          GEMINI_MODEL,
-
-        entryCalls:
-          state.aiEntryCalls,
-
-        managementCalls:
-          state.aiManageCalls,
-
-        approvedEntries:
-          state.aiApprovedEntries,
-
-        rejectedEntries:
-          state.aiRejectedEntries,
-
-        holdDecisions:
-          state.aiHoldDecisions,
-
-        closeDecisions:
-          state.aiCloseDecisions,
-
-        lastError:
-          state.lastAiError
-      },
-
-      engine: {
-        instruments:
-          INSTRUMENTS,
-
-        strategy:
-          STRATEGY,
-
-        rawSignals:
-          state.rawSignals,
-
-        executedSignals:
-          state.executedSignals,
-
-        skippedSignals:
-          state.skippedSignals,
-
-        protectionRejects:
-          state.protectionRejects,
-
-        portfolioRiskRejects:
-          state.portfolioRiskRejects,
-
-        signalScans:
-          state.totalSignalScans,
-
-        quotePolls:
-          state.totalQuotePolls,
-
-        breakEvenMoves:
-          state.breakEvenMoves
-      }
-    });
+  (req, res) => {
+    res.json(
+      buildStatus()
+    );
   }
 );
 
 // ============================================================
-// TEST GEMINI ENDPOINT
+// OPEN TRADES API
 // ============================================================
 
 app.get(
-  '/api/ai/test',
-  async (
-    req,
-    res
-  ) => {
-    if (
-      !GEMINI_API_KEY
-    ) {
-      return res
-        .status(400)
-        .json({
-          ok:
-            false,
-
-          error:
-            'GEMINI_API_KEY missing'
-        });
-    }
-
-    const result =
-      await geminiJson(
-        `
-Return JSON only:
-{
-"ok":true,
-"message":"LOMY AI READY"
-}
-`,
-        {
-          test:
-            true,
-
-          version:
-            VERSION
-        }
-      );
-
-    if (
-      !result
-    ) {
-      return res
-        .status(500)
-        .json({
-          ok:
-            false,
-
-          error:
-            state.lastAiError
-        });
-    }
-
+  '/api/trades',
+  (req, res) => {
     res.json({
-      ok:
-        true,
-
-      model:
-        GEMINI_MODEL,
-
-      response:
-        result
+      openTrades:
+        getOpenTradesView()
     });
   }
 );
+
+// ============================================================
+// RECENT CLOSED TRADES
+// ============================================================
+
+app.get(
+  '/api/history',
+  async (req, res) => {
+    try {
+      if (!state.mongoReady) {
+        return res.json({
+          trades: []
+        });
+      }
+
+      const trades =
+        await Trade.find({
+          accountKey:
+            PAPER.accountKey,
+
+          status:
+            'CLOSED'
+        })
+          .sort({
+            closedAt: -1
+          })
+          .limit(100)
+          .lean();
+
+      res.json({
+        trades
+      });
+    } catch (error) {
+      res.status(500).json({
+        ok: false,
+        error:
+          safeError(error)
+      });
+    }
+  }
+);
+
+// ============================================================
+// MANUAL CLOSE ONE
+// ============================================================
+
+app.post(
+  '/api/close/:symbol',
+  async (req, res) => {
+    try {
+      const symbol =
+        String(
+          req.params.symbol ||
+          ''
+        )
+          .trim()
+          .toUpperCase();
+
+      if (
+        !INSTRUMENTS.includes(
+          symbol
+        )
+      ) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            reason:
+              'INVALID_SYMBOL'
+          });
+      }
+
+      const result =
+        await manualCloseSymbol(
+          symbol,
+          'DASHBOARD_MANUAL_CLOSE'
+        );
+
+      res.json(
+        result
+      );
+    } catch (error) {
+      res.status(500).json({
+        ok: false,
+        error:
+          safeError(error)
+      });
+    }
+  }
+);
+
+// ============================================================
+// MANUAL CLOSE ALL
+// ============================================================
+
+app.post(
+  '/api/close-all',
+  async (req, res) => {
+    try {
+      const results =
+        await manualCloseAll();
+
+      res.json({
+        ok: true,
+        results
+      });
+    } catch (error) {
+      res.status(500).json({
+        ok: false,
+        error:
+          safeError(error)
+      });
+    }
+  }
+);
+
+// ============================================================
+// DASHBOARD
+// ============================================================
+
+app.get(
+  '/',
+  (req, res) => {
+    res
+      .status(200)
+      .type('html')
+      .send(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta
+  name="viewport"
+  content="width=device-width, initial-scale=1.0"
+>
+<title>${VERSION}</title>
+
+<style>
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: #070b12;
+  color: #eef4ff;
+  font-family:
+    Arial,
+    Helvetica,
+    sans-serif;
+}
+
+.container {
+  width: min(1500px, 96%);
+  margin: 0 auto;
+  padding: 24px 0 40px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 22px;
+}
+
+.title {
+  font-size: 28px;
+  font-weight: 800;
+}
+
+.subtitle {
+  color: #93a4bd;
+  margin-top: 7px;
+  font-size: 14px;
+}
+
+.paper-badge {
+  background: #172036;
+  border: 1px solid #35528a;
+  color: #8ab4ff;
+  padding: 10px 16px;
+  border-radius: 999px;
+  font-weight: 800;
+}
+
+.warning {
+  background: #20170b;
+  border: 1px solid #65491f;
+  color: #ffc966;
+  border-radius: 12px;
+  padding: 13px 16px;
+  margin-bottom: 20px;
+  line-height: 1.5;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns:
+    repeat(
+      auto-fit,
+      minmax(170px, 1fr)
+    );
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.card {
+  background: #0d1421;
+  border: 1px solid #1b2a40;
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.card .label {
+  color: #8190a8;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .7px;
+  margin-bottom: 9px;
+}
+
+.card .value {
+  font-size: 23px;
+  font-weight: 800;
+}
+
+.good {
+  color: #55d98b;
+}
+
+.bad {
+  color: #ff7373;
+}
+
+.neutral {
+  color: #8ab4ff;
+}
+
+.section {
+  background: #0d1421;
+  border: 1px solid #1b2a40;
+  border-radius: 14px;
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 15px;
+  padding: 16px 18px;
+  border-bottom: 1px solid #1b2a40;
+  flex-wrap: wrap;
+}
+
+.section-title {
+  font-size: 18px;
+  font-weight: 800;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  padding: 9px 13px;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.close-btn {
+  background: #55242b;
+  color: #ffdce0;
+}
+
+.close-all-btn {
+  background: #842f3a;
+  color: white;
+}
+
+.refresh-btn {
+  background: #17335b;
+  color: #cfe2ff;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 1200px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 12px 13px;
+  border-bottom: 1px solid #172338;
+  font-size: 13px;
+}
+
+th {
+  color: #8fa0b9;
+  background: #0a101b;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.buy {
+  color: #5fe49b;
+  font-weight: 800;
+}
+
+.sell {
+  color: #ff7b7b;
+  font-weight: 800;
+}
+
+.be {
+  color: #ffd369;
+  font-weight: 800;
+}
+
+.empty {
+  color: #718198;
+  padding: 28px 18px;
+  text-align: center;
+}
+
+.footer {
+  color: #718198;
+  font-size: 12px;
+  line-height: 1.7;
+  margin-top: 20px;
+  text-align: center;
+}
+
+.small {
+  color: #8190a8;
+  font-size: 12px;
+}
+
+#connection {
+  font-size: 12px;
+  color: #8190a8;
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+  <div class="header">
+    <div>
+      <div class="title">
+        LOMY FOREX V1.3 AI TRADER
+      </div>
+
+      <div class="subtitle">
+        Gemini Technical Intelligence + Hard Risk Manager
+      </div>
+    </div>
+
+    <div class="paper-badge">
+      🧪 PAPER ONLY
+    </div>
+  </div>
+
+  <div class="warning">
+    LIVE trading is disabled.
+    Gemini may decide BUY / SELL / NO_TRADE and may
+    recommend closing an existing PAPER position.
+    Position sizing, portfolio risk, Stop Loss validation,
+    Take Profit 1:2 and Break Even protection are controlled
+    mechanically by the bot and cannot be overridden by AI.
+  </div>
+
+  <div class="grid">
+
+    <div class="card">
+      <div class="label">
+        Balance
+      </div>
+      <div
+        class="value"
+        id="balance"
+      >
+        --
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">
+        Equity
+      </div>
+      <div
+        class="value"
+        id="equity"
+      >
+        --
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">
+        Floating PnL
+      </div>
+      <div
+        class="value"
+        id="floating"
+      >
+        --
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">
+        Realized PnL
+      </div>
+      <div
+        class="value"
+        id="realized"
+      >
+        --
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">
+        Open Trades
+      </div>
+      <div
+        class="value neutral"
+        id="openTrades"
+      >
+        --
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">
+        Portfolio Risk
+      </div>
+      <div
+        class="value"
+        id="portfolioRisk"
+      >
+        --
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">
+        R:R
+      </div>
+      <div
+        class="value neutral"
+        id="rr"
+      >
+        1:2
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">
+        BE Trigger
+      </div>
+      <div
+        class="value neutral"
+        id="beTrigger"
+      >
+        +0.60R
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">
+        Market
+      </div>
+      <div
+        class="value"
+        id="market"
+      >
+        --
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">
+        Gemini
+      </div>
+      <div
+        class="value"
+        id="gemini"
+      >
+        --
+      </div>
+    </div>
+
+  </div>
+
+  <div class="section">
+
+    <div class="section-header">
+
+      <div>
+        <div class="section-title">
+          Open PAPER Trades
+        </div>
+
+        <div
+          class="small"
+          id="connection"
+        >
+          Connecting...
+        </div>
+      </div>
+
+      <div>
+        <button
+          class="refresh-btn"
+          onclick="refreshAll()"
+        >
+          Refresh
+        </button>
+
+        <button
+          class="close-all-btn"
+          onclick="closeAllTrades()"
+        >
+          Close All
+        </button>
+      </div>
+
+    </div>
+
+    <div class="table-wrap">
+
+      <table>
+
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Entry</th>
+            <th>Mark</th>
+            <th>SL</th>
+            <th>TP</th>
+            <th>R</th>
+            <th>PnL</th>
+            <th>Risk</th>
+            <th>BE</th>
+            <th>MFE</th>
+            <th>MAE</th>
+            <th>AI</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+
+        <tbody id="tradeRows">
+
+          <tr>
+            <td
+              colspan="14"
+              class="empty"
+            >
+              Loading...
+            </td>
+          </tr>
+
+        </tbody>
+
+      </table>
+
+    </div>
+
+  </div>
+
+  <div class="footer">
+    ${VERSION}
+    • PAPER ONLY
+    • 15m closed candles
+    • Gemini commander
+    • Technical SL selected by AI and validated by Risk Manager
+    • TP = exactly 2R
+    • Break Even = +0.60R
+    • Maximum initial capital-risk safety cap = ${PAPER.maxCapitalRiskPct}%
+    • Portfolio risk cap = ${PAPER.portfolioRiskCapPct}%
+    <br>
+    The 1% value is a maximum loss safety budget for position sizing.
+    It is NOT a fixed profit/loss target.
+  </div>
+
+</div>
+
+<script>
+
+function money(v) {
+  const x =
+    Number(v || 0);
+
+  return (
+    (x >= 0 ? '$' : '-$') +
+    Math.abs(x).toFixed(2)
+  );
+}
+
+function num(v, digits = 5) {
+  const x =
+    Number(v);
+
+  if (!Number.isFinite(x)) {
+    return '--';
+  }
+
+  return x.toFixed(digits);
+}
+
+function price(v, symbol) {
+  const x =
+    Number(v);
+
+  if (!Number.isFinite(x)) {
+    return '--';
+  }
+
+  if (
+    symbol === 'XAUUSD'
+  ) {
+    return x.toFixed(2);
+  }
+
+  if (
+    String(symbol)
+      .endsWith('JPY')
+  ) {
+    return x.toFixed(3);
+  }
+
+  return x.toFixed(5);
+}
+
+function pnlClass(v) {
+  const x =
+    Number(v || 0);
+
+  if (x > 0) {
+    return 'good';
+  }
+
+  if (x < 0) {
+    return 'bad';
+  }
+
+  return 'neutral';
+}
+
+async function getJson(url, options) {
+  const response =
+    await fetch(
+      url,
+      options
+    );
+
+  const data =
+    await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      data.error ||
+      data.reason ||
+      'Request failed'
+    );
+  }
+
+  return data;
+}
+
+async function loadStatus() {
+  const s =
+    await getJson(
+      '/api/status'
+    );
+
+  document.getElementById(
+    'balance'
+  ).textContent =
+    money(s.balance);
+
+  document.getElementById(
+    'equity'
+  ).textContent =
+    money(s.equity);
+
+  const floating =
+    document.getElementById(
+      'floating'
+    );
+
+  floating.textContent =
+    money(
+      s.floatingPnl
+    );
+
+  floating.className =
+    'value ' +
+    pnlClass(
+      s.floatingPnl
+    );
+
+  const realized =
+    document.getElementById(
+      'realized'
+    );
+
+  realized.textContent =
+    money(
+      s.realizedPnl
+    );
+
+  realized.className =
+    'value ' +
+    pnlClass(
+      s.realizedPnl
+    );
+
+  document.getElementById(
+    'openTrades'
+  ).textContent =
+    String(
+      s.openTrades
+    );
+
+  document.getElementById(
+    'portfolioRisk'
+  ).textContent =
+    money(
+      s.openRiskUsd
+    ) +
+    ' / ' +
+    money(
+      s.portfolioRiskCapUsd
+    );
+
+  document.getElementById(
+    'rr'
+  ).textContent =
+    s.riskReward;
+
+  document.getElementById(
+    'beTrigger'
+  ).textContent =
+    '+' +
+    Number(
+      s.breakEvenTriggerR
+    ).toFixed(2) +
+    'R';
+
+  const market =
+    document.getElementById(
+      'market'
+    );
+
+  market.textContent =
+    s.marketReady
+      ? (
+          s.instrumentsReady +
+          '/' +
+          s.instruments
+        )
+      : 'NOT READY';
+
+  market.className =
+    'value ' +
+    (
+      s.marketReady
+        ? 'good'
+        : 'bad'
+    );
+
+  const gemini =
+    document.getElementById(
+      'gemini'
+    );
+
+  gemini.textContent =
+    s.geminiConfigured
+      ? 'READY'
+      : 'OFF';
+
+  gemini.className =
+    'value ' +
+    (
+      s.geminiConfigured
+        ? 'good'
+        : 'bad'
+    );
+}
+
+async function loadTrades() {
+  const data =
+    await getJson(
+      '/api/trades'
+    );
+
+  const tbody =
+    document.getElementById(
+      'tradeRows'
+    );
+
+  const trades =
+    data.openTrades || [];
+
+  if (!trades.length) {
+    tbody.innerHTML =
+      '<tr>' +
+      '<td colspan="14" class="empty">' +
+      'No open PAPER trades' +
+      '</td>' +
+      '</tr>';
+
+    return;
+  }
+
+  tbody.innerHTML =
+    trades
+      .map(t => {
+
+        const sideClass =
+          t.direction === 'BUY'
+            ? 'buy'
+            : 'sell';
+
+        const be =
+          t.breakEvenActive
+            ? '<span class="be">ACTIVE</span>'
+            : 'WAIT';
+
+        return (
+          '<tr>' +
+
+          '<td><strong>' +
+          t.symbol +
+          '</strong></td>' +
+
+          '<td class="' +
+          sideClass +
+          '">' +
+          t.direction +
+          '</td>' +
+
+          '<td>' +
+          price(
+            t.entryPrice,
+            t.symbol
+          ) +
+          '</td>' +
+
+          '<td>' +
+          price(
+            t.markPrice,
+            t.symbol
+          ) +
+          '</td>' +
+
+          '<td>' +
+          price(
+            t.stopLoss,
+            t.symbol
+          ) +
+          '</td>' +
+
+          '<td>' +
+          price(
+            t.takeProfit,
+            t.symbol
+          ) +
+          '</td>' +
+
+          '<td class="' +
+          pnlClass(
+            t.currentR
+          ) +
+          '">' +
+          Number(
+            t.currentR || 0
+          ).toFixed(2) +
+          'R</td>' +
+
+          '<td class="' +
+          pnlClass(
+            t.floatingPnl
+          ) +
+          '">' +
+          money(
+            t.floatingPnl
+          ) +
+          '</td>' +
+
+          '<td>' +
+          money(
+            t.riskAmount
+          ) +
+          '</td>' +
+
+          '<td>' +
+          be +
+          '</td>' +
+
+          '<td class="good">' +
+          Number(
+            t.mfeR || 0
+          ).toFixed(2) +
+          'R</td>' +
+
+          '<td class="bad">' +
+          Number(
+            t.maeR || 0
+          ).toFixed(2) +
+          'R</td>' +
+
+          '<td>' +
+          Number(
+            t.aiConfidence || 0
+          ).toFixed(0) +
+          '%</td>' +
+
+          '<td>' +
+          '<button class="close-btn" ' +
+          'onclick="closeTrade(\\'' +
+          t.symbol +
+          '\\')">' +
+          'Close' +
+          '</button>' +
+          '</td>' +
+
+          '</tr>'
+        );
+      })
+      .join('');
+}
+
+async function refreshAll() {
+  const connection =
+    document.getElementById(
+      'connection'
+    );
+
+  try {
+    await Promise.all([
+      loadStatus(),
+      loadTrades()
+    ]);
+
+    connection.textContent =
+      'Connected • ' +
+      new Date()
+        .toLocaleTimeString();
+
+    connection.className =
+      'good';
+  } catch (error) {
+    connection.textContent =
+      'Connection error: ' +
+      error.message;
+
+    connection.className =
+      'bad';
+  }
+}
+
+async function closeTrade(symbol) {
+  if (
+    !confirm(
+      'Close ' +
+      symbol +
+      ' PAPER trade?'
+    )
+  ) {
+    return;
+  }
+
+  try {
+    const result =
+      await getJson(
+        '/api/close/' +
+        encodeURIComponent(
+          symbol
+        ),
+        {
+          method:
+            'POST',
+
+          headers: {
+            'Content-Type':
+              'application/json'
+          }
+        }
+      );
+
+    if (!result.ok) {
+      alert(
+        result.reason ||
+        'Could not close trade'
+      );
+    }
+
+    await refreshAll();
+  } catch (error) {
+    alert(
+      error.message
+    );
+  }
+}
+
+async function closeAllTrades() {
+  if (
+    !confirm(
+      'Close ALL open PAPER trades?'
+    )
+  ) {
+    return;
+  }
+
+  try {
+    await getJson(
+      '/api/close-all',
+      {
+        method:
+          'POST',
+
+        headers: {
+          'Content-Type':
+            'application/json'
+        }
+      }
+    );
+
+    await refreshAll();
+  } catch (error) {
+    alert(
+      error.message
+    );
+  }
+}
+
+refreshAll();
+
+setInterval(
+  refreshAll,
+  5000
+);
+
+</script>
+
+</body>
+</html>
+      `);
+  }
+);
+
+// ============================================================
+// TELEGRAM COMMANDS
+// ============================================================
+
+function setupTelegramCommands() {
+  if (!bot) {
+    return;
+  }
+
+  bot.command(
+    'start',
+    async ctx => {
+      await ctx.reply(
+        `${VERSION}\n` +
+        `PAPER ONLY\n\n` +
+        `/status - Account status\n` +
+        `/trades - Open trades\n` +
+        `/closeall - Close all PAPER trades`
+      );
+    }
+  );
+
+  bot.command(
+    'status',
+    async ctx => {
+      const s =
+        buildStatus();
+
+      await ctx.reply(
+        `📊 ${VERSION}\n\n` +
+
+        `Mode: PAPER ONLY\n` +
+        `Balance: ${fmtMoney(s.balance)}\n` +
+        `Equity: ${fmtMoney(s.equity)}\n` +
+        `Floating: ${fmtMoney(s.floatingPnl)}\n` +
+        `Realized: ${fmtMoney(s.realizedPnl)}\n\n` +
+
+        `Open trades: ${s.openTrades}\n` +
+        `Open risk: ${fmtMoney(s.openRiskUsd)}\n` +
+        `Portfolio cap: ${fmtMoney(s.portfolioRiskCapUsd)} (${PAPER.portfolioRiskCapPct}%)\n\n` +
+
+        `R:R: ${s.riskReward}\n` +
+        `BE: +${RULES.breakEvenTriggerR.toFixed(2)}R\n` +
+        `Max capital-risk safety cap/trade: ${PAPER.maxCapitalRiskPct}%\n\n` +
+
+        `Market: ${s.instrumentsReady}/${s.instruments}\n` +
+        `Gemini: ${s.geminiConfigured ? 'READY' : 'OFF'}`
+      );
+    }
+  );
+
+  bot.command(
+    'trades',
+    async ctx => {
+      const trades =
+        getOpenTradesView();
+
+      if (!trades.length) {
+        await ctx.reply(
+          'No open PAPER trades.'
+        );
+
+        return;
+      }
+
+      const lines =
+        trades.map(t => {
+          return (
+            `${t.symbol} ${t.direction}\n` +
+            `Entry ${fmtPrice(t.entryPrice, t.symbol)} | ` +
+            `SL ${fmtPrice(t.stopLoss, t.symbol)} | ` +
+            `TP ${fmtPrice(t.takeProfit, t.symbol)}\n` +
+            `Now ${n(t.currentR, 0).toFixed(2)}R | ` +
+            `PnL ${fmtMoney(t.floatingPnl)} | ` +
+            `BE ${t.breakEvenActive ? 'ACTIVE' : 'WAIT'}`
+          );
+        });
+
+      await ctx.reply(
+        `📈 OPEN PAPER TRADES\n\n` +
+        lines.join(
+          '\n\n'
+        )
+      );
+    }
+  );
+
+  bot.command(
+    'closeall',
+    async ctx => {
+      if (
+        !state.openTrades.size
+      ) {
+        await ctx.reply(
+          'No open PAPER trades.'
+        );
+
+        return;
+      }
+
+      await ctx.reply(
+        'Closing all open PAPER trades...'
+      );
+
+      const results =
+        await manualCloseAll();
+
+      const closed =
+        results.filter(
+          x => x.ok
+        ).length;
+
+      await ctx.reply(
+        `Closed: ${closed}/${results.length}`
+      );
+    }
+  );
+}
+
+// ============================================================
+// LOAD OPEN TRADES AFTER RESTART
+// ============================================================
+
+async function restoreOpenTrades() {
+  if (!state.mongoReady) {
+    console.log(
+      'ℹ️ Mongo unavailable — no persisted trades to restore'
+    );
+
+    return;
+  }
+
+  try {
+    const trades =
+      await Trade.find({
+        accountKey:
+          PAPER.accountKey,
+
+        status:
+          'OPEN'
+      }).lean();
+
+    for (const trade of trades) {
+      if (
+        !INSTRUMENTS.includes(
+          trade.symbol
+        )
+      ) {
+        continue;
+      }
+
+      state.openTrades.set(
+        trade.symbol,
+        trade
+      );
+    }
+
+    console.log(
+      `♻️ Restored ${state.openTrades.size} open PAPER trades`
+    );
+
+    if (
+      state.openTrades.size
+    ) {
+      await sendTelegram(
+        `♻️ ${VERSION}\n` +
+        `Restored ${state.openTrades.size} open PAPER trade(s) after restart.\n` +
+        `Mechanical SL/TP/BE protection resumed.`
+      );
+    }
+  } catch (error) {
+    console.error(
+      'Restore trades:',
+      safeError(error)
+    );
+  }
+}
+
+// ============================================================
+// START EXPRESS SERVER
+// ============================================================
+
+let httpServer = null;
+
+async function startWebServer() {
+  return new Promise(
+    (resolve, reject) => {
+      httpServer =
+        app.listen(
+          PORT,
+          () => {
+            console.log(
+              `🌐 Dashboard listening on port ${PORT}`
+            );
+
+            resolve();
+          }
+        );
+
+      httpServer.on(
+        'error',
+        reject
+      );
+    }
+  );
+}
+
+// ============================================================
+// START TELEGRAM
+// ============================================================
+
+async function startTelegram() {
+  if (!bot) {
+    console.log(
+      'ℹ️ Telegram not configured'
+    );
+
+    return;
+  }
+
+  setupTelegramCommands();
+
+  try {
+    await bot.launch();
+
+    console.log(
+      '✅ Telegram bot started'
+    );
+  } catch (error) {
+    console.error(
+      'Telegram start:',
+      safeError(error)
+    );
+  }
+}
+
+// ============================================================
+// STARTUP BANNER
+// ============================================================
+
+function printStartupBanner() {
+  console.log('');
+  console.log(
+    '============================================================'
+  );
+  console.log(
+    `🚀 ${VERSION}`
+  );
+  console.log(
+    '🧪 PAPER ONLY — LIVE TRADING OFF'
+  );
+  console.log(
+    '============================================================'
+  );
+  console.log(
+    `Starting balance: ${fmtMoney(PAPER.startingBalance)}`
+  );
+  console.log(
+    `Max capital-risk safety cap/trade: ${PAPER.maxCapitalRiskPct}%`
+  );
+  console.log(
+    `R:R: 1:${RULES.riskReward}`
+  );
+  console.log(
+    `Portfolio risk cap: ${PAPER.portfolioRiskCapPct}%`
+  );
+  console.log(
+    `Break Even: +${RULES.breakEvenTriggerR.toFixed(2)}R`
+  );
+  console.log(
+    `Timeframe: ${TIMEFRAME} closed candles`
+  );
+  console.log(
+    `Instruments: ${INSTRUMENTS.length}`
+  );
+  console.log(
+    `Gemini model: ${GEMINI_MODEL}`
+  );
+  console.log(
+    `Gemini key: ${GEMINI_API_KEY ? 'CONFIGURED' : 'MISSING'}`
+  );
+  console.log(
+    `Mongo: ${MONGO_URI ? 'CONFIGURED' : 'OPTIONAL/OFF'}`
+  );
+  console.log(
+    `Telegram: ${bot ? 'CONFIGURED' : 'OPTIONAL/OFF'}`
+  );
+  console.log(
+    '============================================================'
+  );
+  console.log(
+    'IMPORTANT: 1% is the maximum account-loss safety budget.'
+  );
+  console.log(
+    'TP is NOT +2% account profit. TP = 2 × price-risk distance.'
+  );
+  console.log(
+    '============================================================'
+  );
+  console.log('');
+}
+
+// ============================================================
+// CONFIG VALIDATION
+// ============================================================
+
+function validateStartupConfig() {
+  if (
+    MODE !== 'PAPER'
+  ) {
+    throw new Error(
+      'Security lock: MODE must be PAPER'
+    );
+  }
+
+  if (
+    LIVE_TRADING !== false
+  ) {
+    throw new Error(
+      'Security lock: LIVE_TRADING must be false'
+    );
+  }
+
+  if (
+    RULES.riskReward !== 2
+  ) {
+    throw new Error(
+      'Risk lock: R:R must remain 1:2'
+    );
+  }
+
+  if (
+    PAPER.maxCapitalRiskPct > 1
+  ) {
+    throw new Error(
+      'Risk lock: max capital risk per trade cannot exceed 1%'
+    );
+  }
+
+  if (
+    PAPER.portfolioRiskCapPct > 4
+  ) {
+    throw new Error(
+      'Risk lock: portfolio risk cap cannot exceed 4%'
+    );
+  }
+
+  if (
+    Math.abs(
+      RULES.breakEvenTriggerR -
+      0.60
+    ) > 1e-9
+  ) {
+    throw new Error(
+      'Risk lock: Break Even trigger must remain +0.60R'
+    );
+  }
+
+  if (
+    !Array.isArray(
+      INSTRUMENTS
+    ) ||
+    !INSTRUMENTS.length
+  ) {
+    throw new Error(
+      'No instruments configured'
+    );
+  }
+
+  if (
+    !GEMINI_API_KEY
+  ) {
+    console.warn(
+      '⚠️ GEMINI_API_KEY missing.'
+    );
+
+    console.warn(
+      '⚠️ Fail-closed mode: NO new trades will be opened.'
+    );
+  }
+}
 
 // ============================================================
 // BOOT
 // ============================================================
 
 async function boot() {
-  console.log(
-    '================================================'
-  );
+  try {
+    printStartupBanner();
 
-  console.log(
-    `🚀 ${VERSION}`
-  );
+    validateStartupConfig();
 
-  console.log(
-    '🧪 PAPER ONLY — LIVE TRADING OFF'
-  );
+    // Start web server early so Render health checks
+    // can reach the application during market initialization.
+    await startWebServer();
 
-  console.log(
-    `💰 Starting Balance: ${fmtMoney(PAPER.startingBalance)}`
-  );
-
-  console.log(
-    `🛡️ Risk / Trade: ${PAPER.riskPctPerTrade}%`
-  );
-
-  console.log(
-    `🎯 R:R = 1:${STRATEGY.riskReward.toFixed(0)}`
-  );
-
-  console.log(
-    `💵 Theoretical: -1% SL / +2% TP`
-  );
-
-  console.log(
-    `🛡️ Portfolio Risk Cap: ${PAPER.portfolioRiskCapPct}%`
-  );
-
-  console.log(
-    `🛡️ Break Even: +${STRATEGY.breakEvenTriggerR.toFixed(2)}R`
-  );
-
-  console.log(
-    `⏱ Signal timeframe: ${TIMEFRAME} CLOSED candles`
-  );
-
-  console.log(
-    `📡 Instruments: ${INSTRUMENTS.length}`
-  );
-
-  console.log(
-    `🧠 Gemini Model: ${GEMINI_MODEL}`
-  );
-
-  console.log(
-    `🧠 Gemini Key: ${GEMINI_API_KEY ? 'CONFIGURED' : 'MISSING'}`
-  );
-
-  console.log(
-    '🔒 AI cannot modify Risk Manager, API keys, LIVE mode or code'
-  );
-
-  console.log(
-    '================================================'
-  );
-
-  app.listen(
-    PORT,
-    () => {
-      console.log(
-        `🌐 Server running on port ${PORT}`
+    // Database is optional for runtime.
+    // If unavailable, bot continues in memory.
+    try {
+      await connectMongo();
+    } catch (error) {
+      console.error(
+        'Mongo boot:',
+        safeError(error)
       );
     }
-  );
 
-  await initMongo();
+    await initializeAccount();
 
-  await journal(
-    'BOOT',
-    {
-      message:
-        'LOMY V1.3 boot',
+    await restoreOpenTrades();
 
-      data: {
-        startingBalance:
-          PAPER.startingBalance,
+    await startTelegram();
 
-        riskPctPerTrade:
-          PAPER.riskPctPerTrade,
+    try {
+      await initializeMarket();
+    } catch (error) {
+      console.error(
+        'Initial market load:',
+        safeError(error)
+      );
 
-        riskReward:
-          STRATEGY.riskReward,
+      state.marketReady = false;
 
-        portfolioRiskCapPct:
-          PAPER.portfolioRiskCapPct,
-
-        breakEvenTriggerR:
-          STRATEGY.breakEvenTriggerR,
-
-        geminiModel:
-          GEMINI_MODEL,
-
-        geminiConfigured:
-          Boolean(
-            GEMINI_API_KEY
-          ),
-
-        timeframe:
-          TIMEFRAME,
-
-        instruments:
-          INSTRUMENTS.length
-      }
+      // Do not kill the server.
+      // Scanner will keep retrying initialization.
     }
-  );
 
-  await initTelegram();
+    startRuntimeLoops();
 
-  try {
-    await initializeMarket();
-  } catch (
-    error
-  ) {
-    state.initializing =
-      false;
+    // Immediate protection check for restored trades.
+    if (
+      state.openTrades.size
+    ) {
+      quoteLoop().catch(
+        error => {
+          console.error(
+            'Initial quote protection:',
+            safeError(error)
+          );
+        }
+      );
+    }
 
-    state.marketReady =
-      false;
+    // Immediate scan refresh.
+    scanLoop().catch(
+      error => {
+        console.error(
+          'Initial scan:',
+          safeError(error)
+        );
+      }
+    );
 
-    state.lastMarketError =
-      safeError(error);
+    console.log('');
+    console.log(
+      '============================================================'
+    );
+    console.log(
+      '✅ LOMY FOREX V1.3 IS RUNNING'
+    );
+    console.log(
+      '🧪 PAPER ONLY'
+    );
+    console.log(
+      '🤖 Gemini = Trading Commander'
+    );
+    console.log(
+      '🛡️ Risk Manager = Non-bypassable'
+    );
+    console.log(
+      '🎯 TP = 2R'
+    );
+    console.log(
+      '🔒 Max initial account-risk safety cap = 1%'
+    );
+    console.log(
+      '🛡️ Portfolio risk cap = 4%'
+    );
+    console.log(
+      '⚡ Break Even = +0.60R'
+    );
+    console.log(
+      '============================================================'
+    );
+    console.log('');
 
     await journal(
-      'ERROR',
+      'SYSTEM_START',
       {
         message:
-          'Market initialization failed',
+          `${VERSION} started`,
 
         data: {
-          error:
-            state.lastMarketError
+          mode:
+            MODE,
+
+          liveTrading:
+            LIVE_TRADING,
+
+          startingBalance:
+            PAPER.startingBalance,
+
+          riskReward:
+            RULES.riskReward,
+
+          maxCapitalRiskPct:
+            PAPER.maxCapitalRiskPct,
+
+          portfolioRiskCapPct:
+            PAPER.portfolioRiskCapPct,
+
+          breakEvenTriggerR:
+            RULES.breakEvenTriggerR,
+
+          timeframe:
+            TIMEFRAME,
+
+          instruments:
+            INSTRUMENTS.length,
+
+          geminiModel:
+            GEMINI_MODEL
         }
       }
     );
 
-    console.error(
-      '❌ Market initialization:',
-      state.lastMarketError
+    await sendTelegram(
+      `🚀 ${VERSION} STARTED\n\n` +
+      `🧪 PAPER ONLY\n` +
+      `Balance: ${fmtMoney(accountBalance())}\n` +
+      `R:R: 1:${RULES.riskReward}\n` +
+      `Max capital-risk safety cap: ${PAPER.maxCapitalRiskPct}%\n` +
+      `Portfolio cap: ${PAPER.portfolioRiskCapPct}%\n` +
+      `BE: +${RULES.breakEvenTriggerR.toFixed(2)}R\n` +
+      `Timeframe: ${TIMEFRAME}\n` +
+      `Instruments: ${INSTRUMENTS.length}\n` +
+      `Gemini: ${GEMINI_API_KEY ? 'READY' : 'FAIL-CLOSED'}`
     );
+  } catch (error) {
+    console.error(
+      '❌ FATAL BOOT ERROR:',
+      safeError(error)
+    );
+
+    try {
+      await sendTelegram(
+        `❌ ${VERSION} BOOT ERROR\n\n` +
+        safeError(error)
+      );
+    } catch (_) {}
+
+    process.exitCode = 1;
   }
-
-  setInterval(
-    signalScanLoop,
-    SCAN_TIMER_MS
-  );
-
-  setInterval(
-    manageOpenTrades,
-    QUOTE_POLL_MS
-  );
-
-  setInterval(
-    manageTradesWithAI,
-    AI_MANAGE_INTERVAL_MS
-  );
-
-  console.log(
-    '✅ LOMY Forex V1.3 loops started'
-  );
 }
 
 // ============================================================
-// SHUTDOWN
+// GRACEFUL SHUTDOWN
 // ============================================================
 
-let shuttingDown =
-  false;
+let shuttingDown = false;
 
-async function shutdown(
+async function gracefulShutdown(
   signal
 ) {
-  if (
-    shuttingDown
-  ) {
+  if (shuttingDown) {
     return;
   }
 
-  shuttingDown =
-    true;
+  shuttingDown = true;
 
   console.log(
-    `\n🛑 ${signal} received — shutting down`
+    `\n🛑 ${signal} received`
+  );
+
+  console.log(
+    '🛑 Graceful shutdown starting...'
   );
 
   try {
     await journal(
-      'SHUTDOWN',
+      'SYSTEM_STOP',
       {
         message:
-          signal,
+          `${VERSION} stopped by ${signal}`,
 
         data: {
-          balance:
-            account?.balance,
-
           openTrades:
-            state.openTrades.size
+            state.openTrades.size,
+
+          balance:
+            accountBalance()
         }
       }
     );
-  } catch {}
+  } catch (_) {}
 
   try {
-    if (
-      bot
-    ) {
+    await sendTelegram(
+      `🛑 ${VERSION} STOPPING\n` +
+      `Signal: ${signal}\n` +
+      `Open PAPER trades persisted: ${state.openTrades.size}`
+    );
+  } catch (_) {}
+
+  try {
+    if (bot) {
       bot.stop(
         signal
       );
     }
-  } catch {}
+  } catch (_) {}
 
   try {
-    await mongoose.connection.close();
-  } catch {}
+    if (httpServer) {
+      await new Promise(
+        resolve => {
+          httpServer.close(
+            () => resolve()
+          );
 
-  process.exit(
-    0
+          setTimeout(
+            resolve,
+            3000
+          );
+        }
+      );
+    }
+  } catch (_) {}
+
+  try {
+    if (
+      mongoose.connection
+        .readyState !== 0
+    ) {
+      await mongoose.disconnect();
+    }
+  } catch (_) {}
+
+  console.log(
+    '✅ Shutdown complete'
   );
+
+  process.exit(0);
 }
 
-process.once(
+// ============================================================
+// PROCESS ERROR HANDLERS
+// ============================================================
+
+process.on(
   'SIGINT',
-  () =>
-    shutdown(
+  () => {
+    gracefulShutdown(
       'SIGINT'
-    )
+    );
+  }
 );
 
-process.once(
+process.on(
   'SIGTERM',
-  () =>
-    shutdown(
+  () => {
+    gracefulShutdown(
       'SIGTERM'
-    )
+    );
+  }
 );
 
 process.on(
   'unhandledRejection',
-  error => {
+  reason => {
     console.error(
-      'Unhandled rejection:',
-      safeError(error)
-    );
-
-    journal(
-      'ERROR',
-      {
-        message:
-          'unhandledRejection',
-
-        data: {
-          error:
-            safeError(error)
-        }
-      }
-    ).catch(
-      () => {}
+      '⚠️ Unhandled rejection:',
+      reason instanceof Error
+        ? reason.stack ||
+          reason.message
+        : reason
     );
   }
 );
@@ -8428,40 +9472,49 @@ process.on(
   'uncaughtException',
   error => {
     console.error(
-      'Uncaught exception:',
+      '❌ Uncaught exception:',
+      error?.stack ||
       safeError(error)
-    );
-
-    journal(
-      'ERROR',
-      {
-        message:
-          'uncaughtException',
-
-        data: {
-          error:
-            safeError(error)
-        }
-      }
-    ).catch(
-      () => {}
     );
   }
 );
 
 // ============================================================
-// START
+// SECURITY ASSERTION
+//
+// There is intentionally NO broker order-placement code
+// anywhere in V1.3.
+//
+// The system can:
+// - analyze markets
+// - ask Gemini for BUY / SELL / NO_TRADE
+// - simulate PAPER trades
+// - manage PAPER positions
+// - close PAPER positions
+//
+// It cannot:
+// - place LIVE orders
+// - withdraw
+// - deposit
+// - transfer funds
+// - modify API permissions
 // ============================================================
 
-boot().catch(
-  error => {
-    console.error(
-      'FATAL:',
-      safeError(error)
-    );
-
-    process.exit(
-      1
-    );
-  }
+Object.freeze(
+  RULES
 );
+
+Object.freeze(
+  PAPER
+);
+
+// ============================================================
+// START APPLICATION
+// ============================================================
+
+boot();
+
+// ============================================================
+// END PART 4 / 4
+// END OF index.js
+// ============================================================
