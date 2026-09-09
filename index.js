@@ -34,7 +34,7 @@ const GEMINI_API_KEY =
   String(process.env.GEMINI_API_KEY || '').trim();
 
 const GEMINI_MODEL =
-  String(process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
+  String(process.env.GEMINI_MODEL || 'gemini-3.6-flash').trim();
 
 const TWELVE_BASE = 'https://api.twelvedata.com';
 
