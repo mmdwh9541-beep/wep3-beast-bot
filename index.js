@@ -4581,6 +4581,16 @@ state.telegramReady = true;
 console.log(
   '[TELEGRAM] ready'
 );
+    }
+catch (error) {
+  state.telegramReady = false;
+
+  console.error(
+    '[TELEGRAM]',
+    safeError(error)
+  );
+}
+}
 
 // =========================
 // GEMINI RATE CONTROL
