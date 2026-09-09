@@ -4564,16 +4564,26 @@ async function initTelegram() {
       }
     );
 
-    await telegramBot.launch();
+    await telegramBot.telegram.getMe();
+
+telegramBot.launch()
+  .catch(error => {
 
     state.telegramReady =
-      true;
+      false;
 
-    console.log(
-      '[TELEGRAM] ready'
+    console.error(
+      '[TELEGRAM POLLING]',
+      safeError(error)
     );
+  });
 
-  }
+state.telegramReady =
+  true;
+
+console.log(
+  '[TELEGRAM] ready'
+);
 
   catch (error) {
 
