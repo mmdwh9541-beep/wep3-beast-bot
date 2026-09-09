@@ -4564,13 +4564,11 @@ async function initTelegram() {
       }
     );
 
-    await telegramBot.telegram.getMe();
+await telegramBot.telegram.getMe();
 
 telegramBot.launch()
   .catch(error => {
-
-    state.telegramReady =
-      false;
+    state.telegramReady = false;
 
     console.error(
       '[TELEGRAM POLLING]',
@@ -4578,24 +4576,11 @@ telegramBot.launch()
     );
   });
 
-state.telegramReady =
-  true;
+state.telegramReady = true;
 
 console.log(
   '[TELEGRAM] ready'
 );
-
-  catch (error) {
-
-    state.telegramReady =
-      false;
-
-    console.error(
-      '[TELEGRAM]',
-      safeError(error)
-    );
-  }
-}
 
 // =========================
 // GEMINI RATE CONTROL
