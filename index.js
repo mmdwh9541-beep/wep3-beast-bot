@@ -19,6 +19,7 @@ const TELEGRAM_CHAT_ID_ENV = String(process.env.TELEGRAM_CHAT_ID || '').trim();
 const TWELVE_DATA_API_KEY = String(process.env.TWELVE_DATA_API_KEY || '').trim();
 const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
+const TWELVE_BASE = 'https://api.twelvedata.com';
 
 // ── GEMINI FALLBACK CHAIN ───────────────────────────────────
 // الترتيب: الأعلى كوتا أولاً، ثم الأحدث جودة
