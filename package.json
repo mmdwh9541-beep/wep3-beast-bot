@@ -1,18 +1,12 @@
 {
-  "name": "lomy-forex-v1",
-  "version": "1.0.0",
-  "description": "LOMY Forex V1 - Ultra-Fast Scalp Engine V5.1 - Paper Trading",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "engines": {
-    "node": ">=20"
-  },
+  "name": "lomy-forex-bot",
+  "version": "2.0.0",
+  "main": "bot.js",
+  "scripts": { "start": "node bot.js" },
   "dependencies": {
-    "axios": "^1.11.0",
-    "express": "^5.1.0",
-    "mongoose": "^8.18.0",
-    "telegraf": "^4.16.3"
+    "axios": "^1.7.0",
+    "express": "^4.19.0",
+    "mongoose": "^8.5.0",
+    "telegraf": "^4.16.0"
   }
 }
