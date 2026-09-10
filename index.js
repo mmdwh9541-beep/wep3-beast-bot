@@ -1,3077 +1,1282 @@
 'use strict';
+const axios=require('axios');
+const express=require('express');
+const mongoose=require('mongoose');
+const {Telegraf}=require('telegraf');
 
-const axios = require('axios');
-const express = require('express');
-const mongoose = require('mongoose');
-const { Telegraf } = require('telegraf');
+const VERSION='LOMY FOREX V1.5.1 COMPACT BASIC-SAFE';
+const MODE='PAPER',LIVE_TRADING=false;
+const PORT=Number(process.env.PORT||10000);
+const TELEGRAM_BOT_TOKEN=String(process.env.TELEGRAM_BOT_TOKEN||'').trim();
+const TELEGRAM_CHAT_ID_ENV=String(process.env.TELEGRAM_CHAT_ID||'').trim();
+const TWELVE_DATA_API_KEY=String(process.env.TWELVE_DATA_API_KEY||'').trim();
+const MONGODB_URI=String(process.env.MONGODB_URI||'').trim();
+const GEMINI_API_KEY=String(process.env.GEMINI_API_KEY||'').trim();
+const GEMINI_MODEL=String(process.env.GEMINI_MODEL||'gemini-3.6-flash').trim();
+const TWELVE_BASE='https://api.twelvedata.com';
 
-// ============================================================
-// LOMY FOREX V1.5 — GEMINI COMMANDER PRO
-// PAPER ONLY
-// 50% partial close at +2R, then trail remaining 50%
-// ============================================================
+const TF_MS=15*60*1000;
+const CORE_MIN_HISTORY=60;
+const INITIAL_HISTORY=1100;
+const REFRESH_HISTORY=8;
 
-const VERSION = 'LOMY FOREX V1.5 GEMINI COMMANDER PRO';
-const MODE = 'PAPER';
-const LIVE_TRADING = false;
+const TWELVE_MIN_GAP_MS=10000;
+const TWELVE_DAILY_SOFT_CAP=620;
 
-// =========================
-// ENVIRONMENT
-// =========================
+const GEMINI_ENTRY_DAILY_CAP=15;
+const GEMINI_MANAGE_DAILY_CAP=3;
+const GEMINI_ENTRY_MIN_GAP_MS=75*60*1000;
+const GEMINI_CALL_GAP_MS=4000;
 
-const PORT = Number(process.env.PORT || 10000);
+const NEWS_REFRESH_MS=12*60*60*1000;
+const NEWS_BLOCK_MIN=30;
 
-const TELEGRAM_BOT_TOKEN =
-  String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
-
-const TWELVE_DATA_API_KEY =
-  String(process.env.TWELVE_DATA_API_KEY || '').trim();
-
-const MONGODB_URI =
-  String(process.env.MONGODB_URI || '').trim();
-
-const GEMINI_API_KEY =
-  String(process.env.GEMINI_API_KEY || '').trim();
-
-const GEMINI_MODEL =
-  String(process.env.GEMINI_MODEL || 'gemini-3.6-flash').trim();
-
-const TWELVE_BASE = 'https://api.twelvedata.com';
-
-// =========================
-// CORE SETTINGS
-// =========================
-
-const TIMEFRAME = '15m';
-const TIMEFRAME_MS = 15 * 60 * 1000;
-
-const HISTORY_LIMIT = 260;
-const CORE_MIN_HISTORY = 60;
-const EMA200_CONTEXT_HISTORY = 200;
-
-const OHLC_CONCURRENCY = 4;
-
-const QUOTE_POLL_MS = 60 * 1000;
-const SCAN_TIMER_MS = 60 * 1000;
-const AI_MANAGE_INTERVAL_MS = 60 * 1000;
-
-const GEMINI_MIN_CALL_GAP_MS = 850;
-
-const NEWS_REFRESH_MS =
-  4 * 60 * 60 * 1000;
-
-const JOURNAL_COLLECTION =
-  'lomyforexjournalv15';
-
-// =========================
-// INSTRUMENTS
-// =========================
-
-const INSTRUMENTS = [
-  'EURUSD',
-  'GBPUSD',
-  'USDJPY',
-  'USDCHF',
-  'AUDUSD',
-  'NZDUSD',
-  'USDCAD',
-
-  'EURGBP',
-  'EURJPY',
-  'EURCHF',
-  'EURAUD',
-  'EURNZD',
-  'EURCAD',
-
-  'GBPJPY',
-  'GBPCHF',
-  'GBPAUD',
-  'GBPNZD',
-  'GBPCAD',
-
-  'AUDJPY',
-  'AUDCHF',
-  'AUDNZD',
-  'AUDCAD',
-
-  'NZDJPY',
-  'NZDCHF',
-  'NZDCAD',
-
-  'CADJPY',
-  'CADCHF',
-  'CHFJPY',
-
-  'GBPSGD',
-  'EURSGD',
-
-  'XAUUSD'
+const ALL_INSTRUMENTS=[
+'EURUSD','GBPUSD','USDJPY','USDCHF','AUDUSD','NZDUSD','USDCAD',
+'EURGBP','EURJPY','EURCHF','EURAUD','EURNZD','EURCAD',
+'GBPJPY','GBPCHF','GBPAUD','GBPNZD','GBPCAD',
+'AUDJPY','AUDCHF','AUDNZD','AUDCAD',
+'NZDJPY','NZDCHF','NZDCAD',
+'CADJPY','CADCHF','CHFJPY',
+'GBPSGD','EURSGD','XAUUSD'
 ];
 
-// =========================
-// TRADING RULES
-// =========================
+const DEFAULT_ACTIVE=['EURUSD','GBPUSD','USDJPY','AUDUSD','USDCAD'];
 
-const RULES = Object.freeze({
+const ACTIVE_SYMBOLS=(()=>{
+  const raw=String(process.env.ACTIVE_SYMBOLS||'').trim();
+  if(!raw)return DEFAULT_ACTIVE;
+  const x=[...new Set(
+    raw.split(',')
+      .map(s=>s.trim().toUpperCase())
+      .filter(s=>ALL_INSTRUMENTS.includes(s))
+  )];
+  return x.length?x:DEFAULT_ACTIVE;
+})();
 
-  riskReward: 2.00,
-
-  breakEvenTriggerR: 0.60,
-
-  partialTpTriggerR: 2.00,
-
-  // بعد إغلاق 50% عند +2R
-  // نبدأ حماية النصف المتبقي من +1R
-  trailingStartStopR: 1.00,
-
-  // كل تقدم إضافي بمقدار 0.5R
-  // نحرك الحماية 0.5R
-  trailingStepR: 0.50,
-
-  minStopAtr: 0.25,
-
-  maxStopAtr: 6.00,
-
-  maxSpreadRiskFraction: 0.20,
-
-  minEntryConfidence: 62,
-
-  minCloseConfidence: 68
+const RULES=Object.freeze({
+  riskReward:2,
+  breakEvenTriggerR:.6,
+  partialTpTriggerR:2,
+  trailingStartStopR:1,
+  trailingStepR:.5,
+  minStopAtr:.25,
+  maxStopAtr:6,
+  maxSpreadRiskFraction:.2,
+  minEntryConfidence:62,
+  minCloseConfidence:68
 });
 
-// =========================
-// PAPER ACCOUNT
-// =========================
-
-const PAPER = Object.freeze({
-
-  startingBalance: 300,
-
-  // أقصى مخاطرة أولية للصفقة
-  maxCapitalRiskPct: 1.00,
-
-  // أقصى مخاطرة للمحفظة
-  portfolioRiskCapPct: 4.00,
-
-  maxOpenTrades: 31,
-
-  accountKey:
-    'lomy-forex-v15-gemini-pro-300usd'
+const PAPER=Object.freeze({
+  startingBalance:300,
+  maxCapitalRiskPct:1,
+  portfolioRiskCapPct:4,
+  maxOpenTrades:31,
+  accountKey:'lomy-forex-v15-gemini-pro-300usd'
 });
 
-// =========================
-// DYNAMIC RISK
-// =========================
-
-const DYNAMIC_RISK = Object.freeze({
-
-  highConfidence: 85,
-  highRiskPct: 1.00,
-
-  medConfidence: 75,
-  medRiskPct: 0.75,
-
-  lowConfidence: 62,
-  lowRiskPct: 0.50
+const DYNAMIC_RISK=Object.freeze({
+  highConfidence:85,
+  highRiskPct:1,
+  medConfidence:75,
+  medRiskPct:.75,
+  lowConfidence:62,
+  lowRiskPct:.5
 });
 
-// =========================
-// TECHNICAL SETTINGS
-// =========================
-
-const TECH = Object.freeze({
-
-  emaFast: 9,
-  emaMedium: 21,
-  emaTrend: 50,
-  emaLong: 100,
-  emaMacro: 200,
-
-  rsiLen: 14,
-  cmoLen: 9,
-
-  atrLen: 14,
-  adxLen: 14,
-
-  stochasticLen: 14,
-  stochasticSmooth: 3,
-
-  rocLen: 12,
-
-  bbLen: 20,
-  bbStd: 2,
-
-  keltnerLen: 20,
-  keltnerAtrLen: 14,
-  keltnerMult: 1.5,
-
-  volumeLen: 20,
-
-  srLen: 40,
-
-  fibLookback: 60,
-
-  swingLeft: 3,
-  swingRight: 3,
-
-  liquidityLookback: 20,
-
-  vwapLookback: 50,
-
-  mfiLen: 14
+const TECH=Object.freeze({
+  emaFast:9,
+  emaMedium:21,
+  emaTrend:50,
+  emaLong:100,
+  emaMacro:200,
+  rsiLen:14,
+  cmoLen:9,
+  atrLen:14,
+  adxLen:14,
+  stochasticLen:14,
+  stochasticSmooth:3,
+  rocLen:12,
+  bbLen:20,
+  bbStd:2,
+  keltnerLen:20,
+  keltnerAtrLen:14,
+  keltnerMult:1.5,
+  volumeLen:20,
+  srLen:40,
+  fibLookback:60,
+  swingLeft:3,
+  swingRight:3,
+  liquidityLookback:20,
+  vwapLookback:50,
+  mfiLen:14
 });
 
-// =========================
-// GEMINI SETTINGS
-// =========================
-
-const AI = Object.freeze({
-
-  enabled: true,
-
-  entryCommanderEnabled: true,
-
-  managementEnabled: true,
-
-  memoryClosedTrades: 40,
-
-  temperature: 0.10,
-
-  timeoutMs: 20000
+const AI=Object.freeze({
+  entryCommanderEnabled:true,
+  managementEnabled:true,
+  memoryClosedTrades:40,
+  temperature:.1,
+  timeoutMs:20000
 });
 
-// =========================
-// GLOBAL STATE
-// =========================
-
-const state = {
-
-  startedAt: new Date(),
-
-  mongoReady: false,
-  telegramReady: false,
-  marketReady: false,
-  geminiReady: false,
-
-  quoteLoopBusy: false,
-  scanLoopBusy: false,
-  loopsStarted: false,
-
-  lastMarketError: null,
-  lastAiError: null,
-
-  scannedBars: 0,
-
-  aiEntryCalls: 0,
-  aiManageCalls: 0,
-
-  aiBuyDecisions: 0,
-  aiSellDecisions: 0,
-  aiNoTradeDecisions: 0,
-
-  aiCloseDecisions: 0,
-  aiHoldDecisions: 0,
-
-  executedSignals: 0,
-  skippedSignals: 0,
-
-  journalEvents: 0,
-
-  pairState: new Map(),
-
-  latestQuotes: new Map(),
-
-  openTrades: new Map(),
-
-  processedBars: new Set(),
-
-  scanLocks: new Set(),
-
-  managementLocks: new Set(),
-
-  lastManageAt: new Map()
+const state={
+  startedAt:new Date(),
+  mongoReady:false,
+  telegramReady:false,
+  marketReady:false,
+  geminiReady:false,
+  newsReady:false,
+  scanBusy:false,
+  loopsStarted:false,
+  lastMarketError:null,
+  lastAiError:null,
+  lastNewsError:null,
+  scannedBars:0,
+  aiEntryCalls:0,
+  aiManageCalls:0,
+  aiBuyDecisions:0,
+  aiSellDecisions:0,
+  aiNoTradeDecisions:0,
+  aiCloseDecisions:0,
+  aiHoldDecisions:0,
+  executedSignals:0,
+  skippedSignals:0,
+  pairState:new Map(),
+  openTrades:new Map(),
+  twelveBlockedUntil:0,
+  geminiBlockedUntil:0,
+  nextScanAt:null,
+  lastEntryAiAt:0
 };
 
-let account = null;
+let account=null;
+let telegramBot=null;
+let telegramChatId=TELEGRAM_CHAT_ID_ENV;
+let economicNews=[];
+let twelveChain=Promise.resolve();
+let geminiChain=Promise.resolve();
+let lastTwelveAt=0;
+let lastGeminiAt=0;
 
-let telegramBot = null;
-
-let economicNews = [];
-
-let lastGeminiCallAt = 0;
-
-// =========================
-// HTTP CLIENT
-// =========================
-
-const http = axios.create({
-
-  timeout: 20000,
-
-  headers: {
-    'User-Agent':
-      'LOMY-FOREX-V1.5-GEMINI-COMMANDER-PRO'
-  }
+const http=axios.create({
+  timeout:20000,
+  headers:{'User-Agent':'LOMY-FOREX-V1.5.1'}
 });
 
-// =========================
-// BASIC UTILITIES
-// =========================
-
-function n(value, fallback = 0) {
-
-  const number = Number(value);
-
-  return Number.isFinite(number)
-    ? number
-    : fallback;
+function n(v,f=0){
+  const x=Number(v);
+  return Number.isFinite(x)?x:f;
 }
 
-function clamp(value, min, max) {
-
-  return Math.max(
-    min,
-    Math.min(max, value)
-  );
+function clamp(v,a,b){
+  return Math.max(a,Math.min(b,v));
 }
 
-function sleep(ms) {
-
-  return new Promise(
-    resolve => setTimeout(resolve, ms)
-  );
+function sleep(ms){
+  return new Promise(r=>setTimeout(r,ms));
 }
 
-function sum(values) {
-
-  return values
-    .filter(Number.isFinite)
-    .reduce(
-      (total, value) => total + value,
-      0
-    );
+function sum(a){
+  return a.filter(Number.isFinite).reduce((x,y)=>x+y,0);
 }
 
-function average(values) {
-
-  const valid =
-    values.filter(Number.isFinite);
-
-  return valid.length
-    ? sum(valid) / valid.length
-    : NaN;
+function avg(a){
+  const v=a.filter(Number.isFinite);
+  return v.length?sum(v)/v.length:NaN;
 }
 
-function standardDeviation(values) {
-
-  const valid =
-    values.filter(Number.isFinite);
-
-  if (!valid.length)
-    return NaN;
-
-  const mean =
-    average(valid);
-
-  return Math.sqrt(
-
-    valid.reduce(
-      (total, value) =>
-        total + (value - mean) ** 2,
-      0
-    ) / valid.length
-
-  );
+function sd(a){
+  const v=a.filter(Number.isFinite);
+  if(!v.length)return NaN;
+  const m=avg(v);
+  return Math.sqrt(v.reduce((s,x)=>s+(x-m)**2,0)/v.length);
 }
 
-function pctChange(from, to) {
+function last(a){
+  return Array.isArray(a)&&a.length?a[a.length-1]:undefined;
+}
 
-  from = n(from, NaN);
-  to = n(to, NaN);
+function pct(a,b){
+  a=n(a,NaN);
+  b=n(b,NaN);
+  return Number.isFinite(a)&&Number.isFinite(b)&&a!==0
+    ?(b-a)/Math.abs(a)*100
+    :NaN;
+}
 
-  if (
-    !Number.isFinite(from) ||
-    !Number.isFinite(to) ||
-    from === 0
-  ) {
-    return NaN;
+function safeError(e){
+  const d=e?.response?.data;
+  return d?.error?.message||
+    d?.message||
+    d?.error||
+    e?.message||
+    String(e);
+}
+
+function fmtMoney(v){
+  return '$'+n(v).toFixed(2);
+}
+
+function fmtPrice(v,s=''){
+  if(!Number.isFinite(Number(v)))return'n/a';
+  v=Number(v);
+  if(s==='XAUUSD')return v.toFixed(2);
+  if(s.endsWith('JPY'))return v.toFixed(3);
+  return v.toFixed(5);
+}
+
+function parseTime(v){
+  if(v instanceof Date)return v.getTime();
+  if(typeof v==='number')return v;
+
+  let s=String(v||'').trim();
+
+  if(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)){
+    s=s.replace(' ','T')+'Z';
   }
 
-  return (
-    (to - from) /
-    Math.abs(from)
-  ) * 100;
+  const t=new Date(s).getTime();
+  return Number.isFinite(t)?t:0;
 }
 
-function safeError(error) {
+function barTimeMs(b){
+  return parseTime(b?.openTime);
+}
 
-  const data =
-    error?.response?.data;
+function highestHigh(b){
+  return b?.length?Math.max(...b.map(x=>x.high)):NaN;
+}
 
-  return (
-    data?.error?.message ||
-    data?.message ||
-    data?.error ||
-    error?.message ||
-    String(error)
+function lowestLow(b){
+  return b?.length?Math.min(...b.map(x=>x.low)):NaN;
+}
+
+function utcDay(){
+  return new Date().toISOString().slice(0,10);
+}
+
+function nextUtcMidnight(){
+  const d=new Date();
+  return Date.UTC(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate()+1,
+    0,0,5
   );
 }
 
-function fmtMoney(value) {
+function normalizeBars(raw){
+  if(!Array.isArray(raw))return[];
 
-  return '$' +
-    n(value, 0).toFixed(2);
+  return raw.map(x=>({
+    openTime:x.openTime||x.datetime||x.time||x.timestamp,
+    open:n(x.open,NaN),
+    high:n(x.high,NaN),
+    low:n(x.low,NaN),
+    close:n(x.close,NaN),
+    volume:n(x.tickVolume,n(x.volume,0)),
+    isOpen:x.isOpen===true
+  }))
+  .filter(x=>
+    x.openTime&&
+    [x.open,x.high,x.low,x.close].every(Number.isFinite)
+  )
+  .sort((a,b)=>barTimeMs(a)-barTimeMs(b));
 }
 
-function fmtPrice(value, symbol = '') {
+function closed15(b){
+  const now=Date.now();
 
-  if (
-    !Number.isFinite(Number(value))
-  ) {
-    return 'n/a';
-  }
-
-  value = Number(value);
-
-  if (symbol === 'XAUUSD')
-    return value.toFixed(2);
-
-  if (symbol.endsWith('JPY'))
-    return value.toFixed(3);
-
-  return value.toFixed(5);
-}
-
-function barTimeMs(bar) {
-
-  const time =
-    new Date(
-      bar?.openTime
-    ).getTime();
-
-  return Number.isFinite(time)
-    ? time
-    : 0;
-}
-
-function highestHigh(bars) {
-
-  return bars?.length
-    ? Math.max(
-        ...bars.map(
-          bar => bar.high
-        )
-      )
-    : NaN;
-}
-
-function lowestLow(bars) {
-
-  return bars?.length
-    ? Math.min(
-        ...bars.map(
-          bar => bar.low
-        )
-      )
-    : NaN;
-}
-
-// =========================
-// NORMALIZE MARKET BARS
-// =========================
-
-function normalizeBars(rawBars) {
-
-  if (!Array.isArray(rawBars))
-    return [];
-
-  return rawBars
-    .map(bar => ({
-
-      openTime:
-        bar.openTime ||
-        bar.datetime ||
-        bar.time ||
-        bar.timestamp,
-
-      open: n(bar.open),
-
-      high: n(bar.high),
-
-      low: n(bar.low),
-
-      close: n(bar.close),
-
-      volume: n(
-        bar.tickVolume,
-        n(bar.volume, 0)
-      ),
-
-      isOpen:
-        bar.isOpen === true
-
-    }))
-
-    .filter(bar =>
-      bar.openTime &&
-      [
-        bar.open,
-        bar.high,
-        bar.low,
-        bar.close
-      ].every(Number.isFinite)
-    )
-
-    .sort(
-      (a, b) =>
-        barTimeMs(a) -
-        barTimeMs(b)
-    );
-}
-
-function intervalMs(interval) {
-
-  if (interval === '4h')
-    return 4 * 60 * 60 * 1000;
-
-  if (interval === '1h')
-    return 60 * 60 * 1000;
-
-  return TIMEFRAME_MS;
-}
-
-function closedBarsOnly(
-  bars,
-  interval = TIMEFRAME
-) {
-
-  const now = Date.now();
-
-  const ms =
-    intervalMs(interval);
-
-  return bars.filter(bar =>
-
-    !bar.isOpen &&
-
-    barTimeMs(bar) > 0 &&
-
-    barTimeMs(bar) + ms
-      <= now + 5000
-
+  return b.filter(x=>
+    !x.isOpen&&
+    barTimeMs(x)>0&&
+    barTimeMs(x)+TF_MS<=now+5000
   );
 }
 
-// =========================
-// EMA
-// =========================
+function mergeBars(a,b,max=INITIAL_HISTORY){
+  const m=new Map();
 
-function emaSeries(
-  values,
-  length
-) {
-
-  if (
-    !Array.isArray(values) ||
-    values.length < length
-  ) {
-    return [];
+  for(const x of [...(a||[]),...(b||[])]){
+    m.set(barTimeMs(x),x);
   }
 
-  const out =
-    new Array(
-      values.length
-    ).fill(NaN);
+  return [...m.values()]
+    .sort((x,y)=>barTimeMs(x)-barTimeMs(y))
+    .slice(-max);
+}
 
-  const k =
-    2 / (length + 1);
+function aggregateBars(bars,minutes){
+  const ms=minutes*60000;
+  const m=new Map();
+  const now=Date.now();
 
-  const seed =
-    values.slice(
-      0,
-      length
-    );
+  for(const b of bars){
+    const t=barTimeMs(b);
+    if(!t)continue;
 
-  if (
-    !seed.every(
-      Number.isFinite
-    )
-  ) {
-    return out;
-  }
+    const k=Math.floor(t/ms)*ms;
+    let x=m.get(k);
 
-  out[length - 1] =
-    sum(seed) / length;
-
-  for (
-    let i = length;
-    i < values.length;
-    i++
-  ) {
-
-    if (
-      Number.isFinite(values[i]) &&
-      Number.isFinite(out[i - 1])
-    ) {
-
-      out[i] =
-        values[i] * k +
-        out[i - 1] *
-        (1 - k);
+    if(!x){
+      x={
+        openTime:new Date(k).toISOString(),
+        open:b.open,
+        high:b.high,
+        low:b.low,
+        close:b.close,
+        volume:n(b.volume,0),
+        isOpen:false
+      };
+      m.set(k,x);
+    }else{
+      x.high=Math.max(x.high,b.high);
+      x.low=Math.min(x.low,b.low);
+      x.close=b.close;
+      x.volume+=n(b.volume,0);
     }
   }
 
-  return out;
+  return [...m.values()]
+    .filter(x=>barTimeMs(x)+ms<=now+5000)
+    .sort((a,b)=>barTimeMs(a)-barTimeMs(b));
 }
 
-function emaLast(
-  values,
-  length
-) {
+function emaSeries(v,l){
+  if(!Array.isArray(v)||v.length<l)return[];
 
-  const series =
-    emaSeries(
-      values,
-      length
-    );
+  const o=new Array(v.length).fill(NaN);
+  const k=2/(l+1);
+  const seed=v.slice(0,l);
 
-  return series[
-    series.length - 1
-  ];
-}
+  if(!seed.every(Number.isFinite))return o;
 
-// =========================
-// TRUE RANGE / ATR
-// =========================
+  o[l-1]=sum(seed)/l;
 
-function trueRangeSeries(bars) {
-
-  const out = [];
-
-  if (
-    !bars ||
-    bars.length < 2
-  ) {
-    return out;
-  }
-
-  for (
-    let i = 1;
-    i < bars.length;
-    i++
-  ) {
-
-    out.push(
-      Math.max(
-
-        bars[i].high -
-          bars[i].low,
-
-        Math.abs(
-          bars[i].high -
-          bars[i - 1].close
-        ),
-
-        Math.abs(
-          bars[i].low -
-          bars[i - 1].close
-        )
-      )
-    );
-  }
-
-  return out;
-}
-
-function atrLast(
-  bars,
-  length = 14
-) {
-
-  const ranges =
-    trueRangeSeries(bars);
-
-  if (
-    ranges.length < length
-  ) {
-    return NaN;
-  }
-
-  let atr =
-    sum(
-      ranges.slice(
-        0,
-        length
-      )
-    ) / length;
-
-  for (
-    let i = length;
-    i < ranges.length;
-    i++
-  ) {
-
-    atr =
-      (
-        atr *
-        (length - 1) +
-        ranges[i]
-      ) / length;
-  }
-
-  return atr;
-}
-// =========================
-// RSI
-// =========================
-
-function rsiLast(
-  values,
-  length = 14
-) {
-
-  if (
-    !Array.isArray(values) ||
-    values.length <= length
-  ) {
-    return NaN;
-  }
-
-  let gains = 0;
-  let losses = 0;
-
-  for (
-    let i = 1;
-    i <= length;
-    i++
-  ) {
-
-    const change =
-      values[i] -
-      values[i - 1];
-
-    if (change >= 0)
-      gains += change;
-    else
-      losses +=
-        Math.abs(change);
-  }
-
-  let avgGain =
-    gains / length;
-
-  let avgLoss =
-    losses / length;
-
-  for (
-    let i = length + 1;
-    i < values.length;
-    i++
-  ) {
-
-    const change =
-      values[i] -
-      values[i - 1];
-
-    const gain =
-      Math.max(change, 0);
-
-    const loss =
-      Math.max(-change, 0);
-
-    avgGain =
-      (
-        avgGain *
-        (length - 1) +
-        gain
-      ) / length;
-
-    avgLoss =
-      (
-        avgLoss *
-        (length - 1) +
-        loss
-      ) / length;
-  }
-
-  if (avgLoss === 0)
-    return 100;
-
-  const rs =
-    avgGain / avgLoss;
-
-  return (
-    100 -
-    100 / (1 + rs)
-  );
-}
-
-// =========================
-// CMO
-// =========================
-
-function cmoLast(
-  values,
-  length = 9
-) {
-
-  if (
-    !Array.isArray(values) ||
-    values.length <= length
-  ) {
-    return NaN;
-  }
-
-  let up = 0;
-  let down = 0;
-
-  const start =
-    values.length - length;
-
-  for (
-    let i = start;
-    i < values.length;
-    i++
-  ) {
-
-    const change =
-      values[i] -
-      values[i - 1];
-
-    if (change > 0)
-      up += change;
-
-    if (change < 0)
-      down +=
-        Math.abs(change);
-  }
-
-  const total =
-    up + down;
-
-  if (total === 0)
-    return 0;
-
-  return (
-    100 *
-    (up - down) /
-    total
-  );
-}
-
-// =========================
-// MACD
-// =========================
-
-function macdLast(values) {
-
-  if (
-    !values ||
-    values.length < 35
-  ) {
-    return {
-      macd: NaN,
-      signal: NaN,
-      histogram: NaN
-    };
-  }
-
-  const fast =
-    emaSeries(values, 12);
-
-  const slow =
-    emaSeries(values, 26);
-
-  const macdValues = [];
-
-  const indexes = [];
-
-  for (
-    let i = 0;
-    i < values.length;
-    i++
-  ) {
-
-    if (
-      Number.isFinite(fast[i]) &&
-      Number.isFinite(slow[i])
-    ) {
-
-      macdValues.push(
-        fast[i] - slow[i]
-      );
-
-      indexes.push(i);
+  for(let i=l;i<v.length;i++){
+    if(Number.isFinite(v[i])&&Number.isFinite(o[i-1])){
+      o[i]=v[i]*k+o[i-1]*(1-k);
     }
   }
 
-  if (
-    macdValues.length < 9
-  ) {
-    return {
-      macd: NaN,
-      signal: NaN,
-      histogram: NaN
-    };
+  return o;
+}
+
+function emaLast(v,l){
+  const s=emaSeries(v,l);
+  return s[s.length-1];
+}
+
+function trSeries(b){
+  const o=[];
+
+  for(let i=1;i<(b?.length||0);i++){
+    o.push(Math.max(
+      b[i].high-b[i].low,
+      Math.abs(b[i].high-b[i-1].close),
+      Math.abs(b[i].low-b[i-1].close)
+    ));
   }
 
-  const signalSeries =
-    emaSeries(
-      macdValues,
-      9
-    );
+  return o;
+}
 
-  const macd =
-    macdValues[
-      macdValues.length - 1
-    ];
+function atrLast(b,l=14){
+  const r=trSeries(b);
+  if(r.length<l)return NaN;
 
-  const signal =
-    signalSeries[
-      signalSeries.length - 1
-    ];
+  let a=sum(r.slice(0,l))/l;
 
-  return {
-    macd,
-    signal,
-    histogram:
-      macd - signal
+  for(let i=l;i<r.length;i++){
+    a=(a*(l-1)+r[i])/l;
+  }
+
+  return a;
+}
+
+function rsiLast(v,l=14){
+  if(!v||v.length<=l)return NaN;
+
+  let g=0,loss=0;
+
+  for(let i=1;i<=l;i++){
+    const c=v[i]-v[i-1];
+    c>=0?g+=c:loss+=Math.abs(c);
+  }
+
+  let ag=g/l;
+  let al=loss/l;
+
+  for(let i=l+1;i<v.length;i++){
+    const c=v[i]-v[i-1];
+    ag=(ag*(l-1)+Math.max(c,0))/l;
+    al=(al*(l-1)+Math.max(-c,0))/l;
+  }
+
+  return al===0?100:100-100/(1+ag/al);
+}
+
+function cmoLast(v,l=9){
+  if(!v||v.length<=l)return NaN;
+
+  let up=0,dn=0;
+
+  for(let i=v.length-l;i<v.length;i++){
+    const c=v[i]-v[i-1];
+    if(c>0)up+=c;
+    else if(c<0)dn+=-c;
+  }
+
+  return up+dn?100*(up-dn)/(up+dn):0;
+}
+
+function macdLast(v){
+  if(!v||v.length<35){
+    return{macd:NaN,signal:NaN,histogram:NaN};
+  }
+
+  const f=emaSeries(v,12);
+  const s=emaSeries(v,26);
+  const m=[];
+
+  for(let i=0;i<v.length;i++){
+    if(Number.isFinite(f[i])&&Number.isFinite(s[i])){
+      m.push(f[i]-s[i]);
+    }
+  }
+
+  if(m.length<9){
+    return{macd:NaN,signal:NaN,histogram:NaN};
+  }
+
+  const sg=emaSeries(m,9);
+  const mv=last(m);
+  const sv=last(sg);
+
+  return{
+    macd:mv,
+    signal:sv,
+    histogram:mv-sv
   };
 }
 
-// =========================
-// STOCHASTIC
-// =========================
+function stochasticLast(b,l=14){
+  if(!b||b.length<l)return{k:NaN,d:NaN};
 
-function stochasticLast(
-  bars,
-  length = 14
-) {
+  const ks=[];
 
-  if (
-    !bars ||
-    bars.length < length
-  ) {
-    return {
-      k: NaN,
-      d: NaN
-    };
+  for(let i=Math.max(l-1,b.length-5);i<b.length;i++){
+    const s=b.slice(i-l+1,i+1);
+    const h=highestHigh(s);
+    const lo=lowestLow(s);
+    const r=h-lo;
+
+    ks.push(
+      r===0?50:(b[i].close-lo)/r*100
+    );
   }
 
-  const kValues = [];
-
-  const start =
-    Math.max(
-      length - 1,
-      bars.length - 5
-    );
-
-  for (
-    let i = start;
-    i < bars.length;
-    i++
-  ) {
-
-    const slice =
-      bars.slice(
-        i - length + 1,
-        i + 1
-      );
-
-    const high =
-      highestHigh(slice);
-
-    const low =
-      lowestLow(slice);
-
-    const range =
-      high - low;
-
-    const k =
-      range === 0
-        ? 50
-        : (
-            (
-              bars[i].close -
-              low
-            ) /
-            range
-          ) * 100;
-
-    kValues.push(k);
-  }
-
-  const k =
-    kValues[
-      kValues.length - 1
-    ];
-
-  const d =
-    average(
-      kValues.slice(
-        -TECH.stochasticSmooth
-      )
-    );
-
-  return {
-    k,
-    d
+  return{
+    k:last(ks),
+    d:avg(ks.slice(-TECH.stochasticSmooth))
   };
 }
 
-// =========================
-// WILLIAMS %R
-// =========================
+function williamsRLast(b,l=14){
+  if(!b||b.length<l)return NaN;
 
-function williamsRLast(
-  bars,
-  length = 14
-) {
+  const s=b.slice(-l);
+  const h=highestHigh(s);
+  const lo=lowestLow(s);
+  const c=last(s).close;
 
-  if (
-    !bars ||
-    bars.length < length
-  ) {
-    return NaN;
-  }
-
-  const slice =
-    bars.slice(-length);
-
-  const high =
-    highestHigh(slice);
-
-  const low =
-    lowestLow(slice);
-
-  const close =
-    last(slice).close;
-
-  if (high === low)
-    return -50;
-
-  return (
-    -100 *
-    (
-      high - close
-    ) /
-    (
-      high - low
-    )
-  );
+  return h===lo?-50:-100*(h-c)/(h-lo);
 }
 
-// =========================
-// ROC
-// =========================
-
-function rocLast(
-  values,
-  length = 12
-) {
-
-  if (
-    !values ||
-    values.length <= length
-  ) {
-    return NaN;
-  }
-
-  const current =
-    values[
-      values.length - 1
-    ];
-
-  const previous =
-    values[
-      values.length -
-      1 -
-      length
-    ];
-
-  return pctChange(
-    previous,
-    current
-  );
+function rocLast(v,l=12){
+  return !v||v.length<=l
+    ?NaN
+    :pct(v[v.length-1-l],last(v));
 }
 
-// =========================
-// BOLLINGER BANDS
-// =========================
-
-function bollingerLast(
-  values,
-  length = 20,
-  multiplier = 2
-) {
-
-  if (
-    !values ||
-    values.length < length
-  ) {
-    return {
-      middle: NaN,
-      upper: NaN,
-      lower: NaN,
-      widthPct: NaN
+function bollingerLast(v,l=20,m=2){
+  if(!v||v.length<l){
+    return{
+      middle:NaN,
+      upper:NaN,
+      lower:NaN,
+      widthPct:NaN
     };
   }
 
-  const slice =
-    values.slice(-length);
+  const s=v.slice(-l);
+  const mid=avg(s);
+  const d=sd(s);
+  const u=mid+m*d;
+  const lo=mid-m*d;
 
-  const middle =
-    average(slice);
-
-  const sd =
-    standardDeviation(slice);
-
-  const upper =
-    middle +
-    multiplier * sd;
-
-  const lower =
-    middle -
-    multiplier * sd;
-
-  return {
-    middle,
-    upper,
-    lower,
-    widthPct:
-      middle !== 0
-        ? (
-            (
-              upper - lower
-            ) /
-            Math.abs(middle)
-          ) * 100
-        : NaN
+  return{
+    middle:mid,
+    upper:u,
+    lower:lo,
+    widthPct:mid?(u-lo)/Math.abs(mid)*100:NaN
   };
 }
 
-// =========================
-// KELTNER CHANNEL
-// =========================
+function keltnerLast(b){
+  const c=b.map(x=>x.close);
+  const mid=emaLast(c,TECH.keltnerLen);
+  const a=atrLast(b,TECH.keltnerAtrLen);
 
-function keltnerLast(bars) {
-
-  if (
-    !bars ||
-    bars.length <
-      Math.max(
-        TECH.keltnerLen,
-        TECH.keltnerAtrLen + 1
-      )
-  ) {
-    return {
-      middle: NaN,
-      upper: NaN,
-      lower: NaN
-    };
-  }
-
-  const closes =
-    bars.map(
-      bar => bar.close
-    );
-
-  const middle =
-    emaLast(
-      closes,
-      TECH.keltnerLen
-    );
-
-  const atr =
-    atrLast(
-      bars,
-      TECH.keltnerAtrLen
-    );
-
-  return {
-    middle,
-
-    upper:
-      middle +
-      TECH.keltnerMult *
-      atr,
-
-    lower:
-      middle -
-      TECH.keltnerMult *
-      atr
+  return{
+    middle:mid,
+    upper:mid+TECH.keltnerMult*a,
+    lower:mid-TECH.keltnerMult*a
   };
 }
 
-// =========================
-// OBV
-// =========================
+function obvLast(b){
+  let o=0;
 
-function obvLast(bars) {
+  for(let i=1;i<(b?.length||0);i++){
+    const v=n(b[i].volume);
 
-  if (
-    !bars ||
-    bars.length < 2
-  ) {
-    return 0;
+    if(b[i].close>b[i-1].close)o+=v;
+    else if(b[i].close<b[i-1].close)o-=v;
   }
 
-  let obv = 0;
-
-  for (
-    let i = 1;
-    i < bars.length;
-    i++
-  ) {
-
-    const volume =
-      n(bars[i].volume, 0);
-
-    if (
-      bars[i].close >
-      bars[i - 1].close
-    ) {
-      obv += volume;
-    }
-
-    else if (
-      bars[i].close <
-      bars[i - 1].close
-    ) {
-      obv -= volume;
-    }
-  }
-
-  return obv;
+  return o;
 }
 
-// =========================
-// MFI
-// =========================
+function mfiLast(b,l=14){
+  if(!b||b.length<=l)return NaN;
 
-function mfiLast(
-  bars,
-  length = 14
-) {
+  let p=0,ng=0;
 
-  if (
-    !bars ||
-    bars.length <= length
-  ) {
-    return NaN;
+  for(let i=b.length-l;i<b.length;i++){
+    const t=(b[i].high+b[i].low+b[i].close)/3;
+    const pt=(b[i-1].high+b[i-1].low+b[i-1].close)/3;
+    const f=t*n(b[i].volume);
+
+    if(t>pt)p+=f;
+    else if(t<pt)ng+=f;
   }
 
-  let positive = 0;
-  let negative = 0;
+  if(!p&&!ng)return 50;
+  if(!ng)return 100;
 
-  const start =
-    bars.length - length;
-
-  for (
-    let i = start;
-    i < bars.length;
-    i++
-  ) {
-
-    const currentTypical =
-      (
-        bars[i].high +
-        bars[i].low +
-        bars[i].close
-      ) / 3;
-
-    const previousTypical =
-      (
-        bars[i - 1].high +
-        bars[i - 1].low +
-        bars[i - 1].close
-      ) / 3;
-
-    const flow =
-      currentTypical *
-      n(bars[i].volume, 0);
-
-    if (
-      currentTypical >
-      previousTypical
-    ) {
-      positive += flow;
-    }
-
-    else if (
-      currentTypical <
-      previousTypical
-    ) {
-      negative += flow;
-    }
-  }
-
-  if (
-    positive === 0 &&
-    negative === 0
-  ) {
-    return 50;
-  }
-
-  if (negative === 0)
-    return 100;
-
-  const ratio =
-    positive / negative;
-
-  return (
-    100 -
-    100 /
-    (1 + ratio)
-  );
+  return 100-100/(1+p/ng);
 }
 
-// =========================
-// VWAP
-// =========================
+function vwapLast(b,l=50){
+  const s=b.slice(-l);
+  let w=0,v=0;
 
-function vwapLast(
-  bars,
-  lookback = 50
-) {
-
-  if (
-    !bars ||
-    !bars.length
-  ) {
-    return NaN;
+  for(const x of s){
+    const t=(x.high+x.low+x.close)/3;
+    const q=n(x.volume);
+    w+=t*q;
+    v+=q;
   }
 
-  const slice =
-    bars.slice(-lookback);
-
-  let weighted = 0;
-  let volumeTotal = 0;
-
-  for (
-    const bar of slice
-  ) {
-
-    const typical =
-      (
-        bar.high +
-        bar.low +
-        bar.close
-      ) / 3;
-
-    const volume =
-      n(bar.volume, 0);
-
-    weighted +=
-      typical * volume;
-
-    volumeTotal += volume;
-  }
-
-  if (volumeTotal <= 0) {
-
-    return average(
-      slice.map(
-        bar =>
-          (
-            bar.high +
-            bar.low +
-            bar.close
-          ) / 3
-      )
-    );
-  }
-
-  return (
-    weighted /
-    volumeTotal
-  );
+  return v>0
+    ?w/v
+    :avg(s.map(x=>(x.high+x.low+x.close)/3));
 }
 
-// =========================
-// CANDLE ANALYSIS
-// =========================
-
-function candleContext(bar) {
-
-  if (!bar) {
-    return {
-      direction: 'UNKNOWN',
-      bodyRatio: 0,
-      upperWickRatio: 0,
-      lowerWickRatio: 0
+function candleContext(b){
+  if(!b){
+    return{
+      direction:'UNKNOWN',
+      bodyRatio:0,
+      upperWickRatio:0,
+      lowerWickRatio:0
     };
   }
 
-  const range =
-    Math.max(
-      bar.high - bar.low,
-      Number.EPSILON
-    );
+  const r=Math.max(b.high-b.low,Number.EPSILON);
+  const body=Math.abs(b.close-b.open);
 
-  const body =
-    Math.abs(
-      bar.close -
-      bar.open
-    );
-
-  const upperWick =
-    bar.high -
-    Math.max(
-      bar.open,
-      bar.close
-    );
-
-  const lowerWick =
-    Math.min(
-      bar.open,
-      bar.close
-    ) -
-    bar.low;
-
-  return {
-
-    direction:
-      bar.close > bar.open
-        ? 'BULLISH'
-        : bar.close < bar.open
-          ? 'BEARISH'
-          : 'DOJI',
-
-    bodyRatio:
-      body / range,
-
-    upperWickRatio:
-      upperWick / range,
-
-    lowerWickRatio:
-      lowerWick / range
+  return{
+    direction:b.close>b.open
+      ?'BULLISH'
+      :b.close<b.open
+        ?'BEARISH'
+        :'DOJI',
+    bodyRatio:body/r,
+    upperWickRatio:(b.high-Math.max(b.open,b.close))/r,
+    lowerWickRatio:(Math.min(b.open,b.close)-b.low)/r
   };
 }
 
-// =========================
-// SUPPORT / RESISTANCE
-// =========================
+function supportResistance(b,l=40){
+  const s=b.slice(-(l+1),-1);
 
-function supportResistance(
-  bars,
-  length = 40
-) {
-
-  if (
-    !bars ||
-    bars.length < 3
-  ) {
-    return {
-      support: NaN,
-      resistance: NaN
-    };
-  }
-
-  // Exclude current bar so a fresh
-  // breakout can be detected.
-  const slice =
-    bars.slice(
-      -(length + 1),
-      -1
-    );
-
-  return {
-    support:
-      lowestLow(slice),
-
-    resistance:
-      highestHigh(slice)
+  return{
+    support:lowestLow(s),
+    resistance:highestHigh(s)
   };
 }
 
-// =========================
-// SWINGS / MARKET STRUCTURE
-// =========================
+function findSwings(b,left=3,right=3){
+  const highs=[];
+  const lows=[];
 
-function findSwings(
-  bars,
-  left = 3,
-  right = 3
-) {
+  for(let i=left;i<b.length-right;i++){
+    let sh=true,sl=true;
 
-  const highs = [];
-  const lows = [];
-
-  if (
-    !bars ||
-    bars.length <
-      left + right + 1
-  ) {
-    return {
-      highs,
-      lows
-    };
-  }
-
-  for (
-    let i = left;
-    i <
-      bars.length - right;
-    i++
-  ) {
-
-    let swingHigh = true;
-    let swingLow = true;
-
-    for (
-      let j = 1;
-      j <= left;
-      j++
-    ) {
-
-      if (
-        bars[i].high <=
-        bars[i - j].high
-      ) {
-        swingHigh = false;
-      }
-
-      if (
-        bars[i].low >=
-        bars[i - j].low
-      ) {
-        swingLow = false;
-      }
+    for(let j=1;j<=left;j++){
+      if(b[i].high<=b[i-j].high)sh=false;
+      if(b[i].low>=b[i-j].low)sl=false;
     }
 
-    for (
-      let j = 1;
-      j <= right;
-      j++
-    ) {
-
-      if (
-        bars[i].high <=
-        bars[i + j].high
-      ) {
-        swingHigh = false;
-      }
-
-      if (
-        bars[i].low >=
-        bars[i + j].low
-      ) {
-        swingLow = false;
-      }
+    for(let j=1;j<=right;j++){
+      if(b[i].high<=b[i+j].high)sh=false;
+      if(b[i].low>=b[i+j].low)sl=false;
     }
 
-    if (swingHigh) {
+    if(sh){
       highs.push({
-        index: i,
-        price: bars[i].high,
-        time: bars[i].openTime
+        index:i,
+        price:b[i].high,
+        time:b[i].openTime
       });
     }
 
-    if (swingLow) {
+    if(sl){
       lows.push({
-        index: i,
-        price: bars[i].low,
-        time: bars[i].openTime
+        index:i,
+        price:b[i].low,
+        time:b[i].openTime
       });
     }
   }
 
-  return {
-    highs,
-    lows
-  };
+  return{highs,lows};
 }
 
-function marketStructure(bars) {
+function marketStructure(b){
+  const s=findSwings(
+    b,
+    TECH.swingLeft,
+    TECH.swingRight
+  );
 
-  const swings =
-    findSwings(
-      bars,
-      TECH.swingLeft,
-      TECH.swingRight
-    );
+  const h=s.highs.slice(-2);
+  const l=s.lows.slice(-2);
 
-  const highs =
-    swings.highs.slice(-2);
+  let structure='NEUTRAL';
 
-  const lows =
-    swings.lows.slice(-2);
-
-  let structure =
-    'NEUTRAL';
-
-  if (
-    highs.length >= 2 &&
-    lows.length >= 2
-  ) {
-
-    const higherHigh =
-      highs[1].price >
-      highs[0].price;
-
-    const higherLow =
-      lows[1].price >
-      lows[0].price;
-
-    const lowerHigh =
-      highs[1].price <
-      highs[0].price;
-
-    const lowerLow =
-      lows[1].price <
-      lows[0].price;
-
-    if (
-      higherHigh &&
-      higherLow
-    ) {
-      structure =
-        'BULLISH';
-    }
-
-    else if (
-      lowerHigh &&
-      lowerLow
-    ) {
-      structure =
-        'BEARISH';
+  if(h.length>=2&&l.length>=2){
+    if(
+      h[1].price>h[0].price&&
+      l[1].price>l[0].price
+    ){
+      structure='BULLISH';
+    }else if(
+      h[1].price<h[0].price&&
+      l[1].price<l[0].price
+    ){
+      structure='BEARISH';
     }
   }
 
-  const close =
-    last(bars)?.close;
+  const c=last(b)?.close;
+  const lh=last(s.highs)?.price;
+  const ll=last(s.lows)?.price;
 
-  const lastSwingHigh =
-    last(swings.highs)?.price;
+  let bos='NONE';
 
-  const lastSwingLow =
-    last(swings.lows)?.price;
-
-  let bos = 'NONE';
-
-  if (
-    Number.isFinite(close) &&
-    Number.isFinite(
-      lastSwingHigh
-    ) &&
-    close >
-      lastSwingHigh
-  ) {
-    bos = 'BULLISH_BOS';
+  if(
+    Number.isFinite(c)&&
+    Number.isFinite(lh)&&
+    c>lh
+  ){
+    bos='BULLISH_BOS';
+  }else if(
+    Number.isFinite(c)&&
+    Number.isFinite(ll)&&
+    c<ll
+  ){
+    bos='BEARISH_BOS';
   }
 
-  else if (
-    Number.isFinite(close) &&
-    Number.isFinite(
-      lastSwingLow
-    ) &&
-    close <
-      lastSwingLow
-  ) {
-    bos = 'BEARISH_BOS';
-  }
-
-  return {
+  return{
     structure,
     bos,
-    lastSwingHigh,
-    lastSwingLow,
-    swingHighCount:
-      swings.highs.length,
-    swingLowCount:
-      swings.lows.length
+    lastSwingHigh:lh,
+    lastSwingLow:ll
   };
 }
-// =========================
-// ARRAY LAST ITEM
-// =========================
 
-function last(values) {
-
-  if (
-    !Array.isArray(values) ||
-    !values.length
-  ) {
-    return undefined;
-  }
-
-  return values[
-    values.length - 1
-  ];
-}
-
-// =========================
-// DMI / ADX
-// =========================
-
-function dmiAdx(
-  bars,
-  length = 14
-) {
-
-  if (
-    !bars ||
-    bars.length <
-      length * 2 + 2
-  ) {
-    return {
-      adx: NaN,
-      plusDI: NaN,
-      minusDI: NaN
+function dmiAdx(b,l=14){
+  if(!b||b.length<l*2+2){
+    return{
+      adx:NaN,
+      plusDI:NaN,
+      minusDI:NaN
     };
   }
 
-  const tr = [];
-  const plusDM = [];
-  const minusDM = [];
+  const tr=[];
+  const pdm=[];
+  const mdm=[];
 
-  for (
-    let i = 1;
-    i < bars.length;
-    i++
-  ) {
+  for(let i=1;i<b.length;i++){
+    const u=b[i].high-b[i-1].high;
+    const d=b[i-1].low-b[i].low;
 
-    const current =
-      bars[i];
+    pdm.push(u>d&&u>0?u:0);
+    mdm.push(d>u&&d>0?d:0);
 
-    const previous =
-      bars[i - 1];
-
-    const upMove =
-      current.high -
-      previous.high;
-
-    const downMove =
-      previous.low -
-      current.low;
-
-    plusDM.push(
-      upMove > downMove &&
-      upMove > 0
-        ? upMove
-        : 0
-    );
-
-    minusDM.push(
-      downMove > upMove &&
-      downMove > 0
-        ? downMove
-        : 0
-    );
-
-    tr.push(
-      Math.max(
-
-        current.high -
-          current.low,
-
-        Math.abs(
-          current.high -
-          previous.close
-        ),
-
-        Math.abs(
-          current.low -
-          previous.close
-        )
-      )
-    );
+    tr.push(Math.max(
+      b[i].high-b[i].low,
+      Math.abs(b[i].high-b[i-1].close),
+      Math.abs(b[i].low-b[i-1].close)
+    ));
   }
 
-  let smoothTR =
-    sum(
-      tr.slice(
-        0,
-        length
-      )
-    );
+  let st=sum(tr.slice(0,l));
+  let sp=sum(pdm.slice(0,l));
+  let sm=sum(mdm.slice(0,l));
+  let p=NaN,m=NaN;
+  const dx=[];
 
-  let smoothPlus =
-    sum(
-      plusDM.slice(
-        0,
-        length
-      )
-    );
-
-  let smoothMinus =
-    sum(
-      minusDM.slice(
-        0,
-        length
-      )
-    );
-
-  const dxValues = [];
-
-  let plusDI = NaN;
-  let minusDI = NaN;
-
-  for (
-    let i = length;
-    i < tr.length;
-    i++
-  ) {
-
-    if (i > length) {
-
-      smoothTR =
-        smoothTR -
-        smoothTR / length +
-        tr[i];
-
-      smoothPlus =
-        smoothPlus -
-        smoothPlus / length +
-        plusDM[i];
-
-      smoothMinus =
-        smoothMinus -
-        smoothMinus / length +
-        minusDM[i];
+  for(let i=l;i<tr.length;i++){
+    if(i>l){
+      st=st-st/l+tr[i];
+      sp=sp-sp/l+pdm[i];
+      sm=sm-sm/l+mdm[i];
     }
 
-    plusDI =
-      smoothTR > 0
-        ? (
-            100 *
-            smoothPlus /
-            smoothTR
-          )
-        : 0;
+    p=st?100*sp/st:0;
+    m=st?100*sm/st:0;
 
-    minusDI =
-      smoothTR > 0
-        ? (
-            100 *
-            smoothMinus /
-            smoothTR
-          )
-        : 0;
-
-    const denominator =
-      plusDI +
-      minusDI;
-
-    const dx =
-      denominator > 0
-        ? (
-            100 *
-            Math.abs(
-              plusDI -
-              minusDI
-            ) /
-            denominator
-          )
-        : 0;
-
-    dxValues.push(dx);
+    dx.push(
+      p+m
+        ?100*Math.abs(p-m)/(p+m)
+        :0
+    );
   }
 
-  if (
-    dxValues.length <
-    length
-  ) {
-    return {
-      adx: NaN,
-      plusDI,
-      minusDI
+  if(dx.length<l){
+    return{
+      adx:NaN,
+      plusDI:p,
+      minusDI:m
     };
   }
 
-  let adx =
-    average(
-      dxValues.slice(
-        0,
-        length
-      )
-    );
+  let a=avg(dx.slice(0,l));
 
-  for (
-    let i = length;
-    i < dxValues.length;
+  for(let i=l;i<dx.length;i++){
+    a=(a*(l-1)+dx[i])/l;
+  }
+
+  return{
+    adx:a,
+    plusDI:p,
+    minusDI:m
+  };
+}
+
+function volumeContext(b){
+  const cur=n(last(b)?.volume);
+  const prior=b
+    .slice(-(TECH.volumeLen+1),-1)
+    .map(x=>n(x.volume));
+
+  const a=avg(prior);
+  const r=Number.isFinite(a)&&a>0
+    ?cur/a
+    :NaN;
+
+  return{
+    current:cur,
+    average:n(a),
+    ratio:r,
+    spike:Number.isFinite(r)&&r>=1.5
+  };
+}
+
+function volatilityContext(b){
+  const a=atrLast(b,TECH.atrLen);
+  const c=last(b);
+  const hist=[];
+
+  for(
+    let i=Math.max(
+      TECH.atrLen+2,
+      b.length-50
+    );
+    i<=b.length;
     i++
-  ) {
-
-    adx =
-      (
-        adx *
-        (length - 1) +
-        dxValues[i]
-      ) / length;
-  }
-
-  return {
-    adx,
-    plusDI,
-    minusDI
-  };
-}
-
-// =========================
-// VOLUME CONTEXT
-// =========================
-
-function volumeContext(bars) {
-
-  if (
-    !bars ||
-    !bars.length
-  ) {
-    return {
-      current: 0,
-      average: 0,
-      ratio: NaN,
-      spike: false
-    };
-  }
-
-  const current =
-    n(
-      last(bars)?.volume,
-      0
-    );
-
-  const prior =
-    bars
-      .slice(
-        -(TECH.volumeLen + 1),
-        -1
-      )
-      .map(
-        bar =>
-          n(bar.volume, 0)
-      );
-
-  const avg =
-    average(prior);
-
-  const ratio =
-    Number.isFinite(avg) &&
-    avg > 0
-      ? current / avg
-      : NaN;
-
-  return {
-    current,
-    average:
-      n(avg, 0),
-    ratio,
-    spike:
-      Number.isFinite(ratio) &&
-      ratio >= 1.50
-  };
-}
-
-// =========================
-// VOLATILITY CONTEXT
-// =========================
-
-function volatilityContext(bars) {
-
-  const atr =
-    atrLast(
-      bars,
+  ){
+    const x=atrLast(
+      b.slice(0,i),
       TECH.atrLen
     );
 
-  const current =
-    last(bars);
-
-  const atrPct =
-    current &&
-    current.close > 0 &&
-    Number.isFinite(atr)
-      ? (
-          atr /
-          current.close
-        ) * 100
-      : NaN;
-
-  const historicalAtr = [];
-
-  const start =
-    Math.max(
-      TECH.atrLen + 2,
-      bars.length - 50
-    );
-
-  for (
-    let i = start;
-    i <= bars.length;
-    i++
-  ) {
-
-    const value =
-      atrLast(
-        bars.slice(0, i),
-        TECH.atrLen
-      );
-
-    if (
-      Number.isFinite(value)
-    ) {
-      historicalAtr.push(value);
+    if(Number.isFinite(x)){
+      hist.push(x);
     }
   }
 
-  const avgAtr =
-    average(
-      historicalAtr
-    );
+  const aa=avg(hist);
 
-  const atrRatio =
-    Number.isFinite(atr) &&
-    Number.isFinite(avgAtr) &&
-    avgAtr > 0
-      ? atr / avgAtr
-      : NaN;
+  const r=
+    Number.isFinite(a)&&
+    Number.isFinite(aa)&&
+    aa>0
+      ?a/aa
+      :NaN;
 
-  let regime = 'NORMAL';
-
-  if (
-    Number.isFinite(atrRatio)
-  ) {
-
-    if (atrRatio >= 1.50)
-      regime = 'HIGH';
-
-    else if (
-      atrRatio <= 0.70
-    )
-      regime = 'LOW';
-  }
-
-  return {
-    atr,
-    atrPct,
-    averageAtr:
-      avgAtr,
-    atrRatio,
-    regime
+  return{
+    atr:a,
+    atrPct:
+      c&&
+      c.close>0&&
+      Number.isFinite(a)
+        ?a/c.close*100
+        :NaN,
+    averageAtr:aa,
+    atrRatio:r,
+    regime:Number.isFinite(r)
+      ?r>=1.5
+        ?'HIGH'
+        :r<=.7
+          ?'LOW'
+          :'NORMAL'
+      :'NORMAL'
   };
 }
-
-// =========================
-// LIQUIDITY SWEEPS
-// =========================
 
 function liquidityContext(
-  bars,
-  lookback =
-    TECH.liquidityLookback
-) {
-
-  if (
-    !bars ||
-    bars.length <
-      lookback + 1
-  ) {
-    return {
-      bullishSweep: false,
-      bearishSweep: false,
-      priorHigh: NaN,
-      priorLow: NaN
+  b,
+  l=TECH.liquidityLookback
+){
+  if(!b||b.length<l+1){
+    return{
+      bullishSweep:false,
+      bearishSweep:false,
+      priorHigh:NaN,
+      priorLow:NaN
     };
   }
 
-  const current =
-    last(bars);
+  const c=last(b);
+  const p=b.slice(-(l+1),-1);
+  const h=highestHigh(p);
+  const lo=lowestLow(p);
 
-  const prior =
-    bars.slice(
-      -(lookback + 1),
-      -1
-    );
+  return{
+    bullishSweep:
+      c.low<lo&&
+      c.close>lo,
 
-  const priorHigh =
-    highestHigh(prior);
+    bearishSweep:
+      c.high>h&&
+      c.close<h,
 
-  const priorLow =
-    lowestLow(prior);
-
-  const bullishSweep =
-    current.low <
-      priorLow &&
-    current.close >
-      priorLow;
-
-  const bearishSweep =
-    current.high >
-      priorHigh &&
-    current.close <
-      priorHigh;
-
-  return {
-    bullishSweep,
-    bearishSweep,
-    priorHigh,
-    priorLow
+    priorHigh:h,
+    priorLow:lo
   };
 }
 
-// =========================
-// FAIR VALUE GAP
-// =========================
-
-function fvgContext(bars) {
-
-  if (
-    !bars ||
-    bars.length < 3
-  ) {
-    return {
-      bullish: false,
-      bearish: false,
-      bullGapLow: NaN,
-      bullGapHigh: NaN,
-      bearGapLow: NaN,
-      bearGapHigh: NaN
+function fvgContext(b){
+  if(!b||b.length<3){
+    return{
+      bullish:false,
+      bearish:false
     };
   }
 
-  const first =
-    bars[
-      bars.length - 3
-    ];
+  const a=b[b.length-3];
+  const c=last(b);
 
-  const third =
-    last(bars);
-
-  const bullish =
-    third.low >
-    first.high;
-
-  const bearish =
-    third.high <
-    first.low;
-
-  return {
-
-    bullish,
-    bearish,
-
-    bullGapLow:
-      bullish
-        ? first.high
-        : NaN,
-
-    bullGapHigh:
-      bullish
-        ? third.low
-        : NaN,
-
-    bearGapLow:
-      bearish
-        ? third.high
-        : NaN,
-
-    bearGapHigh:
-      bearish
-        ? first.low
-        : NaN
+  return{
+    bullish:c.low>a.high,
+    bearish:c.high<a.low,
+    bullGapLow:c.low>a.high?a.high:NaN,
+    bullGapHigh:c.low>a.high?c.low:NaN,
+    bearGapLow:c.high<a.low?c.high:NaN,
+    bearGapHigh:c.high<a.low?a.low:NaN
   };
 }
-
-// =========================
-// FIBONACCI
-// =========================
 
 function fibonacciContext(
-  bars,
-  lookback =
-    TECH.fibLookback
-) {
+  b,
+  l=TECH.fibLookback
+){
+  const s=b.slice(-l);
+  const h=highestHigh(s);
+  const lo=lowestLow(s);
+  const r=h-lo;
 
-  if (
-    !bars ||
-    bars.length < 10
-  ) {
+  if(!Number.isFinite(r)||r<=0){
     return null;
   }
 
-  const slice =
-    bars.slice(
-      -lookback
-    );
-
-  const high =
-    highestHigh(slice);
-
-  const low =
-    lowestLow(slice);
-
-  const range =
-    high - low;
-
-  if (
-    !Number.isFinite(range) ||
-    range <= 0
-  ) {
-    return null;
-  }
-
-  const current =
-    last(bars).close;
-
-  return {
-
-    swingHigh: high,
-    swingLow: low,
-    current,
-
-    retracementFromHigh: {
-
-      r382:
-        high -
-        range * 0.382,
-
-      r500:
-        high -
-        range * 0.500,
-
-      r618:
-        high -
-        range * 0.618,
-
-      r786:
-        high -
-        range * 0.786
-    },
-
-    retracementFromLow: {
-
-      r382:
-        low +
-        range * 0.382,
-
-      r500:
-        low +
-        range * 0.500,
-
-      r618:
-        low +
-        range * 0.618,
-
-      r786:
-        low +
-        range * 0.786
-    },
-
-    extensionUp: {
-
-      e1272:
-        low +
-        range * 1.272,
-
-      e1618:
-        low +
-        range * 1.618
-    },
-
-    extensionDown: {
-
-      e1272:
-        high -
-        range * 1.272,
-
-      e1618:
-        high -
-        range * 1.618
-    }
+  return{
+    swingHigh:h,
+    swingLow:lo,
+    r382:h-r*.382,
+    r500:h-r*.5,
+    r618:h-r*.618,
+    r786:h-r*.786
   };
 }
 
-// =========================
-// SUPERTREND
-// =========================
-
-function supertrendContext(
-  bars,
-  atrLength = 10,
-  multiplier = 3
-) {
-
-  if (
-    !bars ||
-    bars.length <
-      atrLength + 5
-  ) {
-    return {
-      direction: 'UNKNOWN',
-      value: NaN
+function supertrendContext(b,l=10,m=3){
+  if(!b||b.length<l+5){
+    return{
+      direction:'UNKNOWN',
+      value:NaN
     };
   }
 
-  let finalUpper = NaN;
-  let finalLower = NaN;
-  let supertrend = NaN;
-  let previousSupertrend = NaN;
+  let fu=NaN;
+  let fl=NaN;
+  let st=NaN;
+  let prevFu=NaN;
+  let prevFl=NaN;
+  let prevSt=NaN;
 
-  for (
-    let i = atrLength + 1;
-    i < bars.length;
-    i++
-  ) {
+  for(let i=l+1;i<b.length;i++){
+    const a=atrLast(
+      b.slice(0,i+1),
+      l
+    );
 
-    const slice =
-      bars.slice(
-        0,
-        i + 1
-      );
-
-    const atr =
-      atrLast(
-        slice,
-        atrLength
-      );
-
-    if (
-      !Number.isFinite(atr)
-    ) {
+    if(!Number.isFinite(a)){
       continue;
     }
 
-    const current =
-      bars[i];
+    const c=b[i];
+    const p=b[i-1];
+    const mid=(c.high+c.low)/2;
+    const bu=mid+m*a;
+    const bl=mid-m*a;
 
-    const previous =
-      bars[i - 1];
+    prevFu=fu;
+    prevFl=fl;
+    prevSt=st;
 
-    const hl2 =
-      (
-        current.high +
-        current.low
-      ) / 2;
+    fu=
+      !Number.isFinite(prevFu)||
+      bu<prevFu||
+      p.close>prevFu
+        ?bu
+        :prevFu;
 
-    const basicUpper =
-      hl2 +
-      multiplier * atr;
+    fl=
+      !Number.isFinite(prevFl)||
+      bl>prevFl||
+      p.close<prevFl
+        ?bl
+        :prevFl;
 
-    const basicLower =
-      hl2 -
-      multiplier * atr;
-
-    if (
-      !Number.isFinite(
-        finalUpper
-      )
-    ) {
-
-      finalUpper =
-        basicUpper;
-
-      finalLower =
-        basicLower;
-
-      supertrend =
-        current.close >= hl2
-          ? finalLower
-          : finalUpper;
-
-      previousSupertrend =
-        supertrend;
-
-      continue;
+    if(!Number.isFinite(prevSt)){
+      st=c.close>=mid?fl:fu;
+    }else if(prevSt===prevFu){
+      st=c.close<=fu?fu:fl;
+    }else{
+      st=c.close>=fl?fl:fu;
     }
-
-    finalUpper =
-      (
-        basicUpper <
-          finalUpper ||
-        previous.close >
-          finalUpper
-      )
-        ? basicUpper
-        : finalUpper;
-
-    finalLower =
-      (
-        basicLower >
-          finalLower ||
-        previous.close <
-          finalLower
-      )
-        ? basicLower
-        : finalLower;
-
-    if (
-      previousSupertrend ===
-      finalUpper
-    ) {
-
-      supertrend =
-        current.close <=
-          finalUpper
-          ? finalUpper
-          : finalLower;
-    }
-
-    else {
-
-      supertrend =
-        current.close >=
-          finalLower
-          ? finalLower
-          : finalUpper;
-    }
-
-    previousSupertrend =
-      supertrend;
   }
 
-  const close =
-    last(bars).close;
+  const c=last(b);
 
-  return {
-
-    value:
-      supertrend,
-
-    direction:
-      Number.isFinite(
-        supertrend
-      )
-        ? (
-            close >
-              supertrend
-              ? 'BULL'
-              : 'BEAR'
-          )
-        : 'UNKNOWN'
+  return{
+    direction:Number.isFinite(st)
+      ?c.close>st
+        ?'BULL'
+        :'BEAR'
+      :'UNKNOWN',
+    value:st
   };
 }
 
-// =========================
-// ICHIMOKU
-// =========================
-
-function ichimokuContext(bars) {
-
-  if (
-    !bars ||
-    bars.length < 52
-  ) {
-    return {
-      tenkan: NaN,
-      kijun: NaN,
-      spanA: NaN,
-      spanB: NaN,
-      cloudTop: NaN,
-      cloudBottom: NaN,
-      bias: 'UNKNOWN'
+function ichimokuContext(b){
+  if(!b||b.length<52){
+    return{
+      tenkan:NaN,
+      kijun:NaN,
+      spanA:NaN,
+      spanB:NaN,
+      bias:'UNKNOWN'
     };
   }
 
-  function midpoint(length) {
+  const mid=l=>(
+    highestHigh(b.slice(-l))+
+    lowestLow(b.slice(-l))
+  )/2;
 
-    const slice =
-      bars.slice(-length);
+  const t=mid(9);
+  const k=mid(26);
+  const a=(t+k)/2;
+  const s=mid(52);
+  const c=last(b).close;
+  const top=Math.max(a,s);
+  const bot=Math.min(a,s);
 
-    return (
-      highestHigh(slice) +
-      lowestLow(slice)
-    ) / 2;
-  }
-
-  const tenkan =
-    midpoint(9);
-
-  const kijun =
-    midpoint(26);
-
-  const spanA =
-    (
-      tenkan +
-      kijun
-    ) / 2;
-
-  const spanB =
-    midpoint(52);
-
-  const cloudTop =
-    Math.max(
-      spanA,
-      spanB
-    );
-
-  const cloudBottom =
-    Math.min(
-      spanA,
-      spanB
-    );
-
-  const close =
-    last(bars).close;
-
-  let bias = 'MIXED';
-
-  if (
-    close > cloudTop &&
-    tenkan > kijun
-  ) {
-    bias = 'BULL';
-  }
-
-  else if (
-    close < cloudBottom &&
-    tenkan < kijun
-  ) {
-    bias = 'BEAR';
-  }
-
-  return {
-    tenkan,
-    kijun,
-    spanA,
-    spanB,
-    cloudTop,
-    cloudBottom,
-    bias
+  return{
+    tenkan:t,
+    kijun:k,
+    spanA:a,
+    spanB:s,
+    bias:
+      c>top&&t>k
+        ?'BULL'
+        :c<bot&&t<k
+          ?'BEAR'
+          :'MIXED'
   };
 }
 
-// =========================
-// CHoCH
-// =========================
+function chochContext(b){
+  const s=findSwings(
+    b,
+    TECH.swingLeft,
+    TECH.swingRight
+  );
 
-function chochContext(bars) {
+  const h=s.highs.slice(-2);
+  const l=s.lows.slice(-2);
+  const c=last(b);
 
-  const swings =
-    findSwings(
-      bars,
-      TECH.swingLeft,
-      TECH.swingRight
-    );
-
-  const highs =
-    swings.highs.slice(-2);
-
-  const lows =
-    swings.lows.slice(-2);
-
-  const current =
-    last(bars);
-
-  if (
-    !current ||
-    highs.length < 2 ||
-    lows.length < 2
-  ) {
-    return {
-      bullish: false,
-      bearish: false,
-      direction: 'NONE'
+  if(!c||h.length<2||l.length<2){
+    return{
+      bullish:false,
+      bearish:false,
+      direction:'NONE'
     };
   }
 
-  const previousBearish =
-    highs[1].price <
-      highs[0].price &&
-    lows[1].price <
-      lows[0].price;
+  const prevBear=
+    h[1].price<h[0].price&&
+    l[1].price<l[0].price;
 
-  const previousBullish =
-    highs[1].price >
-      highs[0].price &&
-    lows[1].price >
-      lows[0].price;
+  const prevBull=
+    h[1].price>h[0].price&&
+    l[1].price>l[0].price;
 
-  const bullish =
-    previousBearish &&
-    current.close >
-      highs[1].price;
+  const bull=
+    prevBear&&
+    c.close>h[1].price;
 
-  const bearish =
-    previousBullish &&
-    current.close <
-      lows[1].price;
+  const bear=
+    prevBull&&
+    c.close<l[1].price;
 
-  return {
-    bullish,
-    bearish,
+  return{
+    bullish:bull,
+    bearish:bear,
     direction:
-      bullish
-        ? 'BULLISH_CHOCH'
-        : bearish
-          ? 'BEARISH_CHOCH'
-          : 'NONE'
+      bull
+        ?'BULLISH_CHOCH'
+        :bear
+          ?'BEARISH_CHOCH'
+          :'NONE'
   };
 }
 
-// =========================
-// TREND CONTEXT
-// =========================
+function trendContext(b){
+  const c=b.map(x=>x.close);
+  const cl=last(c);
 
-function trendContext(bars) {
+  const e9=emaLast(c,9);
+  const e21=emaLast(c,21);
+  const e50=emaLast(c,50);
+  const e100=emaLast(c,100);
+  const e200=c.length>=200
+    ?emaLast(c,200)
+    :NaN;
 
-  const closes =
-    bars.map(
-      bar => bar.close
-    );
+  const alignment=
+    Number.isFinite(e50)&&
+    cl>e9&&
+    e9>e21&&
+    e21>e50
+      ?'BULL'
+      :Number.isFinite(e50)&&
+       cl<e9&&
+       e9<e21&&
+       e21<e50
+        ?'BEAR'
+        :'MIXED';
 
-  const close =
-    last(closes);
+  const macro=
+    Number.isFinite(e200)
+      ?cl>e200
+        ?'BULL'
+        :cl<e200
+          ?'BEAR'
+          :'FLAT'
+      :Number.isFinite(e100)
+        ?cl>e100
+          ?'BULL'
+          :'BEAR'
+        :'UNKNOWN';
 
-  const ema9 =
-    emaLast(
-      closes,
-      TECH.emaFast
-    );
-
-  const ema21 =
-    emaLast(
-      closes,
-      TECH.emaMedium
-    );
-
-  const ema50 =
-    emaLast(
-      closes,
-      TECH.emaTrend
-    );
-
-  const ema100 =
-    emaLast(
-      closes,
-      TECH.emaLong
-    );
-
-  const ema200 =
-    closes.length >=
-      TECH.emaMacro
-      ? emaLast(
-          closes,
-          TECH.emaMacro
-        )
-      : NaN;
-
-  let alignment =
-    'MIXED';
-
-  if (
-    Number.isFinite(ema50) &&
-    close > ema9 &&
-    ema9 > ema21 &&
-    ema21 > ema50
-  ) {
-    alignment = 'BULL';
-  }
-
-  else if (
-    Number.isFinite(ema50) &&
-    close < ema9 &&
-    ema9 < ema21 &&
-    ema21 < ema50
-  ) {
-    alignment = 'BEAR';
-  }
-
-  let macro =
-    'UNKNOWN';
-
-  if (
-    Number.isFinite(ema200)
-  ) {
-
-    macro =
-      close > ema200
-        ? 'BULL'
-        : close < ema200
-          ? 'BEAR'
-          : 'FLAT';
-  }
-
-  else if (
-    Number.isFinite(ema100)
-  ) {
-
-    macro =
-      close > ema100
-        ? 'BULL'
-        : 'BEAR';
-  }
-
-  return {
-    close,
-    ema9,
-    ema21,
-    ema50,
-    ema100,
-    ema200,
+  return{
+    close:cl,
+    ema9:e9,
+    ema21:e21,
+    ema50:e50,
+    ema100:e100,
+    ema200:e200,
     alignment,
     macro
   };
 }
 
-// =========================
-// MOMENTUM CONTEXT
-// =========================
+function momentumContext(b){
+  const c=b.map(x=>x.close);
 
-function momentumContext(bars) {
-
-  const closes =
-    bars.map(
-      bar => bar.close
-    );
-
-  return {
-
-    rsi:
-      rsiLast(
-        closes,
-        TECH.rsiLen
-      ),
-
-    cmo:
-      cmoLast(
-        closes,
-        TECH.cmoLen
-      ),
-
-    macd:
-      macdLast(closes),
-
-    stochastic:
-      stochasticLast(
-        bars,
-        TECH.stochasticLen
-      ),
-
-    williamsR:
-      williamsRLast(
-        bars,
-        TECH.stochasticLen
-      ),
-
-    roc:
-      rocLast(
-        closes,
-        TECH.rocLen
-      )
+  return{
+    rsi:rsiLast(c,TECH.rsiLen),
+    cmo:cmoLast(c,TECH.cmoLen),
+    macd:macdLast(c),
+    stochastic:stochasticLast(
+      b,
+      TECH.stochasticLen
+    ),
+    williamsR:williamsRLast(
+      b,
+      TECH.stochasticLen
+    ),
+    roc:rocLast(c,TECH.rocLen)
   };
 }
-// =========================
-// COMPLETE TECHNICAL INTELLIGENCE
-// =========================
 
-function buildTechnicalIntelligence(bars) {
-
-  if (
-    !Array.isArray(bars) ||
-    bars.length < CORE_MIN_HISTORY
-  ) {
+function buildTechnicalIntelligence(b){
+  if(!Array.isArray(b)||b.length<CORE_MIN_HISTORY){
     return null;
   }
 
-  const closes =
-    bars.map(
-      bar => bar.close
-    );
+  const c=b.map(x=>x.close);
+  const bar=last(b);
 
-  const currentBar =
-    last(bars);
+  const trend=trendContext(b);
+  const momentum=momentumContext(b);
+  const volatility=volatilityContext(b);
+  const dmi=dmiAdx(b,TECH.adxLen);
+  const bollinger=bollingerLast(
+    c,
+    TECH.bbLen,
+    TECH.bbStd
+  );
+  const keltner=keltnerLast(b);
+  const volume=volumeContext(b);
+  const structure=marketStructure(b);
+  const liquidity=liquidityContext(b);
+  const fvg=fvgContext(b);
+  const fibonacci=fibonacciContext(b);
+  const candle=candleContext(bar);
+  const sr=supportResistance(b,TECH.srLen);
+  const supertrend=supertrendContext(b);
+  const ichimoku=ichimokuContext(b);
+  const choch=chochContext(b);
+  const vwap=vwapLast(b,TECH.vwapLookback);
+  const obv=obvLast(b);
+  const mfi=mfiLast(b,TECH.mfiLen);
 
-  const trend =
-    trendContext(bars);
+  let bull=0,bear=0;
 
-  const momentum =
-    momentumContext(bars);
+  if(trend.alignment==='BULL')bull+=2;
+  if(trend.alignment==='BEAR')bear+=2;
 
-  const volatility =
-    volatilityContext(bars);
+  if(trend.macro==='BULL')bull++;
+  if(trend.macro==='BEAR')bear++;
 
-  const dmi =
-    dmiAdx(
-      bars,
-      TECH.adxLen
-    );
+  if(supertrend.direction==='BULL')bull++;
+  if(supertrend.direction==='BEAR')bear++;
 
-  const bollinger =
-    bollingerLast(
-      closes,
-      TECH.bbLen,
-      TECH.bbStd
-    );
+  if(ichimoku.bias==='BULL')bull++;
+  if(ichimoku.bias==='BEAR')bear++;
 
-  const keltner =
-    keltnerLast(bars);
+  if(Number.isFinite(dmi.adx)&&dmi.adx>=20){
+    if(dmi.plusDI>dmi.minusDI)bull++;
+    else if(dmi.minusDI>dmi.plusDI)bear++;
+  }
 
-  const volume =
-    volumeContext(bars);
-
-  const structure =
-    marketStructure(bars);
-
-  const liquidity =
-    liquidityContext(bars);
-
-  const fvg =
-    fvgContext(bars);
-
-  const fibonacci =
-    fibonacciContext(bars);
-
-  const candle =
-    candleContext(currentBar);
-
-  const sr =
-    supportResistance(
-      bars,
-      TECH.srLen
-    );
-
-  const supertrend =
-    supertrendContext(bars);
-
-  const ichimoku =
-    ichimokuContext(bars);
-
-  const choch =
-    chochContext(bars);
-
-  const vwap =
-    vwapLast(
-      bars,
-      TECH.vwapLookback
-    );
-
-  const obv =
-    obvLast(bars);
-
-  const mfi =
-    mfiLast(
-      bars,
-      TECH.mfiLen
-    );
-
-  let bullishScore = 0;
-  let bearishScore = 0;
-
-  // Trend
-  if (
-    trend.alignment === 'BULL'
-  ) bullishScore += 2;
-
-  if (
-    trend.alignment === 'BEAR'
-  ) bearishScore += 2;
-
-  if (
-    trend.macro === 'BULL'
-  ) bullishScore += 1;
-
-  if (
-    trend.macro === 'BEAR'
-  ) bearishScore += 1;
-
-  // Supertrend
-  if (
-    supertrend.direction === 'BULL'
-  ) bullishScore += 1;
-
-  if (
-    supertrend.direction === 'BEAR'
-  ) bearishScore += 1;
-
-  // Ichimoku
-  if (
-    ichimoku.bias === 'BULL'
-  ) bullishScore += 1;
-
-  if (
-    ichimoku.bias === 'BEAR'
-  ) bearishScore += 1;
-
-  // DMI
-  if (
-    Number.isFinite(dmi.adx) &&
-    dmi.adx >= 20
-  ) {
-
-    if (
-      dmi.plusDI >
-      dmi.minusDI
-    ) {
-      bullishScore += 1;
+  if(Number.isFinite(momentum.rsi)){
+    if(
+      momentum.rsi>=52&&
+      momentum.rsi<=75
+    ){
+      bull++;
     }
 
-    if (
-      dmi.minusDI >
-      dmi.plusDI
-    ) {
-      bearishScore += 1;
+    if(
+      momentum.rsi<=48&&
+      momentum.rsi>=25
+    ){
+      bear++;
     }
   }
 
-  // RSI
-  if (
-    Number.isFinite(
-      momentum.rsi
-    )
-  ) {
+  if(momentum.cmo>0)bull++;
+  if(momentum.cmo<0)bear++;
 
-    if (
-      momentum.rsi >= 52 &&
-      momentum.rsi <= 75
-    ) {
-      bullishScore += 1;
-    }
+  if(momentum.macd?.histogram>0)bull++;
+  if(momentum.macd?.histogram<0)bear++;
 
-    if (
-      momentum.rsi <= 48 &&
-      momentum.rsi >= 25
-    ) {
-      bearishScore += 1;
-    }
+  if(
+    structure.structure==='BULLISH'||
+    structure.bos==='BULLISH_BOS'
+  ){
+    bull++;
   }
 
-  // CMO
-  if (
-    Number.isFinite(
-      momentum.cmo
-    )
-  ) {
-
-    if (
-      momentum.cmo > 0
-    ) bullishScore += 1;
-
-    if (
-      momentum.cmo < 0
-    ) bearishScore += 1;
+  if(
+    structure.structure==='BEARISH'||
+    structure.bos==='BEARISH_BOS'
+  ){
+    bear++;
   }
 
-  // MACD
-  if (
-    Number.isFinite(
-      momentum.macd?.histogram
-    )
-  ) {
+  if(choch.bullish)bull+=2;
+  if(choch.bearish)bear+=2;
 
-    if (
-      momentum.macd.histogram > 0
-    ) {
-      bullishScore += 1;
-    }
+  if(liquidity.bullishSweep)bull++;
+  if(liquidity.bearishSweep)bear++;
 
-    if (
-      momentum.macd.histogram < 0
-    ) {
-      bearishScore += 1;
-    }
+  if(
+    candle.direction==='BULLISH'&&
+    candle.bodyRatio>=.5
+  ){
+    bull++;
   }
 
-  // Market structure
-  if (
-    structure.structure ===
-      'BULLISH'
-  ) {
-    bullishScore += 1;
+  if(
+    candle.direction==='BEARISH'&&
+    candle.bodyRatio>=.5
+  ){
+    bear++;
   }
 
-  if (
-    structure.structure ===
-      'BEARISH'
-  ) {
-    bearishScore += 1;
+  if(Number.isFinite(vwap)){
+    if(bar.close>vwap)bull++;
+    else if(bar.close<vwap)bear++;
   }
 
-  if (
-    structure.bos ===
-      'BULLISH_BOS'
-  ) {
-    bullishScore += 1;
-  }
-
-  if (
-    structure.bos ===
-      'BEARISH_BOS'
-  ) {
-    bearishScore += 1;
-  }
-
-  // CHoCH
-  if (
-    choch.bullish
-  ) bullishScore += 2;
-
-  if (
-    choch.bearish
-  ) bearishScore += 2;
-
-  // Liquidity sweep
-  if (
-    liquidity.bullishSweep
-  ) bullishScore += 1;
-
-  if (
-    liquidity.bearishSweep
-  ) bearishScore += 1;
-
-  // Candle
-  if (
-    candle.direction ===
-      'BULLISH' &&
-    candle.bodyRatio >= 0.50
-  ) {
-    bullishScore += 1;
-  }
-
-  if (
-    candle.direction ===
-      'BEARISH' &&
-    candle.bodyRatio >= 0.50
-  ) {
-    bearishScore += 1;
-  }
-
-  // VWAP
-  if (
-    Number.isFinite(vwap)
-  ) {
-
-    if (
-      currentBar.close > vwap
-    ) {
-      bullishScore += 1;
-    }
-
-    if (
-      currentBar.close < vwap
-    ) {
-      bearishScore += 1;
-    }
-  }
-
-  const bias =
-    bullishScore >
-      bearishScore
-      ? 'BULL'
-      : bearishScore >
-          bullishScore
-        ? 'BEAR'
-        : 'NEUTRAL';
-
-  return {
-
-    barTime:
-      currentBar.openTime,
-
-    price:
-      currentBar.close,
-
-    bias,
-
-    score: {
-      bullish:
-        bullishScore,
-      bearish:
-        bearishScore
+  return{
+    barTime:bar.openTime,
+    price:bar.close,
+    bias:
+      bull>bear
+        ?'BULL'
+        :bear>bull
+          ?'BEAR'
+          :'NEUTRAL',
+    score:{
+      bullish:bull,
+      bearish:bear
     },
-
     trend,
     momentum,
     volatility,
@@ -3084,7 +1289,7 @@ function buildTechnicalIntelligence(bars) {
     fvg,
     fibonacci,
     candle,
-    supportResistance: sr,
+    supportResistance:sr,
     supertrend,
     ichimoku,
     choch,
@@ -3094,1188 +1299,271 @@ function buildTechnicalIntelligence(bars) {
   };
 }
 
-// =========================
-// TWELVE DATA SYMBOL FORMAT
-// =========================
+function compactTechnical(t){
+  if(!t)return null;
 
-function toTwelveSymbol(symbol) {
+  return{
+    price:t.price,
+    bias:t.bias,
+    score:t.score,
 
-  if (symbol === 'XAUUSD')
-    return 'XAU/USD';
+    trend:{
+      alignment:t.trend?.alignment,
+      macro:t.trend?.macro,
+      ema9:t.trend?.ema9,
+      ema21:t.trend?.ema21,
+      ema50:t.trend?.ema50,
+      ema200:t.trend?.ema200
+    },
 
-  if (
-    typeof symbol !==
-      'string' ||
-    symbol.length !== 6
-  ) {
-    return symbol;
+    momentum:{
+      rsi:t.momentum?.rsi,
+      cmo:t.momentum?.cmo,
+      macdHistogram:t.momentum?.macd?.histogram,
+      stochastic:t.momentum?.stochastic,
+      williamsR:t.momentum?.williamsR,
+      roc:t.momentum?.roc
+    },
+
+    adx:t.dmi?.adx,
+    plusDI:t.dmi?.plusDI,
+    minusDI:t.dmi?.minusDI,
+
+    atr:t.volatility?.atr,
+    volatilityRegime:t.volatility?.regime,
+
+    structure:t.structure,
+    choch:t.choch,
+    supertrend:t.supertrend,
+
+    ichimoku:{
+      bias:t.ichimoku?.bias,
+      tenkan:t.ichimoku?.tenkan,
+      kijun:t.ichimoku?.kijun
+    },
+
+    liquidity:t.liquidity,
+    fvg:t.fvg,
+    supportResistance:t.supportResistance,
+    volume:t.volume,
+    vwap:t.vwap,
+    mfi:t.mfi
+  };
+}
+
+function localCandidate(symbol,t){
+  if(!t||t.bias==='NEUTRAL'){
+    return null;
   }
 
-  return (
-    symbol.slice(0, 3) +
-    '/' +
-    symbol.slice(3, 6)
+  const edge=Math.abs(
+    n(t.score?.bullish)-
+    n(t.score?.bearish)
   );
-}
 
-// =========================
-// TWELVE DATA TIMEFRAME
-// =========================
+  const confirms=
+    t.bias==='BULL'
+      ?[
+        t.trend?.alignment==='BULL',
+        t.supertrend?.direction==='BULL',
+        t.ichimoku?.bias==='BULL',
+        t.structure?.structure==='BULLISH',
+        t.choch?.bullish
+      ].filter(Boolean).length
+      :[
+        t.trend?.alignment==='BEAR',
+        t.supertrend?.direction==='BEAR',
+        t.ichimoku?.bias==='BEAR',
+        t.structure?.structure==='BEARISH',
+        t.choch?.bearish
+      ].filter(Boolean).length;
 
-function toTwelveInterval(
-  interval
-) {
-
-  if (
-    interval === '15m'
-  ) return '15min';
-
-  if (
-    interval === '1h'
-  ) return '1h';
-
-  if (
-    interval === '4h'
-  ) return '4h';
-
-  return interval;
-}
-
-// =========================
-// TWELVE DATA ERROR CHECK
-// =========================
-
-function assertTwelveResponse(data) {
-
-  if (!data) {
-    throw new Error(
-      'Twelve Data returned empty response'
-    );
+  if(
+    edge<3||
+    confirms<1||
+    !Number.isFinite(t.volatility?.atr)||
+    t.volatility.atr<=0
+  ){
+    return null;
   }
 
-  if (
-    data.status === 'error'
-  ) {
-    throw new Error(
-      data.message ||
-      data.code ||
-      'Twelve Data API error'
-    );
-  }
-}
-
-// =========================
-// FETCH OHLC FROM TWELVE DATA
-// =========================
-
-async function fetchBars(
-  symbol,
-  interval = TIMEFRAME,
-  outputSize = HISTORY_LIMIT
-) {
-
-  if (
-    !TWELVE_DATA_API_KEY
-  ) {
-    throw new Error(
-      'TWELVE_DATA_API_KEY is missing'
-    );
-  }
-
-  const twelveSymbol =
-    toTwelveSymbol(symbol);
-
-  const twelveInterval =
-    toTwelveInterval(interval);
-
-  const response =
-    await http.get(
-      `${TWELVE_BASE}/time_series`,
-      {
-        params: {
-          symbol:
-            twelveSymbol,
-
-          interval:
-            twelveInterval,
-
-          outputsize:
-            outputSize,
-
-          order:
-            'asc',
-
-          timezone:
-            'UTC',
-
-          apikey:
-            TWELVE_DATA_API_KEY
-        }
-      }
-    );
-
-  const data =
-    response.data;
-
-  assertTwelveResponse(data);
-
-  if (
-    !Array.isArray(
-      data.values
-    )
-  ) {
-    throw new Error(
-      `No OHLC values for ${symbol} ${interval}`
-    );
-  }
-
-  const bars =
-    data.values.map(
-      item => ({
-
-        openTime:
-          item.datetime,
-
-        open:
-          n(
-            item.open,
-            NaN
-          ),
-
-        high:
-          n(
-            item.high,
-            NaN
-          ),
-
-        low:
-          n(
-            item.low,
-            NaN
-          ),
-
-        close:
-          n(
-            item.close,
-            NaN
-          ),
-
-        volume:
-          n(
-            item.volume,
-            0
-          ),
-
-        isOpen:
-          false
-      })
-    );
-
-  return normalizeBars(
-    bars
-  );
-}
-
-// =========================
-// FETCH CURRENT PRICE
-// =========================
-
-async function fetchCurrentPrice(
-  symbol
-) {
-
-  if (
-    !TWELVE_DATA_API_KEY
-  ) {
-    throw new Error(
-      'TWELVE_DATA_API_KEY is missing'
-    );
-  }
-
-  const response =
-    await http.get(
-      `${TWELVE_BASE}/price`,
-      {
-        params: {
-          symbol:
-            toTwelveSymbol(
-              symbol
-            ),
-
-          apikey:
-            TWELVE_DATA_API_KEY
-        }
-      }
-    );
-
-  const data =
-    response.data;
-
-  assertTwelveResponse(data);
-
-  const price =
-    n(
-      data.price,
-      NaN
-    );
-
-  if (
-    !Number.isFinite(price) ||
-    price <= 0
-  ) {
-    throw new Error(
-      `Invalid market price for ${symbol}`
-    );
-  }
-
-  return price;
-}
-
-// =========================
-// FETCH QUOTE
-// =========================
-
-async function fetchQuote(
-  symbol
-) {
-
-  if (
-    !TWELVE_DATA_API_KEY
-  ) {
-    throw new Error(
-      'TWELVE_DATA_API_KEY is missing'
-    );
-  }
-
-  try {
-
-    const response =
-      await http.get(
-        `${TWELVE_BASE}/quote`,
-        {
-          params: {
-
-            symbol:
-              toTwelveSymbol(
-                symbol
-              ),
-
-            apikey:
-              TWELVE_DATA_API_KEY
-          }
-        }
-      );
-
-    const data =
-      response.data;
-
-    assertTwelveResponse(data);
-
-    const close =
-      n(
-        data.close,
-        NaN
-      );
-
-    const bid =
-      n(
-        data.bid,
-        NaN
-      );
-
-    const ask =
-      n(
-        data.ask,
-        NaN
-      );
-
-    const fallbackPrice =
-      Number.isFinite(close)
-        ? close
-        : await fetchCurrentPrice(
-            symbol
-          );
-
-    let finalBid = bid;
-    let finalAsk = ask;
-
-    // بعض استجابات Twelve Data
-    // لا ترجع bid / ask للفوركس
-    if (
-      !Number.isFinite(
-        finalBid
-      ) ||
-      !Number.isFinite(
-        finalAsk
-      ) ||
-      finalBid <= 0 ||
-      finalAsk <= 0
-    ) {
-
-      finalBid =
-        fallbackPrice;
-
-      finalAsk =
-        fallbackPrice;
-    }
-
-    const mid =
-      (
-        finalBid +
-        finalAsk
-      ) / 2;
-
-    const quote = {
-
-      symbol,
-
-      bid:
-        finalBid,
-
-      ask:
-        finalAsk,
-
-      mid,
-
-      spread:
-        Math.max(
-          0,
-          finalAsk -
-          finalBid
-        ),
-
-      fetchedAt:
-        new Date()
-    };
-
-    state.latestQuotes.set(
-      symbol,
-      quote
-    );
-
-    return quote;
-
-  }
-
-  catch (error) {
-
-    state.lastMarketError =
-      safeError(error);
-
-    throw error;
-  }
-}
-
-// =========================
-// EXECUTION PRICE
-// =========================
-
-function entryExecutionPrice(
-  direction,
-  quote
-) {
-
-  if (
-    direction === 'BUY'
-  ) {
-    return quote.ask;
-  }
-
-  return quote.bid;
-}
-
-function exitExecutionPrice(
-  direction,
-  quote
-) {
-
-  if (
-    direction === 'BUY'
-  ) {
-    return quote.bid;
-  }
-
-  return quote.ask;
-}
-
-// =========================
-// MARKET SESSION
-// =========================
-
-function getMarketSession(
-  date = new Date()
-) {
-
-  const hour =
-    date.getUTCHours();
-
-  const sessions = [];
-
-  // تقريب UTC
-  if (
-    hour >= 0 &&
-    hour < 9
-  ) {
-    sessions.push('ASIA');
-  }
-
-  if (
-    hour >= 7 &&
-    hour < 16
-  ) {
-    sessions.push('LONDON');
-  }
-
-  if (
-    hour >= 12 &&
-    hour < 21
-  ) {
-    sessions.push('NEW_YORK');
-  }
-
-  if (
-    sessions.length === 0
-  ) {
-    sessions.push('OFF_HOURS');
-  }
-
-  return {
-
-    utcHour:
-      hour,
-
-    sessions,
-
-    londonNewYorkOverlap:
-      hour >= 12 &&
-      hour < 16
-  };
-}
-
-// =========================
-// ECONOMIC NEWS
-// =========================
-
-function normalizeNewsCurrency(
-  value
-) {
-
-  return String(
-    value || ''
-  )
-    .trim()
-    .toUpperCase();
-}
-
-function normalizeNewsImpact(
-  value
-) {
-
-  const text =
-    String(
-      value || ''
-    ).toLowerCase();
-
-  if (
-    text.includes('high') ||
-    text.includes('red')
-  ) {
-    return 'HIGH';
-  }
-
-  if (
-    text.includes('medium') ||
-    text.includes('orange')
-  ) {
-    return 'MEDIUM';
-  }
-
-  return 'LOW';
-}
-
-async function fetchEconomicNews() {
-
-  try {
-
-    const response =
-      await http.get(
-        'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
-        {
-          timeout: 15000
-        }
-      );
-
-    const rows =
-      Array.isArray(
-        response.data
-      )
-        ? response.data
-        : [];
-
-    economicNews =
-      rows
-        .map(item => {
-
-          const timestamp =
-            new Date(
-              item.date ||
-              item.datetime ||
-              item.time ||
-              item.timestamp
-            );
-
-          return {
-
-            title:
-              String(
-                item.title ||
-                item.event ||
-                ''
-              ),
-
-            country:
-              normalizeNewsCurrency(
-                item.country
-              ),
-
-            impact:
-              normalizeNewsImpact(
-                item.impact
-              ),
-
-            time:
-              timestamp
-          };
-        })
-
-        .filter(item =>
-          item.title &&
-          Number.isFinite(
-            item.time.getTime()
-          )
-        );
-
-    console.log(
-      `[NEWS] loaded ${economicNews.length} events`
-    );
-
-  }
-
-  catch (error) {
-
-    console.error(
-      '[NEWS] fetch failed:',
-      safeError(error)
-    );
-  }
-}
-
-// =========================
-// SYMBOL CURRENCIES
-// =========================
-
-function symbolCurrencies(
-  symbol
-) {
-
-  if (
-    symbol === 'XAUUSD'
-  ) {
-    return [
-      'XAU',
-      'USD'
-    ];
-  }
-
-  if (
-    typeof symbol !==
-      'string' ||
-    symbol.length < 6
-  ) {
-    return [];
-  }
-
-  return [
-    symbol.slice(0, 3),
-    symbol.slice(3, 6)
-  ];
-}
-
-// =========================
-// HIGH IMPACT NEWS BLOCK
-// =========================
-
-function getNewsBlock(
-  symbol,
-  now = new Date()
-) {
-
-  const currencies =
-    symbolCurrencies(
-      symbol
-    );
-
-  const windowMs =
-    30 * 60 * 1000;
-
-  const nowMs =
-    now.getTime();
-
-  const blocking =
-    economicNews.filter(event => {
-
-      if (
-        event.impact !==
-          'HIGH'
-      ) {
-        return false;
-      }
-
-      if (
-        !currencies.includes(
-          event.country
-        )
-      ) {
-        return false;
-      }
-
-      const diff =
-        Math.abs(
-          event.time.getTime() -
-          nowMs
-        );
-
-      return diff <=
-        windowMs;
-    });
-
-  return {
-
-    blocked:
-      blocking.length > 0,
-
-    events:
-      blocking.slice(0, 5)
-  };
-}
-
-// =========================
-// CURRENCY STRENGTH METER
-// =========================
-
-function calculateCurrencyStrength() {
-
-  const values =
-    new Map();
-
-  const counts =
-    new Map();
-
-  for (
-    const [
-      symbol,
-      pair
-    ] of state.pairState
-  ) {
-
-    // XAU لا يدخل في حساب
-    // قوة العملات الأساسية
-    if (
-      symbol === 'XAUUSD'
-    ) {
-      continue;
-    }
-
-    const bars =
-      pair?.bars15m;
-
-    if (
-      !Array.isArray(bars) ||
-      bars.length < 13
-    ) {
-      continue;
-    }
-
-    const current =
-      last(bars)?.close;
-
-    const previous =
-      bars[
-        bars.length - 13
-      ]?.close;
-
-    const change =
-      pctChange(
-        previous,
-        current
-      );
-
-    if (
-      !Number.isFinite(change)
-    ) {
-      continue;
-    }
-
-    const base =
-      symbol.slice(0, 3);
-
-    const quote =
-      symbol.slice(3, 6);
-
-    values.set(
-      base,
-      n(
-        values.get(base),
-        0
-      ) + change
-    );
-
-    counts.set(
-      base,
-      n(
-        counts.get(base),
-        0
-      ) + 1
-    );
-
-    values.set(
-      quote,
-      n(
-        values.get(quote),
-        0
-      ) - change
-    );
-
-    counts.set(
-      quote,
-      n(
-        counts.get(quote),
-        0
-      ) + 1
-    );
-  }
-
-  const result = {};
-
-  for (
-    const [
-      currency,
-      value
-    ] of values
-  ) {
-
-    const count =
-      Math.max(
-        1,
-        n(
-          counts.get(currency),
-          1
-        )
-      );
-
-    result[currency] =
-      value / count;
-  }
-
-  return result;
-}
-
-function pairStrengthContext(
-  symbol
-) {
-
-  const strength =
-    calculateCurrencyStrength();
-
-  if (
-    symbol === 'XAUUSD'
-  ) {
-
-    return {
-      base: 'XAU',
-      quote: 'USD',
-      baseStrength: null,
-      quoteStrength:
-        n(
-          strength.USD,
-          0
-        ),
-      differential: null
-    };
-  }
-
-  const base =
-    symbol.slice(0, 3);
-
-  const quote =
-    symbol.slice(3, 6);
-
-  const baseStrength =
-    n(
-      strength[base],
-      0
-    );
-
-  const quoteStrength =
-    n(
-      strength[quote],
-      0
-    );
-
-  return {
-    base,
-    quote,
-    baseStrength,
-    quoteStrength,
-    differential:
-      baseStrength -
-      quoteStrength
-  };
-}
-
-// =========================
-// INITIALIZE ONE SYMBOL
-// =========================
-
-async function initializeSymbol(
-  symbol
-) {
-
-  const bars15m =
-    await fetchBars(
-      symbol,
-      '15m',
-      HISTORY_LIMIT
-    );
-
-  if (
-    bars15m.length <
-    CORE_MIN_HISTORY
-  ) {
-    throw new Error(
-      `${symbol}: insufficient 15m history`
-    );
-  }
-
-  const closed =
-    closedBarsOnly(
-      bars15m,
-      '15m'
-    );
-
-  if (
-    !closed.length
-  ) {
-    throw new Error(
-      `${symbol}: no closed 15m bars`
-    );
-  }
-
-  const latest =
-    last(closed);
-
-  state.pairState.set(
+  return{
     symbol,
-    {
-
-      symbol,
-
-      bars15m:
-        closed,
-
-      bars1h: [],
-
-      bars4h: [],
-
-      lastClosedBarTime:
-        latest.openTime,
-
-      initializedAt:
-        new Date(),
-
-      lastRefreshAt:
-        new Date(),
-
-      lastError:
-        null
-    }
-  );
-
-  return true;
+    technical:t,
+    edge,
+    rank:
+      edge+
+      confirms+
+      (n(t.dmi?.adx)>=20?1:0)
+  };
 }
 
-// =========================
-// INITIALIZE MARKET
-// =========================
-
-async function initializeMarket() {
-
-  console.log(
-    '[MARKET] initializing Twelve Data...'
-  );
-
-  if (
-    !TWELVE_DATA_API_KEY
-  ) {
-    throw new Error(
-      'TWELVE_DATA_API_KEY is required'
-    );
+const accountSchema=new mongoose.Schema({
+  accountKey:{
+    type:String,
+    unique:true,
+    required:true
+  },
+  balance:{
+    type:Number,
+    required:true
+  },
+  startingBalance:{
+    type:Number,
+    required:true
+  },
+  version:String,
+  mode:String,
+  telegramChatId:String,
+  apiUsageDay:String,
+  twelveCreditsUsed:{
+    type:Number,
+    default:0
+  },
+  geminiEntryUsed:{
+    type:Number,
+    default:0
+  },
+  geminiManageUsed:{
+    type:Number,
+    default:0
   }
+},{
+  timestamps:true
+});
 
-  let success = 0;
+const tradeSchema=new mongoose.Schema({
+  tradeId:{
+    type:String,
+    unique:true,
+    required:true
+  },
+  symbol:String,
+  direction:String,
+  status:String,
+  entryPrice:Number,
+  stopLoss:Number,
+  initialStopLoss:Number,
+  partialTargetPrice:Number,
+  quantity:Number,
+  initialQuantity:Number,
+  riskAmount:Number,
+  riskPct:Number,
+  confidence:Number,
+  entryReason:String,
+  managementReason:String,
+  openedAt:Date,
+  closedAt:Date,
+  exitPrice:Number,
+  realizedPartialPnl:{
+    type:Number,
+    default:0
+  },
+  totalPnl:{
+    type:Number,
+    default:0
+  },
+  resultR:Number,
+  partialClosed:{
+    type:Boolean,
+    default:false
+  },
+  trailingLevelR:{
+    type:Number,
+    default:0
+  },
+  breakEvenActivated:{
+    type:Boolean,
+    default:false
+  },
+  maxFavorablePrice:Number,
+  maxAdversePrice:Number,
+  mfeR:Number,
+  maeR:Number,
+  aiEntryDecision:
+    mongoose.Schema.Types.Mixed,
+  technicalSnapshot:
+    mongoose.Schema.Types.Mixed
+},{
+  timestamps:true
+});
 
-  // Sequential initialization is intentional.
-  // It reduces the chance of API rate-limit bursts.
-  for (
-    const symbol of INSTRUMENTS
-  ) {
-
-    try {
-
-      await initializeSymbol(
-        symbol
-      );
-
-      success++;
-
-      console.log(
-        `[MARKET] ${symbol} ready`
-      );
-
-    }
-
-    catch (error) {
-
-      console.error(
-        `[MARKET] ${symbol} failed:`,
-        safeError(error)
-      );
-    }
-
-    await sleep(8000);
+const journalSchema=new mongoose.Schema({
+  type:String,
+  symbol:String,
+  tradeId:String,
+  message:String,
+  data:mongoose.Schema.Types.Mixed,
+  createdAt:{
+    type:Date,
+    default:Date.now
   }
+},{
+  collection:'lomyforexjournalv151'
+});
 
-  if (success === 0) {
-
-    throw new Error(
-      'Market initialization failed for all symbols'
-    );
-  }
-
-  state.marketReady =
-    true;
-
-  console.log(
-    `[MARKET] ${success}/${INSTRUMENTS.length} symbols initialized`
-  );
-      }
-// =========================
-// MONGODB SCHEMAS
-// =========================
-
-const accountSchema =
-  new mongoose.Schema(
-    {
-      accountKey: {
-        type: String,
-        unique: true,
-        required: true
-      },
-
-      balance: {
-        type: Number,
-        required: true
-      },
-
-      startingBalance: {
-        type: Number,
-        required: true
-      },
-
-      version: String,
-      mode: String
-    },
-    {
-      timestamps: true
-    }
-  );
-
-const tradeSchema =
-  new mongoose.Schema(
-    {
-      tradeId: {
-        type: String,
-        unique: true,
-        required: true
-      },
-
-      symbol: String,
-
-      direction: String,
-
-      status: String,
-
-      entryPrice: Number,
-
-      stopLoss: Number,
-
-      initialStopLoss: Number,
-
-      partialTargetPrice: Number,
-
-      quantity: Number,
-
-      initialQuantity: Number,
-
-      riskAmount: Number,
-
-      riskPct: Number,
-
-      confidence: Number,
-
-      entryReason: String,
-
-      managementReason: String,
-
-      openedAt: Date,
-
-      closedAt: Date,
-
-      exitPrice: Number,
-
-      realizedPartialPnl: {
-        type: Number,
-        default: 0
-      },
-
-      totalPnl: {
-        type: Number,
-        default: 0
-      },
-
-      resultR: Number,
-
-      partialClosed: {
-        type: Boolean,
-        default: false
-      },
-
-      trailingLevelR: {
-        type: Number,
-        default: 0
-      },
-
-      breakEvenActivated: {
-        type: Boolean,
-        default: false
-      },
-
-      maxFavorablePrice: Number,
-
-      maxAdversePrice: Number,
-
-      mfeR: Number,
-
-      maeR: Number,
-
-      aiEntryDecision:
-        mongoose.Schema.Types.Mixed,
-
-      technicalSnapshot:
-        mongoose.Schema.Types.Mixed
-    },
-    {
-      timestamps: true
-    }
-  );
-
-const journalSchema =
-  new mongoose.Schema(
-    {
-      type: String,
-      symbol: String,
-      tradeId: String,
-      message: String,
-      data:
-        mongoose.Schema.Types.Mixed,
-      createdAt: {
-        type: Date,
-        default: Date.now
-      }
-    },
-    {
-      collection:
-        JOURNAL_COLLECTION
-    }
-  );
-
-const Account =
-  mongoose.models.LomyForexAccountV15 ||
+const Account=
+  mongoose.models.LomyForexAccountV15||
   mongoose.model(
     'LomyForexAccountV15',
     accountSchema
   );
 
-const Trade =
-  mongoose.models.LomyForexTradeV15 ||
+const Trade=
+  mongoose.models.LomyForexTradeV15||
   mongoose.model(
     'LomyForexTradeV15',
     tradeSchema
   );
 
-const Journal =
-  mongoose.models.LomyForexJournalV15 ||
+const Journal=
+  mongoose.models.LomyForexJournalV151||
   mongoose.model(
-    'LomyForexJournalV15',
+    'LomyForexJournalV151',
     journalSchema
   );
 
-// =========================
-// JOURNAL
-// =========================
-
-async function journal(
-  type,
-  data = {}
-) {
-
-  state.journalEvents++;
-
-  try {
-
-    if (!state.mongoReady)
-      return;
-
-    await Journal.create({
-      type,
-      symbol:
-        data.symbol || null,
-      tradeId:
-        data.tradeId || null,
-      message:
-        data.message || '',
-      data
-    });
-
+async function saveAccount(){
+  if(account){
+    await account.save();
   }
+}
 
-  catch (error) {
-
+async function journal(type,data={}){
+  try{
+    if(state.mongoReady){
+      await Journal.create({
+        type,
+        symbol:data.symbol||null,
+        tradeId:data.tradeId||null,
+        message:data.message||'',
+        data
+      });
+    }
+  }catch(e){
     console.error(
       '[JOURNAL]',
-      safeError(error)
+      safeError(e)
     );
   }
 }
 
-// =========================
-// INITIALIZE MONGODB
-// =========================
+async function ensureUsageDay(){
+  if(!account)return;
 
-async function initMongo() {
+  const d=utcDay();
 
-  if (!MONGODB_URI) {
+  if(account.apiUsageDay!==d){
+    account.apiUsageDay=d;
+    account.twelveCreditsUsed=0;
+    account.geminiEntryUsed=0;
+    account.geminiManageUsed=0;
+    await saveAccount();
+  }
+}
 
+async function initMongo(){
+  if(!MONGODB_URI){
     throw new Error(
       'MONGODB_URI is required'
     );
@@ -4285,831 +1573,997 @@ async function initMongo() {
     MONGODB_URI
   );
 
-  state.mongoReady = true;
+  state.mongoReady=true;
+
+  account=await Account.findOne({
+    accountKey:PAPER.accountKey
+  });
+
+  if(!account){
+    account=await Account.create({
+      accountKey:PAPER.accountKey,
+      balance:PAPER.startingBalance,
+      startingBalance:PAPER.startingBalance,
+      version:VERSION,
+      mode:MODE,
+      telegramChatId:'',
+      apiUsageDay:utcDay(),
+      twelveCreditsUsed:0,
+      geminiEntryUsed:0,
+      geminiManageUsed:0
+    });
+  }
+
+  account.version=VERSION;
+  account.mode=MODE;
+
+  await ensureUsageDay();
+  await saveAccount();
+
+  if(!telegramChatId){
+    telegramChatId=String(
+      account.telegramChatId||''
+    );
+  }
 
   console.log(
-    '[MONGO] connected'
+    `[MONGO] connected | balance ${fmtMoney(account.balance)}`
   );
-
-  account =
-    await Account.findOne({
-      accountKey:
-        PAPER.accountKey
-    });
-
-  if (!account) {
-
-    account =
-      await Account.create({
-
-        accountKey:
-          PAPER.accountKey,
-
-        balance:
-          PAPER.startingBalance,
-
-        startingBalance:
-          PAPER.startingBalance,
-
-        version:
-          VERSION,
-
-        mode:
-          MODE
-      });
-
-    console.log(
-      '[ACCOUNT] new paper account created'
-    );
-  }
-
-  else {
-
-    account.version =
-      VERSION;
-
-    account.mode =
-      MODE;
-
-    await account.save();
-
-    console.log(
-      `[ACCOUNT] restored balance ${fmtMoney(account.balance)}`
-    );
-  }
 }
 
-// =========================
-// RESTORE OPEN TRADES
-// =========================
+async function restoreOpenTrades(){
+  const rows=await Trade.find({
+    status:'OPEN'
+  }).lean();
 
-async function restoreOpenTrades() {
+  state.openTrades.clear();
 
-  if (!state.mongoReady)
-    return;
-
-  const trades =
-    await Trade.find({
-      status: 'OPEN'
-    }).lean();
-
-  for (
-    const raw of trades
-  ) {
-
-    const trade = {
-      ...raw,
-
-      initialQuantity:
-        Number.isFinite(
-          Number(
-            raw.initialQuantity
-          )
-        )
-          ? Number(
-              raw.initialQuantity
-            )
-          : Number(
-              raw.quantity
-            ),
-
-      realizedPartialPnl:
-        n(
-          raw.realizedPartialPnl,
-          0
-        ),
-
-      trailingLevelR:
-        n(
-          raw.trailingLevelR,
-          0
-        )
+  for(const r of rows){
+    const t={
+      ...r,
+      initialQuantity:n(
+        r.initialQuantity,
+        n(r.quantity)
+      ),
+      realizedPartialPnl:n(
+        r.realizedPartialPnl
+      ),
+      trailingLevelR:n(
+        r.trailingLevelR
+      ),
+      partialClosed:
+        r.partialClosed===true,
+      breakEvenActivated:
+        r.breakEvenActivated===true
     };
 
     state.openTrades.set(
-      trade.tradeId,
-      trade
+      t.symbol,
+      t
     );
   }
 
   console.log(
-    `[TRADES] restored ${state.openTrades.size} open trades`
+    `[TRADES] restored ${state.openTrades.size}`
   );
 }
 
-// =========================
-// SAVE ACCOUNT
-// =========================
-
-async function saveAccount() {
-
-  if (!account)
-    return;
-
-  await account.save();
+function toTwelveSymbol(s){
+  return s==='XAUUSD'
+    ?'XAU/USD'
+    :s.length===6
+      ?s.slice(0,3)+'/'+s.slice(3)
+      :s;
 }
 
-// =========================
-// TELEGRAM SEND
-// =========================
+function quotaBlockFromMessage(msg){
+  const x=String(msg||'').toLowerCase();
 
-async function sendTelegram(
-  message
-) {
-
-  if (
-    !telegramBot ||
-    !state.telegramReady
-  ) {
-    return;
+  if(
+    x.includes('day')||
+    x.includes('daily')
+  ){
+    return nextUtcMidnight();
   }
 
-  const chatId =
-    process.env.TELEGRAM_CHAT_ID;
-
-  if (!chatId)
-    return;
-
-  try {
-
-    await telegramBot.telegram.sendMessage(
-      chatId,
-      message
-    );
-
-  }
-
-  catch (error) {
-
-    console.error(
-      '[TELEGRAM SEND]',
-      safeError(error)
+  if(x.includes('minute')){
+    return(
+      Math.floor(Date.now()/60000)*
+      60000+
+      62000
     );
   }
+
+  return 0;
 }
 
-// =========================
-// TELEGRAM STATUS TEXT
-// =========================
+async function queueTwelve(task){
+  const run=twelveChain.then(async()=>{
+    await ensureUsageDay();
 
-function telegramStatusText() {
+    if(Date.now()<state.twelveBlockedUntil){
+      throw new Error(
+        `Twelve Data paused until ${new Date(state.twelveBlockedUntil).toISOString()}`
+      );
+    }
 
-  const balance =
-    account
-      ? fmtMoney(
-          account.balance
-        )
-      : 'n/a';
+    if(
+      n(account?.twelveCreditsUsed)>=
+      TWELVE_DAILY_SOFT_CAP
+    ){
+      state.twelveBlockedUntil=
+        nextUtcMidnight();
 
-  return [
-    VERSION,
-    '',
-    `Mode: ${MODE}`,
-    `Balance: ${balance}`,
-    `Open trades: ${state.openTrades.size}`,
-    `Market: ${state.marketReady ? 'READY' : 'NOT READY'}`,
-    `Mongo: ${state.mongoReady ? 'READY' : 'NOT READY'}`,
-    `Gemini: ${state.geminiReady ? 'READY' : 'NOT READY'}`,
-    `Scanned bars: ${state.scannedBars}`,
-    `Executed: ${state.executedSignals}`,
-    `Skipped: ${state.skippedSignals}`
-  ].join('\n');
-}
+      throw new Error(
+        'Twelve Data local daily soft cap reached'
+      );
+    }
 
-// =========================
-// INITIALIZE TELEGRAM
-// =========================
+    const wait=
+      TWELVE_MIN_GAP_MS-
+      (Date.now()-lastTwelveAt);
 
-async function initTelegram() {
+    if(wait>0){
+      await sleep(wait);
+    }
 
-  if (
-    !TELEGRAM_BOT_TOKEN
-  ) {
+    lastTwelveAt=Date.now();
 
-    console.log(
-      '[TELEGRAM] token missing - disabled'
-    );
+    if(account){
+      account.twelveCreditsUsed=
+        n(account.twelveCreditsUsed)+1;
 
-    return;
-  }
+      await saveAccount();
+    }
 
-  try {
-
-    telegramBot =
-      new Telegraf(
-        TELEGRAM_BOT_TOKEN
+    try{
+      return await task();
+    }catch(e){
+      const b=quotaBlockFromMessage(
+        safeError(e)
       );
 
-    telegramBot.start(
-      async ctx => {
-
-        await ctx.reply(
-          telegramStatusText()
-        );
+      if(b){
+        state.twelveBlockedUntil=b;
       }
-    );
 
-    telegramBot.command(
-      'status',
-      async ctx => {
-
-        await ctx.reply(
-          telegramStatusText()
-        );
-      }
-    );
-
-    telegramBot.command(
-      'balance',
-      async ctx => {
-
-        await ctx.reply(
-          account
-            ? `Balance: ${fmtMoney(account.balance)}`
-            : 'Account not ready'
-        );
-      }
-    );
-
-    telegramBot.command(
-      'positions',
-      async ctx => {
-
-        if (
-          state.openTrades.size === 0
-        ) {
-
-          await ctx.reply(
-            'No open trades.'
-          );
-
-          return;
-        }
-
-        const lines = [];
-
-        for (
-          const trade of
-            state.openTrades.values()
-        ) {
-
-          lines.push(
-            `${trade.symbol} ${trade.direction} | Entry ${fmtPrice(trade.entryPrice, trade.symbol)} | SL ${fmtPrice(trade.stopLoss, trade.symbol)} | Qty ${n(trade.quantity).toFixed(4)}`
-          );
-        }
-
-        await ctx.reply(
-          lines.join('\n')
-        );
-      }
-    );
-
-await telegramBot.telegram.getMe();
-
-telegramBot.launch()
-  .catch(error => {
-    state.telegramReady = false;
-
-    console.error(
-      '[TELEGRAM POLLING]',
-      safeError(error)
-    );
+      throw e;
+    }
   });
 
-state.telegramReady = true;
+  twelveChain=run.catch(()=>{});
+  return run;
+}
 
-console.log(
-  '[TELEGRAM] ready'
-);
+function assertTwelve(data){
+  if(!data||data.status==='error'){
+    throw new Error(
+      data?.message||
+      data?.code||
+      'Twelve Data API error'
+    );
+  }
+}
+
+async function fetchBars(
+  symbol,
+  outputSize=REFRESH_HISTORY
+){
+  return queueTwelve(async()=>{
+    const r=await http.get(
+      `${TWELVE_BASE}/time_series`,
+      {
+        params:{
+          symbol:toTwelveSymbol(symbol),
+          interval:'15min',
+          outputsize:outputSize,
+          order:'asc',
+          timezone:'UTC',
+          apikey:TWELVE_DATA_API_KEY
+        }
+      }
+    );
+
+    assertTwelve(r.data);
+
+    if(!Array.isArray(r.data.values)){
+      throw new Error(
+        `No OHLC values for ${symbol}`
+      );
     }
-catch (error) {
-  state.telegramReady = false;
 
-  console.error(
-    '[TELEGRAM]',
-    safeError(error)
+    return normalizeBars(
+      r.data.values.map(x=>({
+        openTime:x.datetime,
+        open:x.open,
+        high:x.high,
+        low:x.low,
+        close:x.close,
+        volume:x.volume,
+        isOpen:false
+      }))
+    );
+  });
+}
+
+async function fetchPrice(symbol){
+  return queueTwelve(async()=>{
+    const r=await http.get(
+      `${TWELVE_BASE}/price`,
+      {
+        params:{
+          symbol:toTwelveSymbol(symbol),
+          apikey:TWELVE_DATA_API_KEY
+        }
+      }
+    );
+
+    assertTwelve(r.data);
+
+    const p=n(
+      r.data.price,
+      NaN
+    );
+
+    if(!Number.isFinite(p)||p<=0){
+      throw new Error(
+        `Invalid price for ${symbol}`
+      );
+    }
+
+    return p;
+  });
+}
+
+async function fetchQuote(symbol){
+  return queueTwelve(async()=>{
+    const r=await http.get(
+      `${TWELVE_BASE}/quote`,
+      {
+        params:{
+          symbol:toTwelveSymbol(symbol),
+          apikey:TWELVE_DATA_API_KEY
+        }
+      }
+    );
+
+    assertTwelve(r.data);
+
+    const close=n(
+      r.data.close,
+      NaN
+    );
+
+    const bid=n(
+      r.data.bid,
+      NaN
+    );
+
+    const ask=n(
+      r.data.ask,
+      NaN
+    );
+
+    const cached=
+      last(
+        state.pairState.get(symbol)?.bars15m
+      )?.close;
+
+    const base=
+      Number.isFinite(close)
+        ?close
+        :n(cached,NaN);
+
+    if(!Number.isFinite(base)){
+      throw new Error(
+        `Invalid quote for ${symbol}`
+      );
+    }
+
+    const spreadKnown=
+      Number.isFinite(bid)&&
+      Number.isFinite(ask)&&
+      bid>0&&
+      ask>0;
+
+    return{
+      symbol,
+      bid:spreadKnown?bid:base,
+      ask:spreadKnown?ask:base,
+      mid:spreadKnown
+        ?(bid+ask)/2
+        :base,
+      spread:spreadKnown
+        ?Math.max(0,ask-bid)
+        :0,
+      spreadKnown,
+      fetchedAt:new Date()
+    };
+  });
+}
+
+function barQuote(symbol,price){
+  return{
+    symbol,
+    bid:price,
+    ask:price,
+    mid:price,
+    spread:0,
+    spreadKnown:false,
+    fetchedAt:new Date()
+  };
+}
+
+function entryExecutionPrice(d,q){
+  return d==='BUY'
+    ?q.ask
+    :q.bid;
+}
+
+function exitExecutionPrice(d,q){
+  return d==='BUY'
+    ?q.bid
+    :q.ask;
+}
+
+async function initializeSymbol(symbol){
+  const closed=closed15(
+    await fetchBars(
+      symbol,
+      INITIAL_HISTORY
+    )
+  );
+
+  if(closed.length<CORE_MIN_HISTORY){
+    throw new Error(
+      `${symbol}: insufficient history`
+    );
+  }
+
+  const pair={
+    symbol,
+    bars15m:closed.slice(-INITIAL_HISTORY),
+    bars1h:aggregateBars(closed,60),
+    bars4h:aggregateBars(closed,240),
+    lastClosedBarTime:last(closed).openTime,
+    lastRefreshAt:new Date(),
+    lastError:null
+  };
+
+  state.pairState.set(
+    symbol,
+    pair
+  );
+
+  console.log(
+    `[MARKET] ${symbol} ready`
+  );
+
+  return pair;
+}
+
+async function initializeMarket(){
+  if(!TWELVE_DATA_API_KEY){
+    state.lastMarketError=
+      'TWELVE_DATA_API_KEY missing';
+
+    return false;
+  }
+
+  console.log(
+    `[MARKET] initializing ${ACTIVE_SYMBOLS.length} active symbols...`
+  );
+
+  let ok=0;
+
+  for(const s of ACTIVE_SYMBOLS){
+    try{
+      await initializeSymbol(s);
+      ok++;
+    }catch(e){
+      state.lastMarketError=
+        safeError(e);
+
+      console.error(
+        `[MARKET] ${s}:`,
+        safeError(e)
+      );
+
+      if(
+        Date.now()<
+        state.twelveBlockedUntil
+      ){
+        break;
+      }
+    }
+  }
+
+  state.marketReady=ok>0;
+
+  console.log(
+    `[MARKET] ${ok}/${ACTIVE_SYMBOLS.length} ready`
+  );
+
+  return state.marketReady;
+}
+
+async function refreshSymbol(symbol){
+  let pair=
+    state.pairState.get(symbol);
+
+  if(!pair){
+    try{
+      pair=await initializeSymbol(symbol);
+    }catch(e){
+      return null;
+    }
+  }
+
+  try{
+    const closed=closed15(
+      await fetchBars(
+        symbol,
+        REFRESH_HISTORY
+      )
+    );
+
+    if(!closed.length){
+      return null;
+    }
+
+    pair.bars15m=mergeBars(
+      pair.bars15m,
+      closed
+    );
+
+    pair.bars1h=
+      aggregateBars(
+        pair.bars15m,
+        60
+      );
+
+    pair.bars4h=
+      aggregateBars(
+        pair.bars15m,
+        240
+      );
+
+    pair.lastRefreshAt=
+      new Date();
+
+    pair.lastError=null;
+
+    const latest=
+      last(pair.bars15m);
+
+    const prev=
+      parseTime(
+        pair.lastClosedBarTime
+      );
+
+    const cur=
+      barTimeMs(latest);
+
+    return cur>prev
+      ?{pair,latest}
+      :null;
+
+  }catch(e){
+    pair.lastError=
+      safeError(e);
+
+    state.lastMarketError=
+      safeError(e);
+
+    console.error(
+      `[REFRESH] ${symbol}:`,
+      safeError(e)
+    );
+
+    return null;
+  }
+}
+
+function sessionContext(){
+  const h=
+    new Date().getUTCHours();
+
+  const s=[];
+
+  if(h<9)s.push('ASIA');
+  if(h>=7&&h<16)s.push('LONDON');
+  if(h>=12&&h<21)s.push('NEW_YORK');
+
+  return{
+    utcHour:h,
+    sessions:s.length
+      ?s
+      :['OFF_HOURS'],
+    londonNewYorkOverlap:
+      h>=12&&h<16
+  };
+}
+
+function symbolCurrencies(s){
+  return s==='XAUUSD'
+    ?['XAU','USD']
+    :[
+      s.slice(0,3),
+      s.slice(3,6)
+    ];
+}
+
+function normalizeImpact(v){
+  const x=
+    String(v||'').toLowerCase();
+
+  if(
+    x.includes('high')||
+    x.includes('red')
+  ){
+    return'HIGH';
+  }
+
+  if(
+    x.includes('medium')||
+    x.includes('orange')
+  ){
+    return'MEDIUM';
+  }
+
+  return'LOW';
+}
+
+async function fetchEconomicNews(){
+  try{
+    const r=await http.get(
+      'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
+      {
+        timeout:15000,
+        headers:{
+          Accept:'application/json'
+        }
+      }
+    );
+
+    const rows=
+      Array.isArray(r.data)
+        ?r.data
+        :[];
+
+    economicNews=rows
+      .map(x=>({
+        title:String(
+          x.title||
+          x.event||
+          ''
+        ),
+        country:String(
+          x.country||
+          ''
+        ).trim().toUpperCase(),
+        impact:normalizeImpact(
+          x.impact
+        ),
+        time:new Date(
+          x.date||
+          x.datetime||
+          x.time||
+          x.timestamp
+        )
+      }))
+      .filter(x=>
+        x.title&&
+        Number.isFinite(
+          x.time.getTime()
+        )
+      );
+
+    state.newsReady=true;
+    state.lastNewsError=null;
+
+    console.log(
+      `[NEWS] loaded ${economicNews.length}`
+    );
+
+  }catch(e){
+    state.newsReady=false;
+    state.lastNewsError=
+      safeError(e);
+
+    console.error(
+      '[NEWS]',
+      safeError(e)
+    );
+  }
+}
+
+function newsBlock(symbol){
+  if(!state.newsReady){
+    return{
+      blocked:false,
+      available:false,
+      events:[]
+    };
+  }
+
+  const c=
+    symbolCurrencies(symbol);
+
+  const now=Date.now();
+  const w=NEWS_BLOCK_MIN*60000;
+
+  const events=
+    economicNews
+      .filter(x=>
+        x.impact==='HIGH'&&
+        c.includes(x.country)&&
+        Math.abs(
+          x.time.getTime()-now
+        )<=w
+      )
+      .slice(0,5);
+
+  return{
+    blocked:events.length>0,
+    available:true,
+    events
+  };
+}
+
+function calculateCurrencyStrength(){
+  const values=new Map();
+  const counts=new Map();
+
+  for(const [s,p] of state.pairState){
+    if(
+      s==='XAUUSD'||
+      !p?.bars15m?.length
+    ){
+      continue;
+    }
+
+    const b=p.bars15m;
+
+    if(b.length<13){
+      continue;
+    }
+
+    const ch=pct(
+      b[b.length-13].close,
+      last(b).close
+    );
+
+    if(!Number.isFinite(ch)){
+      continue;
+    }
+
+    const a=s.slice(0,3);
+    const q=s.slice(3,6);
+
+    values.set(
+      a,
+      n(values.get(a))+ch
+    );
+
+    counts.set(
+      a,
+      n(counts.get(a))+1
+    );
+
+    values.set(
+      q,
+      n(values.get(q))-ch
+    );
+
+    counts.set(
+      q,
+      n(counts.get(q))+1
+    );
+  }
+
+  const out={};
+
+  for(const [k,v] of values){
+    out[k]=
+      v/
+      Math.max(
+        1,
+        n(counts.get(k),1)
+      );
+  }
+
+  return out;
+}
+
+function pairStrengthContext(s){
+  const m=
+    calculateCurrencyStrength();
+
+  const a=s.slice(0,3);
+  const q=s.slice(3,6);
+
+  return{
+    base:a,
+    quote:q,
+    baseStrength:
+      a==='XAU'
+        ?null
+        :n(m[a]),
+    quoteStrength:n(m[q]),
+    differential:
+      a==='XAU'
+        ?null
+        :n(m[a])-n(m[q])
+  };
+}
+
+function buildMtf(pair){
+  return{
+    m15:
+      buildTechnicalIntelligence(
+        pair.bars15m
+      ),
+
+    h1:
+      pair.bars1h.length>=
+      CORE_MIN_HISTORY
+        ?buildTechnicalIntelligence(
+          pair.bars1h
+        )
+        :null,
+
+    h4:
+      pair.bars4h.length>=
+      CORE_MIN_HISTORY
+        ?buildTechnicalIntelligence(
+          pair.bars4h
+        )
+        :null
+  };
+}
+
+function isGeminiQuotaError(msg){
+  const x=
+    String(msg||'').toLowerCase();
+
+  return(
+    x.includes('quota')||
+    x.includes('rate limit')||
+    x.includes('resource_exhausted')
   );
 }
+
+async function queueGemini(task,kind){
+  const run=
+    geminiChain.then(async()=>{
+
+      await ensureUsageDay();
+
+      if(
+        Date.now()<
+        state.geminiBlockedUntil
+      ){
+        throw new Error(
+          `Gemini paused until ${new Date(state.geminiBlockedUntil).toISOString()}`
+        );
+      }
+
+      const used=
+        kind==='entry'
+          ?n(account?.geminiEntryUsed)
+          :n(account?.geminiManageUsed);
+
+      const cap=
+        kind==='entry'
+          ?GEMINI_ENTRY_DAILY_CAP
+          :GEMINI_MANAGE_DAILY_CAP;
+
+      if(used>=cap){
+        throw new Error(
+          `Gemini ${kind} local daily cap reached`
+        );
+      }
+
+      const wait=
+        GEMINI_CALL_GAP_MS-
+        (Date.now()-lastGeminiAt);
+
+      if(wait>0){
+        await sleep(wait);
+      }
+
+      lastGeminiAt=
+        Date.now();
+
+      if(account){
+        if(kind==='entry'){
+          account.geminiEntryUsed=
+            n(account.geminiEntryUsed)+1;
+        }else{
+          account.geminiManageUsed=
+            n(account.geminiManageUsed)+1;
+        }
+
+        await saveAccount();
+      }
+
+      try{
+        return await task();
+      }catch(e){
+        const msg=safeError(e);
+
+        if(isGeminiQuotaError(msg)){
+          state.geminiBlockedUntil=
+            nextUtcMidnight();
+        }
+
+        throw e;
+      }
+    });
+
+  geminiChain=
+    run.catch(()=>{});
+
+  return run;
 }
 
-// =========================
-// GEMINI RATE CONTROL
-// =========================
+function extractJson(text){
+  let s=String(text||'')
+    .trim()
+    .replace(/^```json/i,'')
+    .replace(/^```/,'')
+    .replace(/```$/,'')
+    .trim();
 
-async function waitForGeminiSlot() {
+  try{
+    return JSON.parse(s);
+  }catch(_){
+    const a=s.indexOf('{');
+    const b=s.lastIndexOf('}');
 
-  const elapsed =
-    Date.now() -
-    lastGeminiCallAt;
-
-  const wait =
-    GEMINI_MIN_CALL_GAP_MS -
-    elapsed;
-
-  if (wait > 0) {
-    await sleep(wait);
-  }
-
-  lastGeminiCallAt =
-    Date.now();
-}
-
-// =========================
-// GEMINI JSON EXTRACTION
-// =========================
-
-function extractJson(text) {
-
-  if (
-    typeof text !== 'string'
-  ) {
-    throw new Error(
-      'Gemini returned invalid text'
-    );
-  }
-
-  let cleaned =
-    text.trim();
-
-  cleaned =
-    cleaned.replace(
-      /^```json/i,
-      ''
-    );
-
-  cleaned =
-    cleaned.replace(
-      /^```/i,
-      ''
-    );
-
-  cleaned =
-    cleaned.replace(
-      /```$/,
-      ''
-    );
-
-  cleaned =
-    cleaned.trim();
-
-  try {
-
-    return JSON.parse(
-      cleaned
-    );
-
-  }
-
-  catch (_) {
-
-    const start =
-      cleaned.indexOf('{');
-
-    const end =
-      cleaned.lastIndexOf('}');
-
-    if (
-      start === -1 ||
-      end === -1 ||
-      end <= start
-    ) {
+    if(a<0||b<=a){
       throw new Error(
         'No JSON object in Gemini response'
       );
     }
 
     return JSON.parse(
-      cleaned.slice(
-        start,
-        end + 1
-      )
+      s.slice(a,b+1)
     );
   }
 }
 
-// =========================
-// GEMINI REQUEST
-// =========================
-
-async function callGemini(
-  prompt
-) {
-
-  if (
-    !GEMINI_API_KEY
-  ) {
-
-    state.geminiReady =
-      false;
-
+async function callGemini(prompt,kind){
+  if(!GEMINI_API_KEY){
     throw new Error(
       'GEMINI_API_KEY is missing'
     );
   }
 
-  await waitForGeminiSlot();
+  return queueGemini(
+    async()=>{
 
-  try {
-
-    const url =
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
-
-    const response =
-      await http.post(
-        url,
-        {
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: prompt
-                }
-              ]
+      try{
+        const r=await http.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`,
+          {
+            contents:[
+              {
+                role:'user',
+                parts:[
+                  {text:prompt}
+                ]
+              }
+            ],
+            generationConfig:{
+              temperature:AI.temperature,
+              responseMimeType:
+                'application/json',
+              maxOutputTokens:500
             }
-          ],
-
-          generationConfig: {
-            temperature:
-              AI.temperature,
-
-            responseMimeType:
-              'application/json'
-          }
-        },
-        {
-          params: {
-            key:
-              GEMINI_API_KEY
           },
+          {
+            headers:{
+              'x-goog-api-key':
+                GEMINI_API_KEY
+            },
+            timeout:AI.timeoutMs
+          }
+        );
 
-          timeout:
-            AI.timeoutMs
+        const text=
+          r?.data
+            ?.candidates?.[0]
+            ?.content?.parts
+            ?.map(x=>x.text||'')
+            .join('');
+
+        if(!text){
+          throw new Error(
+            'Gemini returned empty response'
+          );
         }
-      );
 
-    const text =
-      response?.data
-        ?.candidates?.[0]
-        ?.content?.parts
-        ?.map(
-          part =>
-            part.text || ''
-        )
-        .join('');
+        state.geminiReady=true;
+        state.lastAiError=null;
 
-    if (!text) {
-      throw new Error(
-        'Gemini returned empty response'
-      );
-    }
+        return extractJson(text);
 
-    state.geminiReady =
-      true;
+      }catch(e){
+        state.geminiReady=false;
+        state.lastAiError=
+          safeError(e);
 
-    state.lastAiError =
-      null;
+        throw e;
+      }
 
-    return extractJson(
-      text
-    );
-
-  }
-
-  catch (error) {
-
-    state.geminiReady =
-      false;
-
-    state.lastAiError =
-      safeError(error);
-
-    throw error;
-  }
-}
-
-// =========================
-// RECENT CLOSED-TRADE MEMORY
-// =========================
-
-async function getAiMemory(
-  symbol
-) {
-
-  if (!state.mongoReady)
-    return [];
-
-  const rows =
-    await Trade.find({
-      status: 'CLOSED'
-    })
-      .sort({
-        closedAt: -1
-      })
-      .limit(
-        AI.memoryClosedTrades
-      )
-      .lean();
-
-  return rows.map(
-    trade => ({
-
-      symbol:
-        trade.symbol,
-
-      sameSymbol:
-        trade.symbol ===
-        symbol,
-
-      direction:
-        trade.direction,
-
-      confidence:
-        trade.confidence,
-
-      resultR:
-        n(
-          trade.resultR,
-          0
-        ),
-
-      pnl:
-        n(
-          trade.totalPnl,
-          0
-        ),
-
-      mfeR:
-        n(
-          trade.mfeR,
-          0
-        ),
-
-      maeR:
-        n(
-          trade.maeR,
-          0
-        ),
-
-      entryReason:
-        String(
-          trade.entryReason ||
-          ''
-        ).slice(
-          0,
-          300
-        ),
-
-      managementReason:
-        String(
-          trade.managementReason ||
-          ''
-        ).slice(
-          0,
-          300
-        )
-    })
+    },
+    kind
   );
 }
 
-// =========================
-// MULTI-TIMEFRAME CONTEXT
-// =========================
-
-async function buildMtfContext(
-  symbol,
-  bars15m
-) {
-
-  let bars1h = [];
-  let bars4h = [];
-
-  try {
-
-    bars1h =
-      closedBarsOnly(
-        await fetchBars(
-          symbol,
-          '1h',
-          220
-        ),
-        '1h'
-      );
-
+async function getAiMemory(symbol){
+  if(!state.mongoReady){
+    return[];
   }
 
-  catch (error) {
+  const rows=
+    await Trade.find({
+      status:'CLOSED'
+    })
+    .sort({
+      closedAt:-1
+    })
+    .limit(
+      AI.memoryClosedTrades
+    )
+    .lean();
 
-    console.error(
-      `[MTF 1H] ${symbol}:`,
-      safeError(error)
-    );
-  }
-
-  await sleep(8000);
-
-  try {
-
-    bars4h =
-      closedBarsOnly(
-        await fetchBars(
-          symbol,
-          '4h',
-          220
-        ),
-        '4h'
-      );
-
-  }
-
-  catch (error) {
-
-    console.error(
-      `[MTF 4H] ${symbol}:`,
-      safeError(error)
-    );
-  }
-
-  const pair =
-    state.pairState.get(
-      symbol
-    );
-
-  if (pair) {
-
-    pair.bars1h =
-      bars1h;
-
-    pair.bars4h =
-      bars4h;
-  }
-
-  return {
-
-    m15:
-      buildTechnicalIntelligence(
-        bars15m
-      ),
-
-    h1:
-      bars1h.length >=
-        CORE_MIN_HISTORY
-        ? buildTechnicalIntelligence(
-            bars1h
-          )
-        : null,
-
-    h4:
-      bars4h.length >=
-        CORE_MIN_HISTORY
-        ? buildTechnicalIntelligence(
-            bars4h
-          )
-        : null
-  };
+  return rows.map(t=>({
+    symbol:t.symbol,
+    sameSymbol:
+      t.symbol===symbol,
+    direction:t.direction,
+    confidence:t.confidence,
+    resultR:n(t.resultR),
+    pnl:n(t.totalPnl),
+    mfeR:n(t.mfeR),
+    maeR:n(t.maeR),
+    entryReason:
+      String(
+        t.entryReason||''
+      ).slice(0,250),
+    managementReason:
+      String(
+        t.managementReason||''
+      ).slice(0,250)
+  }));
 }
-
-// =========================
-// COMPACT AI CONTEXT
-// =========================
-
-function compactTechnical(
-  technical
-) {
-
-  if (!technical)
-    return null;
-
-  return {
-
-    price:
-      technical.price,
-
-    bias:
-      technical.bias,
-
-    score:
-      technical.score,
-
-    trend: {
-      alignment:
-        technical.trend?.alignment,
-      macro:
-        technical.trend?.macro,
-      ema9:
-        technical.trend?.ema9,
-      ema21:
-        technical.trend?.ema21,
-      ema50:
-        technical.trend?.ema50,
-      ema200:
-        technical.trend?.ema200
-    },
-
-    momentum: {
-      rsi:
-        technical.momentum?.rsi,
-      cmo:
-        technical.momentum?.cmo,
-      macdHistogram:
-        technical.momentum?.macd?.histogram,
-      stochastic:
-        technical.momentum?.stochastic,
-      williamsR:
-        technical.momentum?.williamsR,
-      roc:
-        technical.momentum?.roc
-    },
-
-    adx:
-      technical.dmi?.adx,
-
-    plusDI:
-      technical.dmi?.plusDI,
-
-    minusDI:
-      technical.dmi?.minusDI,
-
-    atr:
-      technical.volatility?.atr,
-
-    volatilityRegime:
-      technical.volatility?.regime,
-
-    structure:
-      technical.structure,
-
-    choch:
-      technical.choch,
-
-    supertrend:
-      technical.supertrend,
-
-    ichimoku: {
-      bias:
-        technical.ichimoku?.bias,
-      tenkan:
-        technical.ichimoku?.tenkan,
-      kijun:
-        technical.ichimoku?.kijun
-    },
-
-    liquidity:
-      technical.liquidity,
-
-    fvg:
-      technical.fvg,
-
-    supportResistance:
-      technical.supportResistance,
-
-    volume:
-      technical.volume,
-
-    vwap:
-      technical.vwap,
-
-    mfi:
-      technical.mfi
-  };
-}
-
-// =========================
-// ENTRY COMMANDER
-// =========================
 
 async function askEntryCommander({
   symbol,
-  quote,
   mtf,
   session,
   strength,
   news,
   memory
-}) {
-
+}){
   state.aiEntryCalls++;
 
-  const prompt = `
-You are the entry commander for LOMY FOREX V1.5.
+  const prompt=`
+You are LOMY FOREX V1.5.1 entry commander.
+PAPER ONLY.
 
-This system is PAPER TRADING ONLY.
-
-Your job is to make ONE directional decision:
-BUY, SELL, or NO_TRADE.
-
-You must analyze the supplied technical evidence.
-You may not invent market data.
+Decide BUY, SELL, or NO_TRADE using only supplied data.
 
 If BUY or SELL:
-- confidence must be 62 to 100.
-- provide a TECHNICAL stop loss price.
-- stop loss must be based on structure, volatility, support/resistance, swing or liquidity logic.
-- do not calculate position size.
-- do not widen risk for convenience.
+- confidence must be 62-100.
+- stopLoss must be a technical price.
+- stop must be based on structure, volatility, support/resistance, swing, or liquidity.
+- do not size positions.
 
-If evidence is weak, conflicting, spread is unsuitable, news risk is dangerous, or there is no clean technical stop:
-return NO_TRADE.
+If evidence is weak or conflicting, return NO_TRADE.
 
 Return JSON only:
 {
@@ -5121,460 +2575,368 @@ Return JSON only:
 
 DATA:
 ${JSON.stringify({
-    symbol,
-    quote,
-    session,
-    strength,
-    news,
-    mtf: {
-      m15:
-        compactTechnical(
-          mtf.m15
-        ),
-      h1:
-        compactTechnical(
-          mtf.h1
-        ),
-      h4:
-        compactTechnical(
-          mtf.h4
-        )
-    },
-    recentClosedTrades:
-      memory
-  })}
+  symbol,
+  session,
+  strength,
+  news,
+  mtf:{
+    m15:compactTechnical(mtf.m15),
+    h1:compactTechnical(mtf.h1),
+    h4:compactTechnical(mtf.h4)
+  },
+  recentClosedTrades:memory
+})}
 `;
 
-  const result =
+  const r=
     await callGemini(
-      prompt
+      prompt,
+      'entry'
     );
 
-  const decision =
+  const decision=
     String(
-      result?.decision ||
+      r?.decision||
       'NO_TRADE'
     ).toUpperCase();
 
-  const confidence =
+  const confidence=
     clamp(
-      n(
-        result?.confidence,
-        0
-      ),
+      n(r?.confidence),
       0,
       100
     );
 
-  const stopLoss =
+  const stopLoss=
     n(
-      result?.stopLoss,
+      r?.stopLoss,
       NaN
     );
 
-  const reason =
+  const reason=
     String(
-      result?.reason ||
+      r?.reason||
       ''
-    ).slice(
-      0,
-      800
-    );
+    ).slice(0,800);
 
-  if (
+  if(
     ![
       'BUY',
       'SELL',
       'NO_TRADE'
-    ].includes(decision)
-  ) {
-
-    return {
-      decision:
-        'NO_TRADE',
-      confidence: 0,
-      stopLoss: NaN,
-      reason:
-        'Invalid Gemini decision'
-    };
-  }
-
-  if (
-    decision ===
-      'NO_TRADE'
-  ) {
-
+    ].includes(decision)||
+    decision==='NO_TRADE'||
+    confidence<
+      RULES.minEntryConfidence||
+    !Number.isFinite(stopLoss)
+  ){
     state.aiNoTradeDecisions++;
 
-    return {
-      decision,
+    return{
+      decision:'NO_TRADE',
       confidence,
-      stopLoss: NaN,
-      reason
-    };
-  }
-
-  if (
-    confidence <
-      RULES.minEntryConfidence
-  ) {
-
-    state.aiNoTradeDecisions++;
-
-    return {
-      decision:
-        'NO_TRADE',
-      confidence,
-      stopLoss: NaN,
+      stopLoss:NaN,
       reason:
-        `Confidence below ${RULES.minEntryConfidence}%`
+        reason||
+        'Rejected Gemini entry'
     };
   }
 
-  if (
-    !Number.isFinite(
-      stopLoss
-    )
-  ) {
-
-    state.aiNoTradeDecisions++;
-
-    return {
-      decision:
-        'NO_TRADE',
-      confidence,
-      stopLoss: NaN,
-      reason:
-        'Gemini did not provide a valid technical stop'
-    };
-  }
-
-  if (
-    decision === 'BUY'
-  ) {
+  if(decision==='BUY'){
     state.aiBuyDecisions++;
-  }
-
-  if (
-    decision === 'SELL'
-  ) {
+  }else{
     state.aiSellDecisions++;
   }
 
-  return {
+  return{
     decision,
     confidence,
     stopLoss,
     reason
   };
 }
-// =========================
-// DYNAMIC RISK FROM CONFIDENCE
-// =========================
 
-function riskPctFromConfidence(
-  confidence
-) {
+async function askTradeManager({
+  trade,
+  technical,
+  memory,
+  currentPrice
+}){
+  state.aiManageCalls++;
 
-  confidence =
-    n(confidence, 0);
+  const prompt=`
+Manage this existing PAPER forex trade.
 
-  if (
-    confidence >=
-    DYNAMIC_RISK.highConfidence
-  ) {
-    return Math.min(
-      DYNAMIC_RISK.highRiskPct,
-      PAPER.maxCapitalRiskPct
+You may ONLY return HOLD or CLOSE.
+
+Do not change:
+- stop loss
+- take profit
+- trailing stop
+- position size
+- partial rules
+
+CLOSE only if the original trade thesis is materially invalidated.
+
+Return JSON only:
+{
+  "decision":"HOLD|CLOSE",
+  "confidence":0,
+  "reason":"short precise reason"
+}
+
+DATA:
+${JSON.stringify({
+  symbol:trade.symbol,
+  direction:trade.direction,
+  entryPrice:trade.entryPrice,
+  currentPrice,
+  stopLoss:trade.stopLoss,
+  currentR:
+    tradePriceR(
+      trade,
+      currentPrice
+    ),
+  partialClosed:
+    trade.partialClosed,
+  trailingLevelR:
+    trade.trailingLevelR,
+  entryReason:
+    trade.entryReason,
+  technical:
+    compactTechnical(
+      technical
+    ),
+  recentMemory:memory
+})}
+`;
+
+  const r=
+    await callGemini(
+      prompt,
+      'manage'
     );
+
+  const d=
+    String(
+      r?.decision||
+      'HOLD'
+    ).toUpperCase();
+
+  const c=
+    clamp(
+      n(r?.confidence),
+      0,
+      100
+    );
+
+  const reason=
+    String(
+      r?.reason||
+      ''
+    ).slice(0,800);
+
+  if(
+    d==='CLOSE'&&
+    c>=RULES.minCloseConfidence
+  ){
+    state.aiCloseDecisions++;
+
+    return{
+      decision:'CLOSE',
+      confidence:c,
+      reason
+    };
   }
 
-  if (
-    confidence >=
-    DYNAMIC_RISK.medConfidence
-  ) {
-    return Math.min(
-      DYNAMIC_RISK.medRiskPct,
-      PAPER.maxCapitalRiskPct
-    );
+  state.aiHoldDecisions++;
+
+  return{
+    decision:'HOLD',
+    confidence:c,
+    reason
+  };
+}
+
+function riskPctFromConfidence(c){
+  if(c>=DYNAMIC_RISK.highConfidence){
+    return DYNAMIC_RISK.highRiskPct;
   }
 
-  if (
-    confidence >=
-    DYNAMIC_RISK.lowConfidence
-  ) {
-    return Math.min(
-      DYNAMIC_RISK.lowRiskPct,
-      PAPER.maxCapitalRiskPct
-    );
+  if(c>=DYNAMIC_RISK.medConfidence){
+    return DYNAMIC_RISK.medRiskPct;
+  }
+
+  if(c>=DYNAMIC_RISK.lowConfidence){
+    return DYNAMIC_RISK.lowRiskPct;
   }
 
   return 0;
 }
 
-// =========================
-// QUOTE CURRENCY
-// =========================
-
-function quoteCurrency(symbol) {
-
-  if (symbol === 'XAUUSD')
-    return 'USD';
-
-  return String(symbol)
-    .slice(3, 6)
-    .toUpperCase();
+function quoteCurrency(s){
+  return s==='XAUUSD'
+    ?'USD'
+    :s.slice(3,6);
 }
 
-// =========================
-// CURRENCY -> USD RATE
-// =========================
-
-async function currencyToUsdRate(
-  currency
-) {
-
-  currency =
-    String(currency || '')
-      .toUpperCase();
-
-  if (
-    !currency ||
-    currency === 'USD'
-  ) {
-    return 1;
-  }
-
-  const directSymbol =
-    `${currency}USD`;
-
-  const inverseSymbol =
-    `USD${currency}`;
-
-  try {
-
-    const direct =
-      await fetchCurrentPrice(
-        directSymbol
-      );
-
-    if (
-      Number.isFinite(direct) &&
-      direct > 0
-    ) {
-      return direct;
-    }
-
-  }
-
-  catch (_) {
-    // Try inverse below.
-  }
-
-  try {
-
-    const inverse =
-      await fetchCurrentPrice(
-        inverseSymbol
-      );
-
-    if (
-      Number.isFinite(inverse) &&
-      inverse > 0
-    ) {
-      return 1 / inverse;
-    }
-
-  }
-
-  catch (_) {
-    // Fail closed below.
-  }
-
-  throw new Error(
-    `Cannot convert ${currency} to USD`
+function cachedPairPrice(s){
+  return n(
+    last(
+      state.pairState.get(s)?.bars15m
+    )?.close,
+    NaN
   );
 }
 
-// =========================
-// POSITION SIZE
-// =========================
+async function currencyToUsdRate(currency){
+  currency=
+    String(currency||'')
+      .toUpperCase();
 
-async function calculatePositionSize({
+  if(
+    currency==='USD'||
+    !currency
+  ){
+    return 1;
+  }
+
+  const d=`${currency}USD`;
+  const i=`USD${currency}`;
+
+  const dp=
+    cachedPairPrice(d);
+
+  const ip=
+    cachedPairPrice(i);
+
+  if(
+    Number.isFinite(dp)&&
+    dp>0
+  ){
+    return dp;
+  }
+
+  if(
+    Number.isFinite(ip)&&
+    ip>0
+  ){
+    return 1/ip;
+  }
+
+  try{
+    return await fetchPrice(d);
+  }catch(_){
+    const p=
+      await fetchPrice(i);
+
+    return 1/p;
+  }
+}
+
+async function calculatePositionSize(
   symbol,
-  entryPrice,
-  stopLoss,
+  entry,
+  stop,
   riskAmount
-}) {
+){
+  const dist=
+    Math.abs(entry-stop);
 
-  const distance =
-    Math.abs(
-      entryPrice -
-      stopLoss
-    );
-
-  if (
-    !Number.isFinite(distance) ||
-    distance <= 0
-  ) {
+  if(
+    !Number.isFinite(dist)||
+    dist<=0
+  ){
     throw new Error(
       'Invalid stop distance'
     );
   }
 
-  const quote =
-    quoteCurrency(symbol);
-
-  const quoteToUsd =
+  const rate=
     await currencyToUsdRate(
-      quote
+      quoteCurrency(symbol)
     );
 
-  if (
-    !Number.isFinite(
-      quoteToUsd
-    ) ||
-    quoteToUsd <= 0
-  ) {
+  const qty=
+    riskAmount/
+    (dist*rate);
+
+  if(
+    !Number.isFinite(qty)||
+    qty<=0
+  ){
     throw new Error(
-      `Invalid ${quote}/USD conversion`
+      'Invalid quantity'
     );
   }
 
-  // Price-distance PnL is denominated
-  // in the quote currency.
-  const riskPerUnitUsd =
-    distance *
-    quoteToUsd;
-
-  const quantity =
-    riskAmount /
-    riskPerUnitUsd;
-
-  if (
-    !Number.isFinite(quantity) ||
-    quantity <= 0
-  ) {
-    throw new Error(
-      'Invalid calculated quantity'
-    );
-  }
-
-  return {
-    quantity,
-    quoteCurrency:
-      quote,
-    quoteToUsd,
-    stopDistance:
-      distance,
-    riskPerUnitUsd
+  return{
+    quantity:qty,
+    stopDistance:dist,
+    quoteToUsd:rate
   };
 }
 
-// =========================
-// PNL IN USD
-// =========================
-
-async function calculatePnlUsd({
+async function calculatePnlUsd(
   symbol,
   direction,
-  entryPrice,
-  exitPrice,
-  quantity
-}) {
+  entry,
+  exit,
+  qty
+){
+  const raw=
+    (
+      direction==='BUY'
+        ?exit-entry
+        :entry-exit
+    )*qty;
 
-  const rawQuotePnl =
-    direction === 'BUY'
-      ? (
-          exitPrice -
-          entryPrice
-        ) * quantity
-      : (
-          entryPrice -
-          exitPrice
-        ) * quantity;
-
-  const quote =
-    quoteCurrency(symbol);
-
-  const quoteToUsd =
+  return raw*
     await currencyToUsdRate(
-      quote
+      quoteCurrency(symbol)
     );
-
-  return (
-    rawQuotePnl *
-    quoteToUsd
-  );
 }
 
-// =========================
-// PORTFOLIO INITIAL RISK
-// =========================
+function currentPortfolioRiskUsd(){
+  let total=0;
 
-function currentPortfolioRiskUsd() {
-
-  let total = 0;
-
-  for (
-    const trade of
-      state.openTrades.values()
-  ) {
-
-    const initialQuantity =
+  for(const t of state.openTrades.values()){
+    const iq=
       Math.max(
         Number.EPSILON,
         n(
-          trade.initialQuantity,
-          trade.quantity
+          t.initialQuantity,
+          n(t.quantity)
         )
       );
 
-    const remainingFraction =
+    const rf=
       clamp(
-        n(
-          trade.quantity,
-          0
-        ) /
-        initialQuantity,
+        n(t.quantity)/iq,
         0,
         1
       );
 
-    total +=
+    total+=
       Math.max(
         0,
-        n(
-          trade.riskAmount,
-          0
-        )
-      ) *
-      remainingFraction;
+        n(t.riskAmount)
+      )*rf;
   }
 
   return total;
 }
 
-function portfolioRiskCapUsd() {
-
-  const base =
-    account
-      ? n(
-          account.balance,
-          PAPER.startingBalance
-        )
-      : PAPER.startingBalance;
-
-  return (
-    base *
-    PAPER.portfolioRiskCapPct /
+function portfolioRiskCapUsd(){
+  return(
+    n(
+      account?.balance,
+      PAPER.startingBalance
+    )*
+    PAPER.portfolioRiskCapPct/
     100
   );
 }
-
-// =========================
-// RISK MANAGER
-// =========================
 
 async function validateEntryRisk({
   symbol,
@@ -5583,286 +2945,171 @@ async function validateEntryRisk({
   technicalStop,
   quote,
   technical
-}) {
-
-  if (!account) {
-
-    return {
-      approved: false,
-      reason:
-        'Paper account unavailable'
+}){
+  if(!account){
+    return{
+      approved:false,
+      reason:'Account unavailable'
     };
   }
 
-  if (
-    state.openTrades.size >=
+  if(
+    state.openTrades.size>=
     PAPER.maxOpenTrades
-  ) {
-
-    return {
-      approved: false,
-      reason:
-        'Maximum open trades reached'
+  ){
+    return{
+      approved:false,
+      reason:'Max open trades'
     };
   }
 
-  if (
-    state.openTrades.has(
-      symbol
-    )
-  ) {
-
-    return {
-      approved: false,
-      reason:
-        'Symbol already has an open trade'
+  if(state.openTrades.has(symbol)){
+    return{
+      approved:false,
+      reason:'Symbol already open'
     };
   }
 
-  const entryPrice =
+  const entry=
     entryExecutionPrice(
       direction,
       quote
     );
 
-  const stopLoss =
+  const stop=
     n(
       technicalStop,
       NaN
     );
 
-  if (
-    !Number.isFinite(
-      entryPrice
-    ) ||
-    !Number.isFinite(
-      stopLoss
-    )
-  ) {
-
-    return {
-      approved: false,
-      reason:
-        'Invalid entry or stop price'
-    };
-  }
-
-  if (
-    direction === 'BUY' &&
-    stopLoss >= entryPrice
-  ) {
-
-    return {
-      approved: false,
-      reason:
-        'BUY stop must be below entry'
-    };
-  }
-
-  if (
-    direction === 'SELL' &&
-    stopLoss <= entryPrice
-  ) {
-
-    return {
-      approved: false,
-      reason:
-        'SELL stop must be above entry'
-    };
-  }
-
-  const stopDistance =
-    Math.abs(
-      entryPrice -
-      stopLoss
-    );
-
-  const atr =
+  const atr=
     n(
       technical?.volatility?.atr,
       NaN
     );
 
-  if (
-    !Number.isFinite(atr) ||
-    atr <= 0
-  ) {
-
-    return {
-      approved: false,
-      reason:
-        'ATR unavailable'
+  if(
+    !Number.isFinite(entry)||
+    !Number.isFinite(stop)||
+    !Number.isFinite(atr)||
+    atr<=0
+  ){
+    return{
+      approved:false,
+      reason:'Invalid entry/stop/ATR'
     };
   }
 
-  const stopAtr =
-    stopDistance / atr;
-
-  if (
-    stopAtr <
-    RULES.minStopAtr
-  ) {
-
-    return {
-      approved: false,
-      reason:
-        `Technical stop too tight (${stopAtr.toFixed(2)} ATR)`
+  if(
+    direction==='BUY'&&
+    stop>=entry
+  ){
+    return{
+      approved:false,
+      reason:'BUY stop must be below entry'
     };
   }
 
-  if (
-    stopAtr >
-    RULES.maxStopAtr
-  ) {
-
-    return {
-      approved: false,
-      reason:
-        `Technical stop too wide (${stopAtr.toFixed(2)} ATR)`
+  if(
+    direction==='SELL'&&
+    stop<=entry
+  ){
+    return{
+      approved:false,
+      reason:'SELL stop must be above entry'
     };
   }
 
-  const spread =
-    Math.max(
-      0,
-      n(
-        quote.spread,
-        0
-      )
-    );
+  const dist=
+    Math.abs(entry-stop);
 
-  if (
-    spread >
-    stopDistance *
+  const stopAtr=
+    dist/atr;
+
+  if(
+    stopAtr<RULES.minStopAtr||
+    stopAtr>RULES.maxStopAtr
+  ){
+    return{
+      approved:false,
+      reason:
+        `Stop ${stopAtr.toFixed(2)} ATR outside limits`
+    };
+  }
+
+  if(
+    quote?.spreadKnown&&
+    n(quote.spread)>
+      dist*
       RULES.maxSpreadRiskFraction
-  ) {
-
-    return {
-      approved: false,
+  ){
+    return{
+      approved:false,
       reason:
-        'Spread is too large relative to stop distance'
+        'Spread too large versus stop'
     };
   }
 
-  const riskPct =
+  const riskPct=
     riskPctFromConfidence(
       confidence
     );
 
-  if (
-    riskPct <= 0 ||
-    riskPct >
-      PAPER.maxCapitalRiskPct
-  ) {
-
-    return {
-      approved: false,
-      reason:
-        'Invalid risk percentage'
-    };
-  }
-
-  const riskAmount =
-    n(
-      account.balance,
-      0
-    ) *
-    riskPct /
+  const riskAmount=
+    n(account.balance)*
+    riskPct/
     100;
 
-  const existingRisk =
-    currentPortfolioRiskUsd();
-
-  const cap =
-    portfolioRiskCapUsd();
-
-  if (
-    existingRisk +
-      riskAmount >
-    cap + 1e-9
-  ) {
-
-    return {
-      approved: false,
-      reason:
-        'Portfolio risk cap would be exceeded'
+  if(
+    riskPct<=0||
+    riskPct>
+      PAPER.maxCapitalRiskPct
+  ){
+    return{
+      approved:false,
+      reason:'Invalid risk pct'
     };
   }
 
-  let sizing;
-
-  try {
-
-    sizing =
-      await calculatePositionSize({
-        symbol,
-        entryPrice,
-        stopLoss,
-        riskAmount
-      });
-
-  }
-
-  catch (error) {
-
-    return {
-      approved: false,
-      reason:
-        `Sizing failed: ${safeError(error)}`
+  if(
+    currentPortfolioRiskUsd()+
+    riskAmount>
+    portfolioRiskCapUsd()+
+    1e-9
+  ){
+    return{
+      approved:false,
+      reason:'Portfolio risk cap'
     };
   }
 
-  const riskDistance =
-    stopDistance;
+  const s=
+    await calculatePositionSize(
+      symbol,
+      entry,
+      stop,
+      riskAmount
+    );
 
-  const partialTargetPrice =
-    direction === 'BUY'
-      ? (
-          entryPrice +
-          riskDistance *
-          RULES.partialTpTriggerR
-        )
-      : (
-          entryPrice -
-          riskDistance *
-          RULES.partialTpTriggerR
-        );
-
-  return {
-    approved: true,
-
-    entryPrice,
-
-    stopLoss,
-
-    riskDistance,
-
+  return{
+    approved:true,
+    entryPrice:entry,
+    stopLoss:stop,
+    riskDistance:dist,
     riskPct,
-
     riskAmount,
-
-    quantity:
-      sizing.quantity,
-
-    initialQuantity:
-      sizing.quantity,
-
-    quoteCurrency:
-      sizing.quoteCurrency,
-
-    quoteToUsd:
-      sizing.quoteToUsd,
-
-    partialTargetPrice,
-
-    rewardRisk:
-      RULES.riskReward
+    quantity:s.quantity,
+    initialQuantity:s.quantity,
+    partialTargetPrice:
+      direction==='BUY'
+        ?entry+
+         dist*
+         RULES.partialTpTriggerR
+        :entry-
+         dist*
+         RULES.partialTpTriggerR
   };
 }
-
-// =========================
-// OPEN PAPER TRADE
-// =========================
 
 async function openPaperTrade({
   symbol,
@@ -5872,39 +3119,23 @@ async function openPaperTrade({
   aiDecision,
   technical,
   risk
-}) {
-
-  if (
-    MODE !== 'PAPER' ||
-    LIVE_TRADING !== false
-  ) {
+}){
+  if(
+    MODE!=='PAPER'||
+    LIVE_TRADING
+  ){
     throw new Error(
-      'Live trading is forbidden'
+      'Live trading forbidden'
     );
   }
 
-  if (
-    !risk?.approved
-  ) {
-    throw new Error(
-      'Cannot open unapproved trade'
-    );
-  }
-
-  const tradeId =
-    `${symbol}-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2, 8)}`;
-
-  const tradeData = {
-
-    tradeId,
+  const trade={
+    tradeId:
+      `${symbol}-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
 
     symbol,
-
     direction,
-
-    status: 'OPEN',
+    status:'OPEN',
 
     entryPrice:
       risk.entryPrice,
@@ -5932,29 +3163,17 @@ async function openPaperTrade({
 
     confidence,
 
-    entryReason:
-      reason,
+    entryReason:reason,
 
-    managementReason:
-      '',
+    managementReason:'',
 
-    openedAt:
-      new Date(),
+    openedAt:new Date(),
 
-    realizedPartialPnl:
-      0,
-
-    totalPnl:
-      0,
-
-    partialClosed:
-      false,
-
-    trailingLevelR:
-      0,
-
-    breakEvenActivated:
-      false,
+    realizedPartialPnl:0,
+    totalPnl:0,
+    partialClosed:false,
+    trailingLevelR:0,
+    breakEvenActivated:false,
 
     maxFavorablePrice:
       risk.entryPrice,
@@ -5962,9 +3181,8 @@ async function openPaperTrade({
     maxAdversePrice:
       risk.entryPrice,
 
-    mfeR: 0,
-
-    maeR: 0,
+    mfeR:0,
+    maeR:0,
 
     aiEntryDecision:
       aiDecision,
@@ -5975,17 +3193,15 @@ async function openPaperTrade({
       )
   };
 
-  const document =
-    await Trade.create(
-      tradeData
-    );
+  const doc=
+    await Trade.create(trade);
 
-  const trade =
-    document.toObject();
+  const t=
+    doc.toObject();
 
   state.openTrades.set(
     symbol,
-    trade
+    t
   );
 
   state.executedSignals++;
@@ -5994,1893 +3210,1064 @@ async function openPaperTrade({
     'TRADE_OPENED',
     {
       symbol,
-      tradeId,
+      tradeId:t.tradeId,
       direction,
       confidence,
-      entryPrice:
-        risk.entryPrice,
-      stopLoss:
-        risk.stopLoss,
-      riskPct:
-        risk.riskPct,
-      riskAmount:
-        risk.riskAmount,
-      quantity:
-        risk.quantity,
-      partialTargetPrice:
-        risk.partialTargetPrice,
-      message:
-        reason
+      riskPct:t.riskPct,
+      riskAmount:t.riskAmount,
+      message:reason
     }
   );
 
   await sendTelegram(
-    [
-      'LOMY PAPER TRADE OPENED',
-      `${symbol} ${direction}`,
-      `Entry: ${fmtPrice(risk.entryPrice, symbol)}`,
-      `SL: ${fmtPrice(risk.stopLoss, symbol)}`,
-      `+2R: ${fmtPrice(risk.partialTargetPrice, symbol)}`,
-      `Risk: ${risk.riskPct.toFixed(2)}% (${fmtMoney(risk.riskAmount)})`,
-      `Confidence: ${confidence.toFixed(0)}%`,
-      'Plan: close 50% at +2R, trail remaining 50%.'
-    ].join('\n')
+`LOMY PAPER TRADE OPENED
+${symbol} ${direction}
+Entry: ${fmtPrice(t.entryPrice,symbol)}
+SL: ${fmtPrice(t.stopLoss,symbol)}
++2R: ${fmtPrice(t.partialTargetPrice,symbol)}
+Risk: ${t.riskPct.toFixed(2)}% (${fmtMoney(t.riskAmount)})
+Confidence: ${confidence.toFixed(0)}%`
   );
 
-  return trade;
+  return t;
 }
 
-// =========================
-// CURRENT PRICE R
-// =========================
-
-function tradePriceR(
-  trade,
-  price
-) {
-
-  const riskDistance =
+function tradePriceR(t,p){
+  const d=
     Math.abs(
-      trade.entryPrice -
-      trade.initialStopLoss
+      t.entryPrice-
+      t.initialStopLoss
     );
 
-  if (
-    !Number.isFinite(
-      riskDistance
-    ) ||
-    riskDistance <= 0
-  ) {
-    return 0;
-  }
+  if(d<=0)return 0;
 
-  if (
-    trade.direction === 'BUY'
-  ) {
-
-    return (
-      price -
-      trade.entryPrice
-    ) / riskDistance;
-  }
-
-  return (
-    trade.entryPrice -
-    price
-  ) / riskDistance;
+  return t.direction==='BUY'
+    ?(p-t.entryPrice)/d
+    :(t.entryPrice-p)/d;
 }
 
-// =========================
-// MFE / MAE
-// =========================
-
-function updateExcursions(
-  trade,
-  price
-) {
-
-  if (
-    trade.direction === 'BUY'
-  ) {
-
-    trade.maxFavorablePrice =
-      Math.max(
-        n(
-          trade.maxFavorablePrice,
-          trade.entryPrice
-        ),
-        price
-      );
-
-    trade.maxAdversePrice =
-      Math.min(
-        n(
-          trade.maxAdversePrice,
-          trade.entryPrice
-        ),
-        price
-      );
-
-  }
-
-  else {
-
-    trade.maxFavorablePrice =
-      Math.min(
-        n(
-          trade.maxFavorablePrice,
-          trade.entryPrice
-        ),
-        price
-      );
-
-    trade.maxAdversePrice =
-      Math.max(
-        n(
-          trade.maxAdversePrice,
-          trade.entryPrice
-        ),
-        price
-      );
-  }
-
-  trade.mfeR =
-    Math.max(
-      n(trade.mfeR, 0),
-      tradePriceR(
-        trade,
-        trade.maxFavorablePrice
-      )
-    );
-
-  trade.maeR =
-    Math.min(
-      n(trade.maeR, 0),
-      tradePriceR(
-        trade,
-        trade.maxAdversePrice
-      )
-    );
-}
-
-// =========================
-// STOP PRICE FROM R
-// =========================
-
-function stopPriceAtR(
-  trade,
-  stopR
-) {
-
-  const riskDistance =
+function stopPriceAtR(t,r){
+  const d=
     Math.abs(
-      trade.entryPrice -
-      trade.initialStopLoss
+      t.entryPrice-
+      t.initialStopLoss
     );
 
-  if (
-    trade.direction === 'BUY'
-  ) {
-
-    return (
-      trade.entryPrice +
-      riskDistance *
-      stopR
-    );
-  }
-
-  return (
-    trade.entryPrice -
-    riskDistance *
-    stopR
-  );
+  return t.direction==='BUY'
+    ?t.entryPrice+d*r
+    :t.entryPrice-d*r;
 }
 
-// =========================
-// MOVE STOP SAFELY
-// =========================
-
-function improveStop(
-  trade,
-  candidate
-) {
-
-  if (
-    !Number.isFinite(
-      candidate
-    )
-  ) {
+function improveStop(t,c){
+  if(!Number.isFinite(c)){
     return false;
   }
 
-  if (
-    trade.direction === 'BUY'
-  ) {
-
-    if (
-      candidate >
-      trade.stopLoss
-    ) {
-
-      trade.stopLoss =
-        candidate;
-
-      return true;
-    }
-
-    return false;
+  if(
+    t.direction==='BUY'&&
+    c>t.stopLoss
+  ){
+    t.stopLoss=c;
+    return true;
   }
 
-  if (
-    candidate <
-    trade.stopLoss
-  ) {
-
-    trade.stopLoss =
-      candidate;
-
+  if(
+    t.direction==='SELL'&&
+    c<t.stopLoss
+  ){
+    t.stopLoss=c;
     return true;
   }
 
   return false;
-      }
-// =========================
-// CORRECT OPEN-TRADE RESTORE
-// =========================
-
-async function restoreOpenTrades() {
-
-  if (!state.mongoReady)
-    return;
-
-  const trades =
-    await Trade.find({
-      status: 'OPEN'
-    }).lean();
-
-  state.openTrades.clear();
-
-  for (
-    const raw of trades
-  ) {
-
-    const trade = {
-      ...raw,
-
-      initialQuantity:
-        Number.isFinite(
-          Number(
-            raw.initialQuantity
-          )
-        )
-          ? Number(
-              raw.initialQuantity
-            )
-          : Number(
-              raw.quantity
-            ),
-
-      realizedPartialPnl:
-        n(
-          raw.realizedPartialPnl,
-          0
-        ),
-
-      trailingLevelR:
-        n(
-          raw.trailingLevelR,
-          0
-        ),
-
-      partialClosed:
-        raw.partialClosed === true,
-
-      breakEvenActivated:
-        raw.breakEvenActivated === true
-    };
-
-    state.openTrades.set(
-      trade.symbol,
-      trade
-    );
-  }
-
-  console.log(
-    `[TRADES] restored ${state.openTrades.size} open trades`
-  );
 }
 
-// =========================
-// UPDATE TRADE IN DATABASE
-// =========================
-
-async function saveTrade(
-  trade
-) {
-
-  if (
-    !trade ||
-    !trade.tradeId
-  ) {
-    return;
-  }
-
+async function saveTrade(t){
   await Trade.updateOne(
     {
-      tradeId:
-        trade.tradeId
+      tradeId:t.tradeId
     },
     {
-      $set: {
-        status:
-          trade.status,
-
-        quantity:
-          trade.quantity,
-
-        initialQuantity:
-          trade.initialQuantity,
-
-        stopLoss:
-          trade.stopLoss,
-
-        partialClosed:
-          trade.partialClosed,
-
-        trailingLevelR:
-          trade.trailingLevelR,
-
-        breakEvenActivated:
-          trade.breakEvenActivated,
-
-        realizedPartialPnl:
-          trade.realizedPartialPnl,
-
-        totalPnl:
-          trade.totalPnl,
-
-        managementReason:
-          trade.managementReason,
-
-        maxFavorablePrice:
-          trade.maxFavorablePrice,
-
-        maxAdversePrice:
-          trade.maxAdversePrice,
-
-        mfeR:
-          trade.mfeR,
-
-        maeR:
-          trade.maeR,
-
-        exitPrice:
-          trade.exitPrice,
-
-        closedAt:
-          trade.closedAt,
-
-        resultR:
-          trade.resultR
+      $set:{
+        status:t.status,
+        quantity:t.quantity,
+        initialQuantity:t.initialQuantity,
+        stopLoss:t.stopLoss,
+        partialClosed:t.partialClosed,
+        trailingLevelR:t.trailingLevelR,
+        breakEvenActivated:t.breakEvenActivated,
+        realizedPartialPnl:t.realizedPartialPnl,
+        totalPnl:t.totalPnl,
+        managementReason:t.managementReason,
+        maxFavorablePrice:t.maxFavorablePrice,
+        maxAdversePrice:t.maxAdversePrice,
+        mfeR:t.mfeR,
+        maeR:t.maeR,
+        exitPrice:t.exitPrice,
+        closedAt:t.closedAt,
+        resultR:t.resultR
       }
     }
   );
 }
 
-// =========================
-// STOP HIT CHECK
-// =========================
+function updateExcursionsFromBar(t,b){
+  if(t.direction==='BUY'){
+    t.maxFavorablePrice=
+      Math.max(
+        n(
+          t.maxFavorablePrice,
+          t.entryPrice
+        ),
+        b.high
+      );
 
-function isStopHit(
-  trade,
-  exitPrice
-) {
-
-  if (
-    !trade ||
-    !Number.isFinite(
-      exitPrice
-    )
-  ) {
-    return false;
-  }
-
-  if (
-    trade.direction === 'BUY'
-  ) {
-
-    return (
-      exitPrice <=
-      trade.stopLoss
-    );
-  }
-
-  return (
-    exitPrice >=
-    trade.stopLoss
-  );
-}
-
-// =========================
-// PARTIAL + TRAILING LOGIC
-// =========================
-
-async function applyMechanicalProtection(
-  trade,
-  quote
-) {
-
-  if (
-    !trade ||
-    trade.status !== 'OPEN'
-  ) {
-    return;
-  }
-
-  const exitPrice =
-    exitExecutionPrice(
-      trade.direction,
-      quote
-    );
-
-  if (
-    !Number.isFinite(
-      exitPrice
-    )
-  ) {
-    return;
-  }
-
-  updateExcursions(
-    trade,
-    exitPrice
-  );
-
-  const currentR =
-    tradePriceR(
-      trade,
-      exitPrice
-    );
-
-  let changed =
-    false;
-
-  // =========================
-  // BREAK-EVEN AT +0.60R
-  // =========================
-
-  if (
-    !trade.breakEvenActivated &&
-    currentR >=
-      RULES.breakEvenTriggerR
-  ) {
-
-    const breakEvenPrice =
-      trade.entryPrice;
-
-    if (
-      improveStop(
-        trade,
-        breakEvenPrice
-      )
-    ) {
-
-      changed =
-        true;
-    }
-
-    trade.breakEvenActivated =
-      true;
-
-    changed =
-      true;
-
-    await journal(
-      'BREAK_EVEN',
-      {
-        symbol:
-          trade.symbol,
-
-        tradeId:
-          trade.tradeId,
-
-        currentR,
-
-        newStop:
-          trade.stopLoss,
-
-        message:
-          'Break-even activated at +0.60R'
-      }
-    );
-  }
-
-  // =========================
-  // PARTIAL CLOSE AT +2R
-  // =========================
-
-  if (
-    !trade.partialClosed &&
-    currentR >=
-      RULES.partialTpTriggerR
-  ) {
-
-    const closeQuantity =
-      trade.initialQuantity *
-      0.50;
-
-    const actualCloseQuantity =
+    t.maxAdversePrice=
       Math.min(
-        closeQuantity,
-        trade.quantity
-      );
-
-    if (
-      actualCloseQuantity > 0
-    ) {
-
-      const partialPnl =
-        await calculatePnlUsd({
-          symbol:
-            trade.symbol,
-
-          direction:
-            trade.direction,
-
-          entryPrice:
-            trade.entryPrice,
-
-          exitPrice,
-
-          quantity:
-            actualCloseQuantity
-        });
-
-      trade.quantity =
-        Math.max(
-          0,
-          trade.quantity -
-          actualCloseQuantity
-        );
-
-      trade.realizedPartialPnl =
         n(
-          trade.realizedPartialPnl,
-          0
-        ) +
-        partialPnl;
+          t.maxAdversePrice,
+          t.entryPrice
+        ),
+        b.low
+      );
 
-      account.balance =
+  }else{
+    t.maxFavorablePrice=
+      Math.min(
         n(
-          account.balance,
-          0
-        ) +
-        partialPnl;
-
-      await saveAccount();
-
-      trade.partialClosed =
-        true;
-
-      // Remaining 50% is now protected at +1R
-      const protectedStop =
-        stopPriceAtR(
-          trade,
-          RULES.trailingStartStopR
-        );
-
-      improveStop(
-        trade,
-        protectedStop
+          t.maxFavorablePrice,
+          t.entryPrice
+        ),
+        b.low
       );
 
-      trade.trailingLevelR =
-        RULES.trailingStartStopR;
-
-      changed =
-        true;
-
-      await journal(
-        'PARTIAL_CLOSE',
-        {
-          symbol:
-            trade.symbol,
-
-          tradeId:
-            trade.tradeId,
-
-          closeQuantity:
-            actualCloseQuantity,
-
-          exitPrice,
-
-          partialPnl,
-
-          remainingQuantity:
-            trade.quantity,
-
-          newStop:
-            trade.stopLoss,
-
-          message:
-            'Closed 50% at +2R and protected remaining 50% at +1R'
-        }
+    t.maxAdversePrice=
+      Math.max(
+        n(
+          t.maxAdversePrice,
+          t.entryPrice
+        ),
+        b.high
       );
-
-      await sendTelegram(
-        [
-          'LOMY PARTIAL CLOSE',
-          `${trade.symbol} ${trade.direction}`,
-          'Reached +2R',
-          'Closed: 50%',
-          `Partial PnL: ${fmtMoney(partialPnl)}`,
-          `Remaining: ${n(trade.quantity).toFixed(4)}`,
-          `New SL: ${fmtPrice(trade.stopLoss, trade.symbol)}`,
-          'Remaining 50% continues with trailing protection.'
-        ].join('\n')
-      );
-    }
   }
 
-  // =========================
-  // TRAILING AFTER +2R
-  // =========================
-
-  if (
-    trade.partialClosed &&
-    currentR >
-      RULES.partialTpTriggerR
-  ) {
-
-    const progressBeyond2R =
-      currentR -
-      RULES.partialTpTriggerR;
-
-    const completedSteps =
-      Math.floor(
-        progressBeyond2R /
-        RULES.trailingStepR
-      );
-
-    const desiredStopR =
-      RULES.trailingStartStopR +
-      completedSteps *
-      RULES.trailingStepR;
-
-    if (
-      desiredStopR >
-      n(
-        trade.trailingLevelR,
-        0
+  t.mfeR=
+    Math.max(
+      n(t.mfeR),
+      tradePriceR(
+        t,
+        t.maxFavorablePrice
       )
-    ) {
-
-      const newStop =
-        stopPriceAtR(
-          trade,
-          desiredStopR
-        );
-
-      if (
-        improveStop(
-          trade,
-          newStop
-        )
-      ) {
-
-        trade.trailingLevelR =
-          desiredStopR;
-
-        changed =
-          true;
-
-        await journal(
-          'TRAILING_STOP',
-          {
-            symbol:
-              trade.symbol,
-
-            tradeId:
-              trade.tradeId,
-
-            currentR,
-
-            trailingLevelR:
-              desiredStopR,
-
-            newStop:
-              trade.stopLoss,
-
-            message:
-              `Trailing stop moved to +${desiredStopR.toFixed(2)}R`
-          }
-        );
-      }
-    }
-  }
-
-  if (changed) {
-
-    await saveTrade(
-      trade
     );
-  }
+
+  t.maeR=
+    Math.min(
+      n(t.maeR),
+      tradePriceR(
+        t,
+        t.maxAdversePrice
+      )
+    );
 }
 
-// =========================
-// CLOSE PAPER TRADE
-// =========================
-
-async function closePaperTrade({
-  trade,
-  quote,
-  reason = 'CLOSE'
-}) {
-
-  if (
-    !trade ||
-    trade.status !== 'OPEN'
-  ) {
+async function closeTradeAtPrice(
+  t,
+  price,
+  reason
+){
+  if(
+    !t||
+    t.status!=='OPEN'
+  ){
     return null;
   }
 
-  const currentTrade =
-    state.openTrades.get(
-      trade.symbol
-    );
-
-  if (
-    !currentTrade ||
-    currentTrade.tradeId !==
-      trade.tradeId
-  ) {
-    return null;
-  }
-
-  const exitPrice =
-    exitExecutionPrice(
-      trade.direction,
-      quote
-    );
-
-  if (
-    !Number.isFinite(
-      exitPrice
-    )
-  ) {
-    throw new Error(
-      'Invalid exit price'
-    );
-  }
-
-  updateExcursions(
-    trade,
-    exitPrice
-  );
-
-  const remainingQuantity =
+  const qty=
     Math.max(
       0,
-      n(
-        trade.quantity,
-        0
+      n(t.quantity)
+    );
+
+  const remaining=
+    qty
+      ?await calculatePnlUsd(
+        t.symbol,
+        t.direction,
+        t.entryPrice,
+        price,
+        qty
       )
-    );
+      :0;
 
-  let remainingPnl = 0;
+  const total=
+    n(t.realizedPartialPnl)+
+    remaining;
 
-  if (
-    remainingQuantity > 0
-  ) {
-
-    remainingPnl =
-      await calculatePnlUsd({
-        symbol:
-          trade.symbol,
-
-        direction:
-          trade.direction,
-
-        entryPrice:
-          trade.entryPrice,
-
-        exitPrice,
-
-        quantity:
-          remainingQuantity
-      });
-  }
-
-  const partialPnl =
-    n(
-      trade.realizedPartialPnl,
-      0
-    );
-
-  const totalPnl =
-    partialPnl +
-    remainingPnl;
-
-  // Partial PnL was credited when partial close happened.
-  // Add only final remaining PnL here.
-  account.balance =
-    n(
-      account.balance,
-      0
-    ) +
-    remainingPnl;
+  account.balance=
+    n(account.balance)+
+    remaining;
 
   await saveAccount();
 
-  trade.status =
-    'CLOSED';
+  t.status='CLOSED';
+  t.exitPrice=price;
+  t.closedAt=new Date();
+  t.quantity=0;
+  t.totalPnl=total;
 
-  trade.exitPrice =
-    exitPrice;
-
-  trade.closedAt =
-    new Date();
-
-  trade.quantity =
-    0;
-
-  trade.totalPnl =
-    totalPnl;
-
-  trade.managementReason =
+  t.managementReason=
     String(reason).slice(
       0,
       800
     );
 
-  const originalRisk =
+  t.resultR=
+    total/
     Math.max(
       Number.EPSILON,
-      n(
-        trade.riskAmount,
-        0
-      )
+      n(t.riskAmount)
     );
 
-  trade.resultR =
-    totalPnl /
-    originalRisk;
-
-  await saveTrade(
-    trade
-  );
+  await saveTrade(t);
 
   state.openTrades.delete(
-    trade.symbol
+    t.symbol
   );
 
   await journal(
     'TRADE_CLOSED',
     {
-      symbol:
-        trade.symbol,
-
-      tradeId:
-        trade.tradeId,
-
-      direction:
-        trade.direction,
-
-      exitPrice,
-
-      remainingPnl,
-
-      partialPnl,
-
-      totalPnl,
-
-      resultR:
-        trade.resultR,
-
-      mfeR:
-        trade.mfeR,
-
-      maeR:
-        trade.maeR,
-
-      message:
-        reason
+      symbol:t.symbol,
+      tradeId:t.tradeId,
+      totalPnl:total,
+      resultR:t.resultR,
+      message:reason
     }
   );
 
   await sendTelegram(
-    [
-      'LOMY PAPER TRADE CLOSED',
-      `${trade.symbol} ${trade.direction}`,
-      `Exit: ${fmtPrice(exitPrice, trade.symbol)}`,
-      `Total PnL: ${fmtMoney(totalPnl)}`,
-      `Result: ${trade.resultR.toFixed(2)}R`,
-      `Balance: ${fmtMoney(account.balance)}`,
-      `Reason: ${reason}`
-    ].join('\n')
+`LOMY PAPER TRADE CLOSED
+${t.symbol} ${t.direction}
+Exit: ${fmtPrice(price,t.symbol)}
+PnL: ${fmtMoney(total)}
+Result: ${t.resultR.toFixed(2)}R
+Balance: ${fmtMoney(account.balance)}
+Reason: ${reason}`
   );
 
-  return trade;
+  return t;
 }
 
-// =========================
-// AI OPEN-TRADE MANAGEMENT
-// =========================
-
-async function askTradeManager({
-  trade,
-  quote,
-  technical,
-  memory
-}) {
-
-  state.aiManageCalls++;
-
-  const currentPrice =
-    exitExecutionPrice(
-      trade.direction,
-      quote
+async function partialCloseAtPrice(t,price){
+  const q=
+    Math.min(
+      n(t.initialQuantity)*.5,
+      n(t.quantity)
     );
 
-  const currentR =
+  if(q<=0)return;
+
+  const pnl=
+    await calculatePnlUsd(
+      t.symbol,
+      t.direction,
+      t.entryPrice,
+      price,
+      q
+    );
+
+  t.quantity=
+    Math.max(
+      0,
+      n(t.quantity)-q
+    );
+
+  t.realizedPartialPnl=
+    n(t.realizedPartialPnl)+
+    pnl;
+
+  account.balance=
+    n(account.balance)+
+    pnl;
+
+  await saveAccount();
+
+  t.partialClosed=true;
+
+  improveStop(
+    t,
+    stopPriceAtR(
+      t,
+      RULES.trailingStartStopR
+    )
+  );
+
+  t.trailingLevelR=
+    RULES.trailingStartStopR;
+
+  await saveTrade(t);
+
+  await journal(
+    'PARTIAL_CLOSE',
+    {
+      symbol:t.symbol,
+      tradeId:t.tradeId,
+      partialPnl:pnl,
+      message:'50% closed at +2R'
+    }
+  );
+
+  await sendTelegram(
+`LOMY PARTIAL CLOSE
+${t.symbol} ${t.direction}
+Closed 50% at +2R
+Partial PnL: ${fmtMoney(pnl)}
+New SL: ${fmtPrice(t.stopLoss,t.symbol)}`
+  );
+}
+
+function stopFillFromBar(t,b){
+  if(
+    t.direction==='BUY'&&
+    b.low<=t.stopLoss
+  ){
+    return b.open<t.stopLoss
+      ?b.open
+      :t.stopLoss;
+  }
+
+  if(
+    t.direction==='SELL'&&
+    b.high>=t.stopLoss
+  ){
+    return b.open>t.stopLoss
+      ?b.open
+      :t.stopLoss;
+  }
+
+  return NaN;
+}
+
+async function manageMechanicalOnBar(t,b){
+  updateExcursionsFromBar(t,b);
+
+  let stopFill=
+    stopFillFromBar(t,b);
+
+  if(Number.isFinite(stopFill)){
+    await closeTradeAtPrice(
+      t,
+      stopFill,
+      t.partialClosed
+        ?'TRAILING_STOP_HIT'
+        :t.breakEvenActivated
+          ?'BREAK_EVEN_STOP_HIT'
+          :'STOP_LOSS_HIT'
+    );
+
+    return false;
+  }
+
+  const fav=
+    t.direction==='BUY'
+      ?b.high
+      :b.low;
+
+  const currentR=
+    tradePriceR(t,fav);
+
+  let changed=false;
+
+  if(
+    !t.breakEvenActivated&&
+    currentR>=
+      RULES.breakEvenTriggerR
+  ){
+    improveStop(
+      t,
+      t.entryPrice
+    );
+
+    t.breakEvenActivated=true;
+    changed=true;
+  }
+
+  if(
+    !t.partialClosed&&
+    currentR>=
+      RULES.partialTpTriggerR
+  ){
+    await partialCloseAtPrice(
+      t,
+      t.partialTargetPrice
+    );
+
+    changed=false;
+  }
+
+  if(t.status!=='OPEN'){
+    return false;
+  }
+
+  if(
+    t.partialClosed&&
+    currentR>
+      RULES.partialTpTriggerR
+  ){
+    const steps=
+      Math.floor(
+        (
+          currentR-
+          RULES.partialTpTriggerR
+        )/
+        RULES.trailingStepR
+      );
+
+    const r=
+      RULES.trailingStartStopR+
+      steps*
+      RULES.trailingStepR;
+
+    if(
+      r>n(t.trailingLevelR)&&
+      improveStop(
+        t,
+        stopPriceAtR(t,r)
+      )
+    ){
+      t.trailingLevelR=r;
+      changed=true;
+    }
+  }
+
+  stopFill=
+    stopFillFromBar(t,b);
+
+  if(Number.isFinite(stopFill)){
+    await closeTradeAtPrice(
+      t,
+      stopFill,
+      t.partialClosed
+        ?'TRAILING_STOP_HIT'
+        :'BREAK_EVEN_STOP_HIT'
+    );
+
+    return false;
+  }
+
+  if(changed){
+    await saveTrade(t);
+  }
+
+  return true;
+}
+
+function shouldAskManager(t,tech){
+  if(
+    !AI.managementEnabled||
+    !tech
+  ){
+    return false;
+  }
+
+  const opposite=
+    t.direction==='BUY'
+      ?tech.bias==='BEAR'
+      :tech.bias==='BULL';
+
+  return(
+    opposite||
     tradePriceR(
-      trade,
-      currentPrice
-    );
-
-  const prompt = `
-You manage an EXISTING PAPER forex trade.
-
-You are NOT allowed to change:
-- stop loss
-- take profit
-- trailing stop
-- position size
-- partial-close rules
-
-Mechanical risk management is controlled by the bot.
-
-Your ONLY decision is:
-HOLD or CLOSE.
-
-CLOSE only when the market evidence materially invalidates the trade thesis.
-Otherwise HOLD.
-
-Return JSON only:
-{
-  "decision":"HOLD|CLOSE",
-  "confidence":0,
-  "reason":"short precise reason"
+      t,
+      tech.price
+    )<=-.25
+  );
 }
 
-TRADE:
-${JSON.stringify({
-    symbol:
-      trade.symbol,
+async function sendTelegram(msg){
+  if(
+    !telegramBot||
+    !state.telegramReady||
+    !telegramChatId
+  ){
+    return;
+  }
 
-    direction:
-      trade.direction,
+  try{
+    await telegramBot.telegram.sendMessage(
+      telegramChatId,
+      msg
+    );
+  }catch(e){
+    console.error(
+      '[TELEGRAM SEND]',
+      safeError(e)
+    );
+  }
+}
 
-    entryPrice:
-      trade.entryPrice,
+function telegramStatusText(){
+  return`${VERSION}
+Mode: ${MODE}
+Balance: ${account?fmtMoney(account.balance):'n/a'}
+Open trades: ${state.openTrades.size}
+Market: ${state.marketReady?'READY':'NOT READY'}
+Mongo: ${state.mongoReady?'READY':'NOT READY'}
+Gemini: ${state.geminiReady?'READY':'NOT READY'}
+News: ${state.newsReady?'READY':'NOT READY'}
+Scanned bars: ${state.scannedBars}
+Executed: ${state.executedSignals}
+Skipped: ${state.skippedSignals}`;
+}
 
-    currentPrice,
+async function initTelegram(){
+  if(!TELEGRAM_BOT_TOKEN){
+    console.log(
+      '[TELEGRAM] disabled'
+    );
+    return;
+  }
 
-    stopLoss:
-      trade.stopLoss,
+  try{
+    telegramBot=
+      new Telegraf(
+        TELEGRAM_BOT_TOKEN
+      );
 
-    currentR,
+    telegramBot.start(
+      async ctx=>{
+        telegramChatId=
+          String(ctx.chat.id);
 
-    partialClosed:
-      trade.partialClosed,
+        if(account){
+          account.telegramChatId=
+            telegramChatId;
 
-    trailingLevelR:
-      trade.trailingLevelR,
+          await saveAccount();
+        }
 
-    confidence:
-      trade.confidence,
+        await ctx.reply(
+          telegramStatusText()
+        );
+      }
+    );
 
-    entryReason:
-      trade.entryReason,
+    telegramBot.command(
+      'status',
+      ctx=>ctx.reply(
+        telegramStatusText()
+      )
+    );
 
-    technical:
-      compactTechnical(
-        technical
-      ),
+    telegramBot.command(
+      'balance',
+      ctx=>ctx.reply(
+        account
+          ?`Balance: ${fmtMoney(account.balance)}`
+          :'Account not ready'
+      )
+    );
 
-    recentMemory:
+    telegramBot.command(
+      'positions',
+      ctx=>{
+        const x=[
+          ...state.openTrades.values()
+        ];
+
+        return ctx.reply(
+          x.length
+            ?x.map(t=>
+              `${t.symbol} ${t.direction} | Entry ${fmtPrice(t.entryPrice,t.symbol)} | SL ${fmtPrice(t.stopLoss,t.symbol)}`
+            ).join('\n')
+            :'No open trades.'
+        );
+      }
+    );
+
+    await telegramBot.telegram.getMe();
+
+    telegramBot.launch()
+      .catch(e=>{
+        state.telegramReady=false;
+
+        console.error(
+          '[TELEGRAM POLLING]',
+          safeError(e)
+        );
+      });
+
+    state.telegramReady=true;
+
+    console.log(
+      '[TELEGRAM] ready'
+    );
+
+  }catch(e){
+    state.telegramReady=false;
+
+    console.error(
+      '[TELEGRAM]',
+      safeError(e)
+    );
+  }
+}
+
+async function processCandidate(c){
+  const{
+    symbol,
+    technical
+  }=c;
+
+  const pair=
+    state.pairState.get(symbol);
+
+  if(!pair)return;
+
+  const news=
+    newsBlock(symbol);
+
+  if(news.blocked){
+    state.skippedSignals++;
+
+    pair.lastClosedBarTime=
+      technical.barTime;
+
+    await journal(
+      'NEWS_BLOCK',
+      {
+        symbol,
+        message:'High-impact news'
+      }
+    );
+
+    return;
+  }
+
+  if(
+    Date.now()-
+    state.lastEntryAiAt<
+    GEMINI_ENTRY_MIN_GAP_MS
+  ){
+    state.skippedSignals++;
+
+    pair.lastClosedBarTime=
+      technical.barTime;
+
+    return;
+  }
+
+  await ensureUsageDay();
+
+  if(
+    n(account.geminiEntryUsed)>=
+    GEMINI_ENTRY_DAILY_CAP
+  ){
+    state.skippedSignals++;
+
+    pair.lastClosedBarTime=
+      technical.barTime;
+
+    return;
+  }
+
+  const mtf=
+    buildMtf(pair);
+
+  const memory=
+    await getAiMemory(symbol);
+
+  let d;
+
+  try{
+    d=await askEntryCommander({
+      symbol,
+      mtf,
+      session:sessionContext(),
+      strength:
+        pairStrengthContext(symbol),
+      news,
       memory
-  })}
-`;
+    });
 
-  const result =
-    await callGemini(
-      prompt
+    state.lastEntryAiAt=
+      Date.now();
+
+  }catch(e){
+    state.skippedSignals++;
+
+    state.lastAiError=
+      safeError(e);
+
+    console.error(
+      `[AI ENTRY] ${symbol}:`,
+      safeError(e)
     );
 
-  const decision =
-    String(
-      result?.decision ||
-      'HOLD'
-    ).toUpperCase();
+    pair.lastClosedBarTime=
+      technical.barTime;
 
-  const confidence =
-    clamp(
-      n(
-        result?.confidence,
-        0
-      ),
-      0,
-      100
+    return;
+  }
+
+  if(d.decision==='NO_TRADE'){
+    state.skippedSignals++;
+
+    pair.lastClosedBarTime=
+      technical.barTime;
+
+    await journal(
+      'NO_TRADE',
+      {
+        symbol,
+        confidence:d.confidence,
+        message:d.reason
+      }
     );
 
-  const reason =
-    String(
-      result?.reason ||
-      ''
-    ).slice(
-      0,
-      800
+    return;
+  }
+
+  let q=
+    barQuote(
+      symbol,
+      technical.price
     );
 
-  if (
-    decision === 'CLOSE' &&
-    confidence >=
-      RULES.minCloseConfidence
-  ) {
+  try{
+    q=await fetchQuote(symbol);
+  }catch(e){
+    console.warn(
+      `[QUOTE FALLBACK] ${symbol}:`,
+      safeError(e)
+    );
+  }
 
-    state.aiCloseDecisions++;
+  let risk;
 
-    return {
-      decision:
-        'CLOSE',
-      confidence,
-      reason
+  try{
+    risk=
+      await validateEntryRisk({
+        symbol,
+        direction:d.decision,
+        confidence:d.confidence,
+        technicalStop:d.stopLoss,
+        quote:q,
+        technical
+      });
+
+  }catch(e){
+    risk={
+      approved:false,
+      reason:safeError(e)
     };
   }
 
-  state.aiHoldDecisions++;
+  if(!risk.approved){
+    state.skippedSignals++;
 
-  return {
-    decision:
-      'HOLD',
-    confidence,
-    reason
-  };
-}
+    pair.lastClosedBarTime=
+      technical.barTime;
 
-// =========================
-// MANAGE ONE OPEN TRADE
-// =========================
+    await journal(
+      'RISK_REJECT',
+      {
+        symbol,
+        message:risk.reason
+      }
+    );
 
-async function manageOpenTrade(
-  trade
-) {
-
-  if (
-    !trade ||
-    trade.status !== 'OPEN'
-  ) {
     return;
   }
 
-  if (
-    state.managementLocks.has(
-      trade.symbol
-    )
-  ) {
-    return;
-  }
+  try{
+    await openPaperTrade({
+      symbol,
+      direction:d.decision,
+      confidence:d.confidence,
+      reason:d.reason,
+      aiDecision:d,
+      technical,
+      risk
+    });
 
-  state.managementLocks.add(
-    trade.symbol
-  );
+  }catch(e){
+    state.skippedSignals++;
 
-  try {
-
-    const quote =
-      await fetchQuote(
-        trade.symbol
-      );
-
-    // Mechanical protection always works,
-    // even if Gemini is unavailable.
-    await applyMechanicalProtection(
-      trade,
-      quote
+    await journal(
+      'OPEN_ERROR',
+      {
+        symbol,
+        message:safeError(e)
+      }
     );
-
-    const stillOpen =
-      state.openTrades.get(
-        trade.symbol
-      );
-
-    if (
-      !stillOpen ||
-      stillOpen.tradeId !==
-        trade.tradeId
-    ) {
-      return;
-    }
-
-    const exitPrice =
-      exitExecutionPrice(
-        trade.direction,
-        quote
-      );
-
-    if (
-      isStopHit(
-        trade,
-        exitPrice
-      )
-    ) {
-
-      await closePaperTrade({
-        trade,
-        quote,
-        reason:
-          trade.partialClosed
-            ? 'TRAILING_STOP_HIT'
-            : trade.breakEvenActivated
-              ? 'BREAK_EVEN_STOP_HIT'
-              : 'STOP_LOSS_HIT'
-      });
-
-      return;
-    }
-
-    const now =
-      Date.now();
-
-    const lastManage =
-      n(
-        state.lastManageAt.get(
-          trade.symbol
-        ),
-        0
-      );
-
-    if (
-      now - lastManage <
-      AI_MANAGE_INTERVAL_MS
-    ) {
-      return;
-    }
-
-    state.lastManageAt.set(
-      trade.symbol,
-      now
-    );
-
-    // AI management is optional for an existing trade.
-    // Fail-safe: existing mechanical protection remains active.
-    if (
-      !AI.managementEnabled ||
-      !GEMINI_API_KEY
-    ) {
-      return;
-    }
-
-    const pair =
-      state.pairState.get(
-        trade.symbol
-      );
-
-    const bars =
-      pair?.bars15m;
-
-    if (
-      !Array.isArray(bars) ||
-      bars.length <
-        CORE_MIN_HISTORY
-    ) {
-      return;
-    }
-
-    const technical =
-      buildTechnicalIntelligence(
-        bars
-      );
-
-    const memory =
-      await getAiMemory(
-        trade.symbol
-      );
-
-    let managerDecision;
-
-    try {
-
-      managerDecision =
-        await askTradeManager({
-          trade,
-          quote,
-          technical,
-          memory
-        });
-
-    }
-
-    catch (error) {
-
-      console.error(
-        `[AI MANAGE] ${trade.symbol}:`,
-        safeError(error)
-      );
-
-      return;
-    }
-
-    if (
-      managerDecision.decision ===
-      'CLOSE'
-    ) {
-
-      await closePaperTrade({
-        trade,
-        quote,
-        reason:
-          `AI_CLOSE ${managerDecision.confidence.toFixed(0)}%: ${managerDecision.reason}`
-      });
-
-      return;
-    }
-
-    trade.managementReason =
-      `AI_HOLD ${managerDecision.confidence.toFixed(0)}%: ${managerDecision.reason}`;
-
-    await saveTrade(
-      trade
-    );
-
-  }
-
-  catch (error) {
 
     console.error(
-      `[MANAGE] ${trade.symbol}:`,
-      safeError(error)
+      `[OPEN] ${symbol}:`,
+      safeError(e)
     );
   }
 
-  finally {
+  pair.lastClosedBarTime=
+    technical.barTime;
+}
 
-    state.managementLocks.delete(
-      trade.symbol
-    );
-  }
-    }
-// =========================
-// PROCESS NEW CLOSED BAR
-// =========================
-
-async function processNewClosedBar(
-  symbol,
-  bars
-) {
-
-  if (
-    !Array.isArray(bars) ||
-    bars.length <
-      CORE_MIN_HISTORY
-  ) {
+async function maybeAiManage(t,tech){
+  if(!shouldAskManager(t,tech)){
     return;
   }
 
-  if (
-    state.scanLocks.has(
-      symbol
-    )
-  ) {
+  await ensureUsageDay();
+
+  if(
+    n(account.geminiManageUsed)>=
+    GEMINI_MANAGE_DAILY_CAP
+  ){
     return;
   }
 
-  state.scanLocks.add(
-    symbol
-  );
-
-  try {
-
-    const latestBar =
-      last(bars);
-
-    if (!latestBar)
-      return;
-
-    const barKey =
-      `${symbol}:${latestBar.openTime}`;
-
-    if (
-      state.processedBars.has(
-        barKey
-      )
-    ) {
-      return;
-    }
-
-    state.processedBars.add(
-      barKey
-    );
-
-    // Limit memory growth.
-    if (
-      state.processedBars.size >
-      10000
-    ) {
-
-      const entries =
-        Array.from(
-          state.processedBars
-        );
-
-      state.processedBars =
-        new Set(
-          entries.slice(-5000)
-        );
-    }
-
-    state.scannedBars++;
-
-    // No second trade on same symbol.
-    if (
-      state.openTrades.has(
-        symbol
-      )
-    ) {
-
-      state.skippedSignals++;
-
-      return;
-    }
-
-    if (
-      state.openTrades.size >=
-      PAPER.maxOpenTrades
-    ) {
-
-      state.skippedSignals++;
-
-      return;
-    }
-
-    // Gemini is mandatory for NEW entries.
-    if (
-      !AI.entryCommanderEnabled ||
-      !GEMINI_API_KEY
-    ) {
-
-      state.skippedSignals++;
-
-      await journal(
-        'ENTRY_SKIPPED',
-        {
-          symbol,
-          message:
-            'Gemini unavailable - fail closed'
-        }
-      );
-
-      return;
-    }
-
-    const news =
-      getNewsBlock(
-        symbol
-      );
-
-    if (
-      news.blocked
-    ) {
-
-      state.skippedSignals++;
-
-      await journal(
-        'NEWS_BLOCK',
-        {
-          symbol,
-          events:
-            news.events,
-          message:
-            'High-impact news block'
-        }
-      );
-
-      return;
-    }
-
-    let quote;
-
-    try {
-
-      quote =
-        await fetchQuote(
-          symbol
-        );
-
-    }
-
-    catch (error) {
-
-      state.skippedSignals++;
-
-      console.error(
-        `[QUOTE] ${symbol}:`,
-        safeError(error)
-      );
-
-      return;
-    }
-
-    const session =
-      getMarketSession();
-
-    const strength =
-      pairStrengthContext(
-        symbol
-      );
-
-    let mtf;
-
-    try {
-
-      mtf =
-        await buildMtfContext(
-          symbol,
-          bars
-        );
-
-    }
-
-    catch (error) {
-
-      state.skippedSignals++;
-
-      console.error(
-        `[MTF] ${symbol}:`,
-        safeError(error)
-      );
-
-      return;
-    }
-
-    if (!mtf?.m15) {
-
-      state.skippedSignals++;
-
-      return;
-    }
-
-    const memory =
-      await getAiMemory(
-        symbol
-      );
-
-    let decision;
-
-    try {
-
-      decision =
-        await askEntryCommander({
-          symbol,
-          quote,
-          mtf,
-          session,
-          strength,
-          news,
-          memory
-        });
-
-    }
-
-    catch (error) {
-
-      state.skippedSignals++;
-
-      await journal(
-        'AI_ENTRY_ERROR',
-        {
-          symbol,
-          message:
-            safeError(error)
-        }
-      );
-
-      console.error(
-        `[AI ENTRY] ${symbol}:`,
-        safeError(error)
-      );
-
-      return;
-    }
-
-    if (
-      decision.decision ===
-      'NO_TRADE'
-    ) {
-
-      state.skippedSignals++;
-
-      await journal(
-        'NO_TRADE',
-        {
-          symbol,
-          confidence:
-            decision.confidence,
-          message:
-            decision.reason
-        }
-      );
-
-      return;
-    }
-
-    let risk;
-
-    try {
-
-      risk =
-        await validateEntryRisk({
-          symbol,
-
-          direction:
-            decision.decision,
-
-          confidence:
-            decision.confidence,
-
-          technicalStop:
-            decision.stopLoss,
-
-          quote,
-
-          technical:
-            mtf.m15
-        });
-
-    }
-
-    catch (error) {
-
-      state.skippedSignals++;
-
-      console.error(
-        `[RISK] ${symbol}:`,
-        safeError(error)
-      );
-
-      return;
-    }
-
-    if (
-      !risk.approved
-    ) {
-
-      state.skippedSignals++;
-
-      await journal(
-        'RISK_REJECT',
-        {
-          symbol,
-          direction:
-            decision.decision,
-          confidence:
-            decision.confidence,
-          message:
-            risk.reason
-        }
-      );
-
-      return;
-    }
-
-    try {
-
-      await openPaperTrade({
-        symbol,
-
-        direction:
-          decision.decision,
-
-        confidence:
-          decision.confidence,
-
-        reason:
-          decision.reason,
-
-        aiDecision:
-          decision,
-
-        technical:
-          mtf.m15,
-
-        risk
+  try{
+    const d=
+      await askTradeManager({
+        trade:t,
+        technical:tech,
+        memory:
+          await getAiMemory(
+            t.symbol
+          ),
+        currentPrice:
+          tech.price
       });
 
-    }
-
-    catch (error) {
-
-      state.skippedSignals++;
-
-      console.error(
-        `[OPEN] ${symbol}:`,
-        safeError(error)
-      );
-    }
-
-  }
-
-  finally {
-
-    state.scanLocks.delete(
-      symbol
-    );
-  }
-}
-
-// =========================
-// REFRESH ONE SYMBOL
-// =========================
-
-async function refreshSymbol(
-  symbol
-) {
-
-  const pair =
-    state.pairState.get(
-      symbol
-    );
-
-  if (!pair)
-    return;
-
-  try {
-
-    const rawBars =
-      await fetchBars(
-        symbol,
-        '15m',
-        HISTORY_LIMIT
+    if(d.decision==='CLOSE'){
+      await closeTradeAtPrice(
+        t,
+        tech.price,
+        `AI_CLOSE ${d.confidence.toFixed(0)}%: ${d.reason}`
       );
 
-    const closed =
-      closedBarsOnly(
-        rawBars,
-        '15m'
-      );
+    }else{
+      t.managementReason=
+        `AI_HOLD ${d.confidence.toFixed(0)}%: ${d.reason}`;
 
-    if (
-      closed.length <
-      CORE_MIN_HISTORY
-    ) {
-
-      pair.lastError =
-        'Insufficient closed bars';
-
-      return;
+      await saveTrade(t);
     }
 
-    const latest =
-      last(closed);
-
-    const previousTime =
-      new Date(
-        pair.lastClosedBarTime
-      ).getTime();
-
-    const latestTime =
-      new Date(
-        latest.openTime
-      ).getTime();
-
-    pair.bars15m =
-      closed;
-
-    pair.lastRefreshAt =
-      new Date();
-
-    pair.lastError =
-      null;
-
-    if (
-      !Number.isFinite(
-        latestTime
-      )
-    ) {
-      return;
-    }
-
-    if (
-      !Number.isFinite(
-        previousTime
-      ) ||
-      latestTime >
-        previousTime
-    ) {
-
-      pair.lastClosedBarTime =
-        latest.openTime;
-
-      await processNewClosedBar(
-        symbol,
-        closed
-      );
-    }
-
-  }
-
-  catch (error) {
-
-    pair.lastError =
-      safeError(error);
-
-    state.lastMarketError =
-      safeError(error);
-
+  }catch(e){
     console.error(
-      `[REFRESH] ${symbol}:`,
-      safeError(error)
+      `[AI MANAGE] ${t.symbol}:`,
+      safeError(e)
     );
   }
 }
 
-// =========================
-// SCAN LOOP
-// =========================
-
-async function scanMarket() {
-
-  if (
-    state.scanLoopBusy
-  ) {
+async function scanMarket(){
+  if(state.scanBusy){
     return;
   }
 
-  state.scanLoopBusy =
-    true;
+  state.scanBusy=true;
 
-  try {
+  try{
+    const candidates=[];
 
-    for (
-      const symbol of
-        INSTRUMENTS
-    ) {
+    const symbols=[
+      ...new Set([
+        ...ACTIVE_SYMBOLS,
+        ...state.openTrades.keys()
+      ])
+    ];
 
-      if (
-        !state.pairState.has(
-          symbol
-        )
-      ) {
+    for(const symbol of symbols){
+      if(
+        Date.now()<
+        state.twelveBlockedUntil
+      ){
+        break;
+      }
+
+      const r=
+        await refreshSymbol(symbol);
+
+      if(!r){
         continue;
       }
 
-      await refreshSymbol(
-        symbol
-      );
+      const{
+        pair,
+        latest
+      }=r;
 
-      // Twelve Data pacing:
-      // ~7.5 requests/minute.
-      await sleep(8000);
-    }
-
-  }
-
-  finally {
-
-    state.scanLoopBusy =
-      false;
-  }
-}
-
-// =========================
-// OPEN TRADE MANAGEMENT LOOP
-// =========================
-
-async function manageOpenTrades() {
-
-  if (
-    state.quoteLoopBusy
-  ) {
-    return;
-  }
-
-  state.quoteLoopBusy =
-    true;
-
-  try {
-
-    const trades =
-      Array.from(
-        state.openTrades.values()
-      );
-
-    for (
-      const trade of trades
-    ) {
-
-      const stillOpen =
-        state.openTrades.get(
-          trade.symbol
+      const tech=
+        buildTechnicalIntelligence(
+          pair.bars15m
         );
 
-      if (
-        !stillOpen ||
-        stillOpen.tradeId !==
-          trade.tradeId
-      ) {
+      state.scannedBars++;
+
+      const existing=
+        state.openTrades.get(symbol);
+
+      if(existing){
+        await manageMechanicalOnBar(
+          existing,
+          latest
+        );
+
+        if(
+          state.openTrades.has(symbol)
+        ){
+          await maybeAiManage(
+            existing,
+            tech
+          );
+        }
+
+        pair.lastClosedBarTime=
+          latest.openTime;
+
         continue;
       }
 
-      await manageOpenTrade(
-        trade
-      );
+      const c=
+        localCandidate(
+          symbol,
+          tech
+        );
 
-      // Keep API calls controlled.
-      await sleep(8000);
+      if(c){
+        candidates.push(c);
+      }else{
+        state.skippedSignals++;
+
+        pair.lastClosedBarTime=
+          latest.openTime;
+      }
     }
 
-  }
+    candidates.sort(
+      (a,b)=>b.rank-a.rank
+    );
 
-  finally {
+    if(candidates.length){
+      await processCandidate(
+        candidates[0]
+      );
+    }
 
-    state.quoteLoopBusy =
-      false;
+    for(const c of candidates.slice(1)){
+      const p=
+        state.pairState.get(
+          c.symbol
+        );
+
+      if(p){
+        p.lastClosedBarTime=
+          c.technical.barTime;
+      }
+
+      state.skippedSignals++;
+    }
+
+    state.marketReady=
+      ACTIVE_SYMBOLS.some(
+        s=>state.pairState.has(s)
+      );
+
+  }finally{
+    state.scanBusy=false;
   }
 }
 
-// =========================
-// BOT STATUS
-// =========================
+function scheduleNextScan(){
+  const now=Date.now();
+  const slot=TF_MS;
 
-function buildStatus() {
+  const next=
+    Math.floor(now/slot)*
+    slot+
+    slot+
+    25000;
 
-  return {
+  const delay=
+    Math.max(
+      5000,
+      next-now
+    );
 
-    version:
-      VERSION,
+  state.nextScanAt=
+    new Date(now+delay);
 
-    mode:
-      MODE,
+  setTimeout(
+    async()=>{
+      try{
+        await scanMarket();
+      }catch(e){
+        console.error(
+          '[SCAN]',
+          safeError(e)
+        );
+      }
 
-    liveTrading:
-      LIVE_TRADING,
+      scheduleNextScan();
+    },
+    delay
+  );
+}
+
+function startLoops(){
+  if(state.loopsStarted){
+    return;
+  }
+
+  state.loopsStarted=true;
+
+  scheduleNextScan();
+
+  setInterval(
+    ()=>fetchEconomicNews()
+      .catch(()=>{}),
+    NEWS_REFRESH_MS
+  );
+
+  console.log(
+    '[LOOPS] started'
+  );
+}
+
+function buildStatus(){
+  return{
+    version:VERSION,
+    mode:MODE,
+    liveTrading:LIVE_TRADING,
 
     uptimeSeconds:
       Math.floor(
         (
-          Date.now() -
+          Date.now()-
           state.startedAt.getTime()
-        ) / 1000
+        )/1000
       ),
 
-    ready: {
+    activeSymbols:
+      ACTIVE_SYMBOLS,
 
-      mongo:
-        state.mongoReady,
-
-      telegram:
-        state.telegramReady,
-
-      market:
-        state.marketReady,
-
-      gemini:
-        state.geminiReady
+    ready:{
+      mongo:state.mongoReady,
+      telegram:state.telegramReady,
+      market:state.marketReady,
+      gemini:state.geminiReady,
+      news:state.newsReady
     },
 
-    account: {
-
+    account:{
       startingBalance:
         PAPER.startingBalance,
 
       balance:
         account
-          ? n(
-              account.balance,
-              PAPER.startingBalance
-            )
-          : null,
+          ?n(account.balance)
+          :null,
 
       maxTradeRiskPct:
         PAPER.maxCapitalRiskPct,
@@ -7895,8 +4282,50 @@ function buildStatus() {
         portfolioRiskCapUsd()
     },
 
-    trades: {
+    usage:{
+      utcDay:
+        account?.apiUsageDay,
 
+      twelveUsed:
+        n(
+          account?.twelveCreditsUsed
+        ),
+
+      twelveSoftCap:
+        TWELVE_DAILY_SOFT_CAP,
+
+      twelveBlockedUntil:
+        state.twelveBlockedUntil
+          ?new Date(
+            state.twelveBlockedUntil
+          )
+          :null,
+
+      geminiEntryUsed:
+        n(
+          account?.geminiEntryUsed
+        ),
+
+      geminiEntryCap:
+        GEMINI_ENTRY_DAILY_CAP,
+
+      geminiManageUsed:
+        n(
+          account?.geminiManageUsed
+        ),
+
+      geminiManageCap:
+        GEMINI_MANAGE_DAILY_CAP,
+
+      geminiBlockedUntil:
+        state.geminiBlockedUntil
+          ?new Date(
+            state.geminiBlockedUntil
+          )
+          :null
+    },
+
+    trades:{
       open:
         state.openTrades.size,
 
@@ -7910,8 +4339,7 @@ function buildStatus() {
         state.skippedSignals
     },
 
-    ai: {
-
+    ai:{
       entryCalls:
         state.aiEntryCalls,
 
@@ -7937,189 +4365,147 @@ function buildStatus() {
         state.lastAiError
     },
 
-    market: {
-
+    market:{
       initializedSymbols:
         state.pairState.size,
 
-      totalSymbols:
-        INSTRUMENTS.length,
+      totalActiveSymbols:
+        ACTIVE_SYMBOLS.length,
 
       scannedBars:
         state.scannedBars,
 
       lastError:
-        state.lastMarketError
+        state.lastMarketError,
+
+      nextScanAt:
+        state.nextScanAt
     },
 
-    exits: {
+    news:{
+      ready:
+        state.newsReady,
 
-      breakEvenAtR:
-        RULES.breakEvenTriggerR,
+      lastError:
+        state.lastNewsError
+    },
 
-      partialCloseAtR:
-        RULES.partialTpTriggerR,
-
-      partialClosePct:
-        50,
-
-      remainingPct:
-        50,
-
-      trailingStartStopR:
-        RULES.trailingStartStopR,
-
-      trailingStepR:
-        RULES.trailingStepR
+    exits:{
+      breakEvenAtR:.6,
+      partialCloseAtR:2,
+      partialClosePct:50,
+      trailingStartStopR:1,
+      trailingStepR:.5
     }
   };
 }
 
-// =========================
-// EXPRESS WEB SERVER
-// =========================
-
-function startWebServer() {
-
-  const app =
-    express();
+function startWebServer(){
+  const app=express();
 
   app.use(
     express.json({
-      limit: '1mb'
+      limit:'1mb'
     })
   );
 
   app.get(
     '/',
-    (req, res) => {
-
+    (req,res)=>
       res.json({
-        service:
-          VERSION,
-        mode:
-          MODE,
-        status:
-          'RUNNING'
-      });
-    }
+        service:VERSION,
+        mode:MODE,
+        status:'RUNNING'
+      })
   );
 
   app.get(
     '/health',
-    (req, res) => {
-
-      res.status(200).json({
-        ok: true,
-
-        version:
-          VERSION,
-
-        mode:
-          MODE,
-
+    (req,res)=>
+      res.json({
+        ok:true,
+        version:VERSION,
         mongoReady:
           state.mongoReady,
-
         marketReady:
           state.marketReady,
-
         geminiReady:
           state.geminiReady,
-
         telegramReady:
           state.telegramReady,
-
+        newsReady:
+          state.newsReady,
         openTrades:
           state.openTrades.size
-      });
-    }
+      })
   );
 
   app.get(
     '/api/status',
-    (req, res) => {
-
+    (req,res)=>
       res.json(
         buildStatus()
-      );
-    }
+      )
   );
 
   app.get(
     '/api/trades',
-    (req, res) => {
-
+    (req,res)=>
       res.json(
-        Array.from(
-          state.openTrades.values()
-        )
-      );
-    }
+        [
+          ...state.openTrades.values()
+        ]
+      )
   );
 
   app.post(
     '/api/trades/:symbol/close',
-    async (
-      req,
-      res
-    ) => {
-
-      try {
-
-        const symbol =
+    async(req,res)=>{
+      try{
+        const s=
           String(
-            req.params.symbol ||
+            req.params.symbol||
             ''
-          )
-            .trim()
-            .toUpperCase();
+          ).toUpperCase();
 
-        const trade =
-          state.openTrades.get(
-            symbol
-          );
+        const t=
+          state.openTrades.get(s);
 
-        if (!trade) {
-
+        if(!t){
           return res
             .status(404)
             .json({
-              ok: false,
+              ok:false,
               error:
                 'No open trade for symbol'
             });
         }
 
-        const quote =
-          await fetchQuote(
-            symbol
+        const q=
+          await fetchQuote(s);
+
+        const x=
+          exitExecutionPrice(
+            t.direction,
+            q
           );
 
-        const closed =
-          await closePaperTrade({
-            trade,
-            quote,
-            reason:
-              'MANUAL_API_CLOSE'
-          });
-
         return res.json({
-          ok: true,
+          ok:true,
           trade:
-            closed
+            await closeTradeAtPrice(
+              t,
+              x,
+              'MANUAL_API_CLOSE'
+            )
         });
 
-      }
-
-      catch (error) {
-
+      }catch(e){
         return res
           .status(500)
           .json({
-            ok: false,
-            error:
-              safeError(error)
+            ok:false,
+            error:safeError(e)
           });
       }
     }
@@ -8128,8 +4514,7 @@ function startWebServer() {
   app.listen(
     PORT,
     '0.0.0.0',
-    () => {
-
+    ()=>{
       console.log(
         `[WEB] listening on ${PORT}`
       );
@@ -8137,358 +4522,130 @@ function startWebServer() {
   );
 }
 
-// =========================
-// START BACKGROUND LOOPS
-// =========================
-
-function startLoops() {
-
-  if (
-    state.loopsStarted
-  ) {
-    return;
-  }
-
-  state.loopsStarted =
-    true;
-
-  // Scan immediately after initialization.
-  setTimeout(
-    () => {
-      scanMarket()
-        .catch(error =>
-          console.error(
-            '[SCAN INITIAL]',
-            safeError(error)
-          )
-        );
-    },
-    5000
-  );
-
-  setInterval(
-    () => {
-
-      scanMarket()
-        .catch(error =>
-          console.error(
-            '[SCAN LOOP]',
-            safeError(error)
-          )
-        );
-
-    },
-    SCAN_TIMER_MS
-  );
-
-  setInterval(
-    () => {
-
-      manageOpenTrades()
-        .catch(error =>
-          console.error(
-            '[TRADE LOOP]',
-            safeError(error)
-          )
-        );
-
-    },
-    QUOTE_POLL_MS
-  );
-
-  setInterval(
-    () => {
-
-      fetchEconomicNews()
-        .catch(error =>
-          console.error(
-            '[NEWS LOOP]',
-            safeError(error)
-          )
-        );
-
-    },
-    NEWS_REFRESH_MS
-  );
-
-  console.log(
-    '[LOOPS] started'
-  );
-}
-
-// =========================
-// STARTUP VALIDATION
-// =========================
-
-function validateStartupConfig() {
-
-  if (
-    MODE !== 'PAPER'
-  ) {
+function validateStartupConfig(){
+  if(
+    MODE!=='PAPER'||
+    LIVE_TRADING
+  ){
     throw new Error(
-      'MODE must remain PAPER'
+      'PAPER only'
     );
   }
 
-  if (
-    LIVE_TRADING !== false
-  ) {
+  if(
+    PAPER.maxCapitalRiskPct>1||
+    PAPER.portfolioRiskCapPct>4
+  ){
     throw new Error(
-      'LIVE_TRADING must remain false'
+      'Risk limits invalid'
     );
   }
 
-  if (
-    PAPER.maxCapitalRiskPct >
-    1.00
-  ) {
-    throw new Error(
-      'Max capital risk cannot exceed 1%'
-    );
-  }
-
-  if (
-    PAPER.portfolioRiskCapPct >
-    4.00
-  ) {
-    throw new Error(
-      'Portfolio risk cap cannot exceed 4%'
-    );
-  }
-
-  if (
-    RULES.riskReward !==
-    2.00
-  ) {
-    throw new Error(
-      'Risk/reward must remain 2R'
-    );
-  }
-
-  if (
-    RULES.partialTpTriggerR !==
-    2.00
-  ) {
-    throw new Error(
-      'Partial close trigger must remain +2R'
-    );
-  }
-
-  if (
-    RULES.breakEvenTriggerR !==
-    0.60
-  ) {
-    throw new Error(
-      'Break-even must remain +0.60R'
-    );
-  }
-
-  if (
-    !TWELVE_DATA_API_KEY
-  ) {
+  if(!TWELVE_DATA_API_KEY){
     throw new Error(
       'TWELVE_DATA_API_KEY is missing'
     );
   }
 
-  if (
-    !MONGODB_URI
-  ) {
+  if(!MONGODB_URI){
     throw new Error(
       'MONGODB_URI is missing'
     );
   }
 
-  if (
-    !GEMINI_API_KEY
-  ) {
-
+  if(!GEMINI_API_KEY){
     console.warn(
-      '[STARTUP] GEMINI_API_KEY missing. New entries will remain disabled.'
+      '[STARTUP] GEMINI_API_KEY missing; no new entries'
     );
   }
 }
 
-// =========================
-// GRACEFUL SHUTDOWN
-// =========================
-
-async function shutdown(
-  signal
-) {
-
+async function shutdown(sig){
   console.log(
-    `[SHUTDOWN] ${signal}`
+    `[SHUTDOWN] ${sig}`
   );
 
-  try {
+  try{
+    telegramBot?.stop(sig);
+  }catch(_){}
 
-    if (telegramBot) {
-
-      telegramBot.stop(
-        signal
-      );
-    }
-
-  }
-
-  catch (_) {}
-
-  try {
-
-    if (
+  try{
+    if(
       mongoose.connection
-        .readyState !== 0
-    ) {
-
+        .readyState
+    ){
       await mongoose.disconnect();
     }
-
-  }
-
-  catch (_) {}
+  }catch(_){}
 
   process.exit(0);
 }
 
 process.on(
   'SIGTERM',
-  () => shutdown('SIGTERM')
+  ()=>shutdown('SIGTERM')
 );
 
 process.on(
   'SIGINT',
-  () => shutdown('SIGINT')
+  ()=>shutdown('SIGINT')
 );
-
-// =========================
-// UNHANDLED ERRORS
-// =========================
 
 process.on(
   'unhandledRejection',
-  reason => {
-
-    console.error(
-      '[UNHANDLED REJECTION]',
-      safeError(reason)
-    );
-  }
+  e=>console.error(
+    '[UNHANDLED]',
+    safeError(e)
+  )
 );
 
 process.on(
   'uncaughtException',
-  error => {
-
-    console.error(
-      '[UNCAUGHT EXCEPTION]',
-      safeError(error)
-    );
-  }
+  e=>console.error(
+    '[UNCAUGHT]',
+    safeError(e)
+  )
 );
 
-// =========================
-// BOOT
-// =========================
-
-async function boot() {
-
+async function boot(){
   console.log(
-    '========================================'
-  );
-
-  console.log(
-    VERSION
-  );
-
-  console.log(
-    `MODE=${MODE}`
-  );
-
-  console.log(
-    `LIVE_TRADING=${LIVE_TRADING}`
-  );
-
-  console.log(
-    '========================================'
+`\n${VERSION}
+MODE=${MODE}
+ACTIVE=${ACTIVE_SYMBOLS.join(',')}
+`
   );
 
   validateStartupConfig();
 
-  // Render web service must bind quickly.
   startWebServer();
 
-  // Mongo/account.
   await initMongo();
-
-  // Restore existing PAPER positions.
   await restoreOpenTrades();
-
-  // Telegram is optional.
   await initTelegram();
-
-  // News must be loaded BEFORE scanning.
   await fetchEconomicNews();
-
-  // Twelve Data market history.
   await initializeMarket();
-
-  // Mark Gemini available only after
-  // a real successful request.
-  state.geminiReady =
-    false;
 
   startLoops();
 
   await journal(
     'BOT_STARTED',
     {
-      message:
-        VERSION,
-
-      mode:
-        MODE,
-
-      startingBalance:
-        PAPER.startingBalance,
-
-      maxTradeRiskPct:
-        PAPER.maxCapitalRiskPct,
-
-      portfolioRiskCapPct:
-        PAPER.portfolioRiskCapPct,
-
-      breakEvenR:
-        RULES.breakEvenTriggerR,
-
-      partialCloseR:
-        RULES.partialTpTriggerR,
-
-      partialClosePct:
-        50,
-
-      remainingTrailingPct:
-        50
+      message:VERSION,
+      activeSymbols:
+        ACTIVE_SYMBOLS
     }
   );
 
   console.log(
-    '[BOOT] LOMY FOREX V1.5 READY'
+    '[BOOT] READY'
   );
 }
 
-// =========================
-// RUN
-// =========================
+boot().catch(e=>{
+  console.error(
+    '[BOOT FATAL]',
+    safeError(e)
+  );
 
-boot().catch(
-  error => {
-
-    console.error(
-      '[BOOT FATAL]',
-      safeError(error)
-    );
-
-    process.exit(1);
-  }
-);
+  process.exit(1);
+});
