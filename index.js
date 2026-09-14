@@ -21,7 +21,6 @@ const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
 const TWELVE_BASE = 'https://api.twelvedata.com';
 
-// ── GEMINI FALLBACK CHAIN ───────────────────────────────────
 const GEMINI_MODELS = [
   { name: 'gemini-3.1-flash-lite',   dailyCap: 500,  priority: 1 },
   { name: 'gemini-3.5-flash',        dailyCap: 100,  priority: 2 },
@@ -31,11 +30,10 @@ const GEMINI_MODELS = [
 const GEMINI_TOTAL_DAILY_CAP = 500;
 const GEMINI_ENTRY_DAILY_CAP = 450;
 const GEMINI_MANAGE_DAILY_CAP = 50;
-const GEMINI_ENTRY_MIN_GAP_MS = 10 * 60 * 1000;   // ← 10 دقايق (TEST MODE)
+const GEMINI_ENTRY_MIN_GAP_MS = 10 * 60 * 1000;
 const GEMINI_CALL_GAP_MS = 4000;
 const GEMINI_CIRCUIT_RESET_MS = 60 * 60 * 1000;
 
-// ── MARKET / QUOTA ──────────────────────────────────────────
 const TIMEFRAME = '15m';
 const TIMEFRAME_MS = 15 * 60 * 1000;
 const CORE_MIN_HISTORY = 60;
@@ -48,7 +46,6 @@ const NEWS_REFRESH_MS = 12 * 60 * 60 * 1000;
 const NEWS_BLOCK_MIN = 30;
 const NEWS_CACHE_MAX_AGE_MS = 36 * 60 * 60 * 1000;
 
-// ── INSTRUMENTS ─────────────────────────────────────────────
 const ALL_INSTRUMENTS = [
   'EURUSD','GBPUSD','USDJPY','USDCHF','AUDUSD','NZDUSD','USDCAD',
   'EURGBP','EURJPY','EURCHF','EURAUD','EURNZD','EURCAD',
@@ -66,7 +63,6 @@ const ACTIVE_SYMBOLS = (() => {
   return x.length ? x : DEFAULT_ACTIVE;
 })();
 
-// ── FROZEN RULES (TEST MODE) ────────────────────────────────
 const RULES = Object.freeze({
   riskReward: 2,
   breakEvenTriggerR: 0.6,
@@ -76,9 +72,9 @@ const RULES = Object.freeze({
   minStopAtr: 0.25,
   maxStopAtr: 6,
   maxSpreadRiskFraction: 0.2,
-  minEntryConfidence: 55,        // ← TEST MODE
-  minCloseConfidence: 60,        // ← TEST MODE
-  confluenceThreshold: 4,        // ← TEST MODE
+  minEntryConfidence: 55,
+  minCloseConfidence: 60,
+  confluenceThreshold: 4,
   atrTrailMult: 1.2,
   atrTrailStartR: 1.5
 });
@@ -87,17 +83,16 @@ const PAPER = Object.freeze({
   startingBalance: 300,
   maxCapitalRiskPct: 1,
   portfolioRiskCapPct: 4,
-  maxOpenTrades: 15,              // ← TEST MODE (من 31)
+  maxOpenTrades: 15,
   accountKey: 'lomy-forex-v2-test-300usd'
 });
 
 const DYNAMIC_RISK = Object.freeze({
   highConfidence: 85, highRiskPct: 1,
   medConfidence: 75,  medRiskPct: 0.75,
-  lowConfidence: 55,  lowRiskPct: 0.5     // ← TEST MODE
+  lowConfidence: 55,  lowRiskPct: 0.5
 });
 
-// ── CAPITAL PROTECTION ──────────────────────────────────────
 const PROTECTION = Object.freeze({
   dailyLossLimitPct: 3,
   weeklyLossLimitPct: 6,
@@ -107,13 +102,11 @@ const PROTECTION = Object.freeze({
   allowedSessions: ['LONDON','NEW_YORK'],
   blockFridayAfterUTC: 20,
   blockSundayBeforeUTC: 22,
-  // ── مفاتيح مرحلة الاختبار ──
-  correlationFilterEnabled: false,   // ← TEST MODE
-  sessionFilterEnabled: false,       // ← TEST MODE
+  correlationFilterEnabled: false,
+  sessionFilterEnabled: false,
   journalSamplingRate: 10
 });
 
-// ── TECHNICAL PARAMS ────────────────────────────────────────
 const TECH = Object.freeze({
   emaFast: 9, emaMedium: 21, emaTrend: 50, emaLong: 100, emaMacro: 200,
   rsiLen: 14, cmoLen: 9, atrLen: 14, adxLen: 14,
@@ -133,46 +126,22 @@ const AI = Object.freeze({
   timeoutMs: 20000
 });
 
-// ── STATE ───────────────────────────────────────────────────
 const state = {
   startedAt: new Date(),
-  mongoReady: false,
-  telegramReady: false,
-  telegramPollingReady: false,
-  marketReady: false,
-  geminiReady: false,
-  newsReady: false,
-  scanBusy: false,
-  loopsStarted: false,
-  lastMarketError: null,
-  lastAiError: null,
-  lastNewsError: null,
-  scannedBars: 0,
-  aiEntryCalls: 0,
-  aiManageCalls: 0,
-  aiBuyDecisions: 0,
-  aiSellDecisions: 0,
-  aiNoTradeDecisions: 0,
-  aiCloseDecisions: 0,
-  aiHoldDecisions: 0,
-  aiFallbackUsed: 0,
-  executedSignals: 0,
-  skippedSignals: 0,
-  pairState: new Map(),
-  openTrades: new Map(),
-  tradeLocks: new Set(),
-  twelveBlockedUntil: 0,
-  geminiBlockedUntil: 0,
-  geminiActiveModelIndex: 0,
-  geminiModelFailures: new Map(),
-  nextScanAt: null,
-  lastEntryAiAt: 0,
-  dailyPnl: 0,
-  weeklyPnl: 0,
-  consecutiveLosses: 0,
-  lastLossAt: 0,
-  dayStartBalance: 0,
-  weekStartBalance: 0
+  mongoReady: false, telegramReady: false, telegramPollingReady: false,
+  marketReady: false, geminiReady: false, newsReady: false,
+  scanBusy: false, loopsStarted: false,
+  lastMarketError: null, lastAiError: null, lastNewsError: null,
+  scannedBars: 0, aiEntryCalls: 0, aiManageCalls: 0,
+  aiBuyDecisions: 0, aiSellDecisions: 0, aiNoTradeDecisions: 0,
+  aiCloseDecisions: 0, aiHoldDecisions: 0, aiFallbackUsed: 0,
+  executedSignals: 0, skippedSignals: 0,
+  pairState: new Map(), openTrades: new Map(), tradeLocks: new Set(),
+  twelveBlockedUntil: 0, geminiBlockedUntil: 0,
+  geminiActiveModelIndex: 0, geminiModelFailures: new Map(),
+  nextScanAt: null, lastEntryAiAt: 0,
+  dailyPnl: 0, weeklyPnl: 0, consecutiveLosses: 0, lastLossAt: 0,
+  dayStartBalance: 0, weekStartBalance: 0
 };
 
 let account = null;
@@ -188,9 +157,7 @@ let telegramRetryTimer = null;
 
 const http = axios.create({ timeout: 20000, headers: { 'User-Agent': 'LOMY-FOREX-V2.1' } });
 
-// ═══════════════════════════════════════════════════════════
-// UTILITIES
-// ═══════════════════════════════════════════════════════════
+// ── UTILITIES ───────────────────────────────────────────────
 function n(v, f = 0) { const x = Number(v); return Number.isFinite(x) ? x : f; }
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -259,28 +226,22 @@ function correlationKey(symbol) {
   return symbol.slice(0, 3);
 }
 
-// ═══════════════════════════════════════════════════════════
-// BAR NORMALIZATION / AGGREGATION
-// ═══════════════════════════════════════════════════════════
+// ── BARS ────────────────────────────────────────────────────
 function normalizeBars(raw) {
   if (!Array.isArray(raw)) return [];
   return raw.map(x => ({
     openTime: x.openTime || x.datetime || x.time || x.timestamp,
-    open: n(x.open, NaN),
-    high: n(x.high, NaN),
-    low: n(x.low, NaN),
-    close: n(x.close, NaN),
+    open: n(x.open, NaN), high: n(x.high, NaN),
+    low: n(x.low, NaN), close: n(x.close, NaN),
     volume: n(x.tickVolume, n(x.volume, 0)),
     isOpen: x.isOpen === true
   })).filter(x => x.openTime && [x.open, x.high, x.low, x.close].every(Number.isFinite))
     .sort((a, b) => barTimeMs(a) - barTimeMs(b));
 }
-
 function closed15Bars(b) {
   const now = Date.now();
   return (b || []).filter(x => !x.isOpen && barTimeMs(x) > 0 && barTimeMs(x) + TIMEFRAME_MS <= now + 5000);
 }
-
 function mergeBars(a, b, max = INITIAL_HISTORY) {
   const m = new Map();
   for (const x of [...(a || []), ...(b || [])]) {
@@ -289,7 +250,6 @@ function mergeBars(a, b, max = INITIAL_HISTORY) {
   }
   return [...m.values()].sort((x, y) => barTimeMs(x) - barTimeMs(y)).slice(-max);
 }
-
 function aggregateBars(bars, minutes) {
   const ms = minutes * 60000;
   const needed = Math.max(1, Math.round(minutes / 15));
@@ -301,11 +261,7 @@ function aggregateBars(bars, minutes) {
     const k = Math.floor(t / ms) * ms;
     let x = m.get(k);
     if (!x) {
-      x = {
-        openTime: new Date(k).toISOString(),
-        open: b.open, high: b.high, low: b.low, close: b.close,
-        volume: n(b.volume), isOpen: false, _count: 1
-      };
+      x = { openTime: new Date(k).toISOString(), open: b.open, high: b.high, low: b.low, close: b.close, volume: n(b.volume), isOpen: false, _count: 1 };
       m.set(k, x);
     } else {
       x.high = Math.max(x.high, b.high);
@@ -321,9 +277,7 @@ function aggregateBars(bars, minutes) {
     .map(({ _count, ...x }) => x);
 }
 
-// ═══════════════════════════════════════════════════════════
-// INDICATORS
-// ═══════════════════════════════════════════════════════════
+// ── INDICATORS ──────────────────────────────────────────────
 function emaSeries(v, l) {
   if (!Array.isArray(v) || v.length < l) return [];
   const o = new Array(v.length).fill(NaN);
@@ -337,15 +291,10 @@ function emaSeries(v, l) {
   return o;
 }
 function emaLast(v, l) { const s = emaSeries(v, l); return s[s.length - 1]; }
-
 function trueRangeSeries(b) {
   const o = [];
   for (let i = 1; i < (b?.length || 0); i++)
-    o.push(Math.max(
-      b[i].high - b[i].low,
-      Math.abs(b[i].high - b[i - 1].close),
-      Math.abs(b[i].low - b[i - 1].close)
-    ));
+    o.push(Math.max(b[i].high - b[i].low, Math.abs(b[i].high - b[i - 1].close), Math.abs(b[i].low - b[i - 1].close)));
   return o;
 }
 function atrLast(b, l = 14) {
@@ -403,9 +352,7 @@ function williamsRLast(b, l = 14) {
   const s = b.slice(-l), h = highestHigh(s), lo = lowestLow(s), c = last(s).close;
   return h === lo ? -50 : -100 * (h - c) / (h - lo);
 }
-function rocLast(v, l = 12) {
-  return !v || v.length <= l ? NaN : pctChange(v[v.length - 1 - l], last(v));
-}
+function rocLast(v, l = 12) { return !v || v.length <= l ? NaN : pctChange(v[v.length - 1 - l], last(v)); }
 function bollingerLast(v, l = 20, m = 2) {
   if (!v || v.length < l) return { middle: NaN, upper: NaN, lower: NaN, widthPct: NaN };
   const s = v.slice(-l), mid = average(s), d = standardDeviation(s), u = mid + m * d, lo = mid - m * d;
@@ -544,8 +491,7 @@ function volatilityContext(b) {
   return {
     atr: a,
     atrPct: c && c.close > 0 && Number.isFinite(a) ? a / c.close * 100 : NaN,
-    averageAtr: aa,
-    atrRatio: r,
+    averageAtr: aa, atrRatio: r,
     regime: Number.isFinite(r) ? (r >= 1.5 ? 'HIGH' : r <= 0.7 ? 'LOW' : 'NORMAL') : 'NORMAL'
   };
 }
@@ -554,12 +500,7 @@ function liquidityContext(b, l = TECH.liquidityLookback) {
   const c = last(b);
   const p = b.slice(-(l + 1), -1);
   const h = highestHigh(p), lo = lowestLow(p);
-  return {
-    bullishSweep: c.low < lo && c.close > lo,
-    bearishSweep: c.high > h && c.close < h,
-    priorHigh: h,
-    priorLow: lo
-  };
+  return { bullishSweep: c.low < lo && c.close > lo, bearishSweep: c.high > h && c.close < h, priorHigh: h, priorLow: lo };
 }
 function fvgContext(b) {
   if (!b || b.length < 3) return { bullish: false, bearish: false, bullGapLow: NaN, bullGapHigh: NaN, bearGapLow: NaN, bearGapHigh: NaN };
@@ -568,10 +509,8 @@ function fvgContext(b) {
   const bear = c.high < a.low;
   return {
     bullish: bull, bearish: bear,
-    bullGapLow: bull ? a.high : NaN,
-    bullGapHigh: bull ? c.low : NaN,
-    bearGapLow: bear ? c.high : NaN,
-    bearGapHigh: bear ? a.low : NaN
+    bullGapLow: bull ? a.high : NaN, bullGapHigh: bull ? c.low : NaN,
+    bearGapLow: bear ? c.high : NaN, bearGapHigh: bear ? a.low : NaN
   };
 }
 function fibonacciContext(b, l = TECH.fibLookback) {
@@ -598,8 +537,7 @@ function supertrendContext(b, l = 10, m = 3) {
     prevFu = fu; prevFl = fl; prevSt = st;
     fu = !Number.isFinite(prevFu) || bu < prevFu || p.close > prevFu ? bu : prevFu;
     fl = !Number.isFinite(prevFl) || bl > prevFl || p.close < prevFl ? bl : prevFl;
-    if (!Number.isFinite(prevSt
-                         if (!Number.isFinite(prevSt)) st = c.close >= mid ? fl : fu;
+    if (!Number.isFinite(prevSt)) st = c.close >= mid ? fl : fu;
     else if (prevSt === prevFu) st = c.close <= fu ? fu : fl;
     else st = c.close >= fl ? fl : fu;
   }
@@ -642,18 +580,13 @@ function trendContext(b) {
 function momentumContext(b) {
   const c = b.map(x => x.close);
   return {
-    rsi: rsiLast(c, TECH.rsiLen),
-    cmo: cmoLast(c, TECH.cmoLen),
-    macd: macdLast(c),
-    stochastic: stochasticLast(b, TECH.stochasticLen),
-    williamsR: williamsRLast(b, TECH.stochasticLen),
-    roc: rocLast(c, TECH.rocLen)
+    rsi: rsiLast(c, TECH.rsiLen), cmo: cmoLast(c, TECH.cmoLen),
+    macd: macdLast(c), stochastic: stochasticLast(b, TECH.stochasticLen),
+    williamsR: williamsRLast(b, TECH.stochasticLen), roc: rocLast(c, TECH.rocLen)
   };
 }
 
-// ═══════════════════════════════════════════════════════════
-// CANDLE PATTERNS
-// ═══════════════════════════════════════════════════════════
+// ── CANDLE PATTERNS ─────────────────────────────────────────
 function body(b) { return Math.abs(b.close - b.open); }
 function range(b) { return Math.max(b.high - b.low, Number.EPSILON); }
 function upperWick(b) { return b.high - Math.max(b.open, b.close); }
@@ -662,14 +595,10 @@ function isBull(b) { return b.close > b.open; }
 function isBear(b) { return b.close < b.open; }
 
 function isBullishEngulfing(c, p) {
-  return isBear(p) && isBull(c) &&
-    c.open <= p.close && c.close >= p.open &&
-    body(c) > body(p) * 1.1;
+  return isBear(p) && isBull(c) && c.open <= p.close && c.close >= p.open && body(c) > body(p) * 1.1;
 }
 function isBearishEngulfing(c, p) {
-  return isBull(p) && isBear(c) &&
-    c.open >= p.close && c.close <= p.open &&
-    body(c) > body(p) * 1.1;
+  return isBull(p) && isBear(c) && c.open >= p.close && c.close <= p.open && body(c) > body(p) * 1.1;
 }
 function isHammer(b) {
   const r = range(b);
@@ -688,14 +617,10 @@ function isEveningStar(a, b, c) {
   return isBull(a) && body(b) < body(a) * 0.5 && isBear(c) && c.close < (a.open + a.close) / 2;
 }
 function isThreeWhiteSoldiers(a, b, c) {
-  return isBull(a) && isBull(b) && isBull(c) &&
-    b.close > a.close && c.close > b.close &&
-    body(b) > range(b) * 0.6 && body(c) > range(c) * 0.6;
+  return isBull(a) && isBull(b) && isBull(c) && b.close > a.close && c.close > b.close && body(b) > range(b) * 0.6 && body(c) > range(c) * 0.6;
 }
 function isThreeBlackCrows(a, b, c) {
-  return isBear(a) && isBear(b) && isBear(c) &&
-    b.close < a.close && c.close < b.close &&
-    body(b) > range(b) * 0.6 && body(c) > range(c) * 0.6;
+  return isBear(a) && isBear(b) && isBear(c) && b.close < a.close && c.close < b.close && body(b) > range(b) * 0.6 && body(c) > range(c) * 0.6;
 }
 function isTweezerBottom(c, p) {
   return isBear(p) && isBull(c) && Math.abs(p.low - c.low) <= range(p) * 0.05;
@@ -710,21 +635,19 @@ function detectCandlePatterns(b) {
   const a = b[b.length - 3], p = b[b.length - 2], c = b[b.length - 1];
   const patterns = [];
   let bullScore = 0, bearScore = 0;
-
   if (isBullishEngulfing(c, p)) { patterns.push('BULLISH_ENGULFING'); bullScore += 2; }
   if (isBearishEngulfing(c, p)) { patterns.push('BEARISH_ENGULFING'); bearScore += 2; }
-  if (isHammer(c))              { patterns.push('HAMMER'); bullScore += 1.5; }
-  if (isShootingStar(c))        { patterns.push('SHOOTING_STAR'); bearScore += 1.5; }
-  if (isMorningStar(a, p, c))   { patterns.push('MORNING_STAR'); bullScore += 2.5; }
-  if (isEveningStar(a, p, c))   { patterns.push('EVENING_STAR'); bearScore += 2.5; }
+  if (isHammer(c)) { patterns.push('HAMMER'); bullScore += 1.5; }
+  if (isShootingStar(c)) { patterns.push('SHOOTING_STAR'); bearScore += 1.5; }
+  if (isMorningStar(a, p, c)) { patterns.push('MORNING_STAR'); bullScore += 2.5; }
+  if (isEveningStar(a, p, c)) { patterns.push('EVENING_STAR'); bearScore += 2.5; }
   if (isThreeWhiteSoldiers(a, p, c)) { patterns.push('THREE_WHITE_SOLDIERS'); bullScore += 2; }
-  if (isThreeBlackCrows(a, p, c))    { patterns.push('THREE_BLACK_CROWS'); bearScore += 2; }
-  if (isTweezerBottom(c, p))    { patterns.push('TWEEZER_BOTTOM'); bullScore += 1; }
-  if (isTweezerTop(c, p))       { patterns.push('TWEEZER_TOP'); bearScore += 1; }
-  if (isInsideBar(c, p))        { patterns.push('INSIDE_BAR'); }
-  if (isOutsideBar(c, p))       { patterns.push('OUTSIDE_BAR'); }
-  if (isDoji(c))                { patterns.push('DOJI'); }
-
+  if (isThreeBlackCrows(a, p, c)) { patterns.push('THREE_BLACK_CROWS'); bearScore += 2; }
+  if (isTweezerBottom(c, p)) { patterns.push('TWEEZER_BOTTOM'); bullScore += 1; }
+  if (isTweezerTop(c, p)) { patterns.push('TWEEZER_TOP'); bearScore += 1; }
+  if (isInsideBar(c, p)) { patterns.push('INSIDE_BAR'); }
+  if (isOutsideBar(c, p)) { patterns.push('OUTSIDE_BAR'); }
+  if (isDoji(c)) { patterns.push('DOJI'); }
   return { patterns, bullScore, bearScore };
 }
 
@@ -749,12 +672,7 @@ function detectOrderBlocks(b, atr) {
   }
   const nearBull = bullishOB && Math.abs(lastBar.close - bullishOB.price) < atr * 0.8;
   const nearBear = bearishOB && Math.abs(lastBar.close - bearishOB.price) < atr * 0.8;
-  return {
-    bullishOB: nearBull ? bullishOB : null,
-    bearishOB: nearBear ? bearishOB : null,
-    rawBullishOB: bullishOB,
-    rawBearishOB: bearishOB
-  };
+  return { bullishOB: nearBull ? bullishOB : null, bearishOB: nearBear ? bearishOB : null, rawBullishOB: bullishOB, rawBearishOB: bearishOB };
 }
 
 function detectSupplyDemand(b, atr, lookback = 30) {
@@ -766,20 +684,14 @@ function detectSupplyDemand(b, atr, lookback = 30) {
     const x = s[i];
     const volRatio = avgVol > 0 ? n(x.volume) / avgVol : 1;
     if (volRatio >= 1.5) {
-      if (isBull(x) && lowerWick(x) > range(x) * 0.5) {
-        demandZone = { low: x.low, high: x.low + atr * 0.5, time: x.openTime };
-      }
-      if (isBear(x) && upperWick(x) > range(x) * 0.5) {
-        supplyZone = { low: x.high - atr * 0.5, high: x.high, time: x.openTime };
-      }
+      if (isBull(x) && lowerWick(x) > range(x) * 0.5) demandZone = { low: x.low, high: x.low + atr * 0.5, time: x.openTime };
+      if (isBear(x) && upperWick(x) > range(x) * 0.5) supplyZone = { low: x.high - atr * 0.5, high: x.high, time: x.openTime };
     }
   }
   return { demandZone, supplyZone };
 }
 
-// ═══════════════════════════════════════════════════════════
-// TECHNICAL INTELLIGENCE + CONFLUENCE
-// ═══════════════════════════════════════════════════════════
+// ── TECHNICAL INTELLIGENCE ──────────────────────────────────
 function buildTechnicalIntelligence(b) {
   if (!Array.isArray(b) || b.length < CORE_MIN_HISTORY) return null;
   const c = b.map(x => x.close);
@@ -844,8 +756,7 @@ function buildTechnicalIntelligence(b) {
   }
 
   return {
-    barTime: bar.openTime,
-    price: bar.close,
+    barTime: bar.openTime, price: bar.close,
     bias: bull > bear ? 'BULL' : bear > bull ? 'BEAR' : 'NEUTRAL',
     score: { bullish: bull, bearish: bear },
     trend, momentum, volatility, dmi, bollinger, keltner, volume,
@@ -863,37 +774,28 @@ function computeConfluence(t, mtf) {
     if (side === 'BULL') { bull += weight; breakdown.push(`+${weight} ${name}`); }
     else if (side === 'BEAR') { bear += weight; breakdown.push(`-${weight} ${name}`); }
   };
-
   const dir = t.bias;
   const h1 = mtf?.h1?.bias;
   const h4 = mtf?.h4?.bias;
 
   if (h4 === dir && dir !== 'NEUTRAL') add('4h_aligned', 3, dir);
   if (h1 === dir && dir !== 'NEUTRAL') add('1h_aligned', 2, dir);
-
   if (t.choch?.bullish && dir === 'BULL') add('choch_bull', 2, 'BULL');
   if (t.choch?.bearish && dir === 'BEAR') add('choch_bear', 2, 'BEAR');
   if (t.structure?.bos === 'BULLISH_BOS' && dir === 'BULL') add('bos_bull', 2, 'BULL');
   if (t.structure?.bos === 'BEARISH_BOS' && dir === 'BEAR') add('bos_bear', 2, 'BEAR');
-
   if (t.orderBlocks?.bullishOB && dir === 'BULL') add('bull_ob', 2, 'BULL');
   if (t.orderBlocks?.bearishOB && dir === 'BEAR') add('bear_ob', 2, 'BEAR');
-
   if (t.candlePatterns?.bullScore > 0 && dir === 'BULL') add('bull_candle', Math.min(t.candlePatterns.bullScore, 2.5), 'BULL');
   if (t.candlePatterns?.bearScore > 0 && dir === 'BEAR') add('bear_candle', Math.min(t.candlePatterns.bearScore, 2.5), 'BEAR');
-
   if (t.liquidity?.bullishSweep && dir === 'BULL') add('liq_sweep_bull', 1.5, 'BULL');
   if (t.liquidity?.bearishSweep && dir === 'BEAR') add('liq_sweep_bear', 1.5, 'BEAR');
-
   if (t.fvg?.bullish && dir === 'BULL') add('fvg_bull', 1.5, 'BULL');
   if (t.fvg?.bearish && dir === 'BEAR') add('fvg_bear', 1.5, 'BEAR');
-
   if (t.trend?.alignment === 'BULL' && dir === 'BULL') add('ema_align_bull', 1.5, 'BULL');
   if (t.trend?.alignment === 'BEAR' && dir === 'BEAR') add('ema_align_bear', 1.5, 'BEAR');
-
   if (t.momentum?.macd?.histogram > 0 && dir === 'BULL') add('macd_bull', 1, 'BULL');
   if (t.momentum?.macd?.histogram < 0 && dir === 'BEAR') add('macd_bear', 1, 'BEAR');
-
   if (t.volume?.spike) add('volume_spike', 1, dir === 'BULL' ? 'BULL' : dir === 'BEAR' ? 'BEAR' : null);
 
   if (Number.isFinite(t.supportResistance?.support) && Number.isFinite(t.price)) {
@@ -902,7 +804,6 @@ function computeConfluence(t, mtf) {
     if (nearSupport && dir === 'BULL') add('near_support', 1, 'BULL');
     if (nearResistance && dir === 'BEAR') add('near_resistance', 1, 'BEAR');
   }
-
   if (t.supplyDemand?.demandZone && dir === 'BULL') add('demand_zone', 1, 'BULL');
   if (t.supplyDemand?.supplyZone && dir === 'BEAR') add('supply_zone', 1, 'BEAR');
 
@@ -922,16 +823,13 @@ function localCandidate(symbol, mtf) {
   const t = mtf?.m15;
   if (!t || t.bias === 'NEUTRAL') return null;
   if (!Number.isFinite(t.volatility?.atr) || t.volatility.atr <= 0) return null;
-
   const conf = computeConfluence(t, mtf);
   if (conf.total < RULES.confluenceThreshold) return null;
-
   const dir = t.bias;
   let rank = conf.total;
   if (mtf.h1?.bias === dir) rank += 1.5;
   if (mtf.h4?.bias === dir) rank += 2;
   if (n(t.dmi?.adx) >= 20) rank += 1;
-
   return { symbol, technical: t, mtf, edge: conf.total, rank, confluence: conf };
 }
 
@@ -949,15 +847,10 @@ function compactTechnical(t) {
     bollinger: t.bollinger, keltner: t.keltner,
     supportResistance: t.supportResistance, volume: t.volume,
     vwap: t.vwap, obv: t.obv, mfi: t.mfi,
-    candlePatterns: t.candlePatterns,
-    orderBlocks: t.orderBlocks,
-    supplyDemand: t.supplyDemand
+    candlePatterns: t.candlePatterns, orderBlocks: t.orderBlocks, supplyDemand: t.supplyDemand
   };
 }
 
-// ═══════════════════════════════════════════════════════════
-// TRADE HELPERS (exported)
-// ═══════════════════════════════════════════════════════════
 function tradePriceR(t, p) {
   const d = Math.abs(t.entryPrice - t.initialStopLoss);
   if (!Number.isFinite(d) || d <= 0) return 0;
