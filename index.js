@@ -6,9 +6,9 @@ const mongoose = require('mongoose');
 const { Telegraf } = require('telegraf');
 
 // ═══════════════════════════════════════════════════════════
-// LOMY FOREX V2.1 — GEMINI FALLBACK — TEST MODE
+// LOMY FOREX V2.2 — GEMINI COMMANDER SMART
 // ═══════════════════════════════════════════════════════════
-const VERSION = 'LOMY FOREX V2.1 GEMINI FALLBACK TEST';
+const VERSION = 'LOMY FOREX V2.2 GEMINI COMMANDER SMART';
 const MODE = 'PAPER';
 const LIVE_TRADING = false;
 
@@ -21,6 +21,7 @@ const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
 const TWELVE_BASE = 'https://api.twelvedata.com';
 
+// ── GEMINI FALLBACK CHAIN ───────────────────────────────────
 const GEMINI_MODELS = [
   { name: 'gemini-3.1-flash-lite',   dailyCap: 500,  priority: 1 },
   { name: 'gemini-3.5-flash',        dailyCap: 100,  priority: 2 },
@@ -30,10 +31,12 @@ const GEMINI_MODELS = [
 const GEMINI_TOTAL_DAILY_CAP = 500;
 const GEMINI_ENTRY_DAILY_CAP = 450;
 const GEMINI_MANAGE_DAILY_CAP = 50;
-const GEMINI_ENTRY_MIN_GAP_MS = 10 * 60 * 1000;
+const GEMINI_ENTRY_MIN_GAP_MS = 12 * 60 * 1000;   // ← V2.2: من 10 لـ 12 دقيقة
 const GEMINI_CALL_GAP_MS = 4000;
 const GEMINI_CIRCUIT_RESET_MS = 60 * 60 * 1000;
+const GEMINI_RETRY_ONCE_DELAY_MS = 3000;          // ← V2.2: retry بعد 3 ثواني
 
+// ── MARKET / QUOTA ──────────────────────────────────────────
 const TIMEFRAME = '15m';
 const TIMEFRAME_MS = 15 * 60 * 1000;
 const CORE_MIN_HISTORY = 60;
@@ -46,6 +49,7 @@ const NEWS_REFRESH_MS = 12 * 60 * 60 * 1000;
 const NEWS_BLOCK_MIN = 30;
 const NEWS_CACHE_MAX_AGE_MS = 36 * 60 * 60 * 1000;
 
+// ── INSTRUMENTS ─────────────────────────────────────────────
 const ALL_INSTRUMENTS = [
   'EURUSD','GBPUSD','USDJPY','USDCHF','AUDUSD','NZDUSD','USDCAD',
   'EURGBP','EURJPY','EURCHF','EURAUD','EURNZD','EURCAD',
@@ -63,18 +67,22 @@ const ACTIVE_SYMBOLS = (() => {
   return x.length ? x : DEFAULT_ACTIVE;
 })();
 
+// ── RULES (V2.2 — محسّن من البيانات) ───────────────────────
 const RULES = Object.freeze({
   riskReward: 2,
-  breakEvenTriggerR: 0.6,
-  partialTpTriggerR: 2,
-  trailingStartStopR: 1,
+  breakEvenTriggerR: 0.5,              // ← V2.2: من 0.6 → 0.5 (يحمي GBPUSD من -1R)
+  partialTpTriggerR: 2.0,              // default — يتغير ديناميكيًا
+  partialTpTriggerRHigh: 2.5,          // ← V2.2: للـ Confluence ≥ 9
+  partialCloseThreshold: 9,            // ← V2.2: العتبة
+  trailingStartStopR: 1.0,             // ← V2.2: من 1 → 1 (نفس القيمة، بس القاعدة وضحت)
   trailingStepR: 0.5,
   minStopAtr: 0.25,
   maxStopAtr: 6,
   maxSpreadRiskFraction: 0.2,
-  minEntryConfidence: 55,
+  minEntryConfidence: 60,              // ← V2.2: من 55 → 60
   minCloseConfidence: 60,
-  confluenceThreshold: 4,
+  confluenceThreshold: 6,              // ← V2.2: من 4 → 6
+  confluenceHighThreshold: 9,          // ← V2.2: جديد
   atrTrailMult: 1.2,
   atrTrailStartR: 1.5
 });
@@ -84,15 +92,16 @@ const PAPER = Object.freeze({
   maxCapitalRiskPct: 1,
   portfolioRiskCapPct: 4,
   maxOpenTrades: 15,
-  accountKey: 'lomy-forex-v2-test-300usd'
+  accountKey: 'lomy-forex-v2-test-300usd'    // ← محافظ على نفس الـ key
 });
 
 const DYNAMIC_RISK = Object.freeze({
   highConfidence: 85, highRiskPct: 1,
   medConfidence: 75,  medRiskPct: 0.75,
-  lowConfidence: 55,  lowRiskPct: 0.5
+  lowConfidence: 60,  lowRiskPct: 0.5        // ← V2.2: من 55 → 60
 });
 
+// ── CAPITAL PROTECTION (V2.2 محسّن) ─────────────────────────
 const PROTECTION = Object.freeze({
   dailyLossLimitPct: 3,
   weeklyLossLimitPct: 6,
@@ -104,9 +113,15 @@ const PROTECTION = Object.freeze({
   blockSundayBeforeUTC: 22,
   correlationFilterEnabled: false,
   sessionFilterEnabled: false,
-  journalSamplingRate: 10
+  journalSamplingRate: 10,
+  // ── V2.2 جديد ──
+  symbolLossCooldownMs: 4 * 60 * 60 * 1000,   // 4 ساعات بعد خسارة
+  symbolBeStreakCooldownMs: 60 * 60 * 1000,   // ساعة بعد 2 BE متتالية
+  symbolBeStreakThreshold: 2,
+  consecutiveLossMultiplier: [1.0, 0.5, 0.25] // مخاطرة حسب الخسائر المتتالية
 });
 
+// ── TECHNICAL PARAMS ────────────────────────────────────────
 const TECH = Object.freeze({
   emaFast: 9, emaMedium: 21, emaTrend: 50, emaLong: 100, emaMacro: 200,
   rsiLen: 14, cmoLen: 9, atrLen: 14, adxLen: 14,
@@ -123,9 +138,10 @@ const AI = Object.freeze({
   managementEnabled: true,
   memoryClosedTrades: 40,
   temperature: 0.1,
-  timeoutMs: 20000
+  timeoutMs: 30000               // ← V2.2: من 20000 → 30000 (حل timeout errors)
 });
 
+// ── STATE (V2.2 — مضاف symbolCooldowns) ─────────────────────
 const state = {
   startedAt: new Date(),
   mongoReady: false, telegramReady: false, telegramPollingReady: false,
@@ -135,8 +151,10 @@ const state = {
   scannedBars: 0, aiEntryCalls: 0, aiManageCalls: 0,
   aiBuyDecisions: 0, aiSellDecisions: 0, aiNoTradeDecisions: 0,
   aiCloseDecisions: 0, aiHoldDecisions: 0, aiFallbackUsed: 0,
+  aiRetriesUsed: 0,                                    // ← V2.2 جديد
   executedSignals: 0, skippedSignals: 0,
   pairState: new Map(), openTrades: new Map(), tradeLocks: new Set(),
+  symbolCooldowns: new Map(),                          // ← V2.2 جديد: symbol → {until, reason}
   twelveBlockedUntil: 0, geminiBlockedUntil: 0,
   geminiActiveModelIndex: 0, geminiModelFailures: new Map(),
   nextScanAt: null, lastEntryAiAt: 0,
@@ -155,9 +173,11 @@ let lastTwelveAt = 0;
 let lastGeminiAt = 0;
 let telegramRetryTimer = null;
 
-const http = axios.create({ timeout: 20000, headers: { 'User-Agent': 'LOMY-FOREX-V2.1' } });
+const http = axios.create({ timeout: 30000, headers: { 'User-Agent': 'LOMY-FOREX-V2.2' } });
 
-// ── UTILITIES ───────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// UTILITIES
+// ═══════════════════════════════════════════════════════════
 function n(v, f = 0) { const x = Number(v); return Number.isFinite(x) ? x : f; }
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -226,7 +246,30 @@ function correlationKey(symbol) {
   return symbol.slice(0, 3);
 }
 
-// ── BARS ────────────────────────────────────────────────────
+// ── V2.2: Symbol Cooldown helpers ──────────────────────────
+function isSymbolCoolingDown(symbol) {
+  const c = state.symbolCooldowns.get(symbol);
+  if (!c) return false;
+  if (Date.now() >= c.until) {
+    state.symbolCooldowns.delete(symbol);
+    return false;
+  }
+  return true;
+}
+function symbolCooldownReason(symbol) {
+  const c = state.symbolCooldowns.get(symbol);
+  if (!c) return null;
+  const min = Math.ceil((c.until - Date.now()) / 60000);
+  return `${c.reason} (${min} min remaining)`;
+}
+function setSymbolCooldown(symbol, ms, reason) {
+  state.symbolCooldowns.set(symbol, { until: Date.now() + ms, reason });
+  console.log(`[COOLDOWN] ${symbol} for ${Math.round(ms/60000)} min — ${reason}`);
+}
+
+// ═══════════════════════════════════════════════════════════
+// BAR NORMALIZATION / AGGREGATION
+// ═══════════════════════════════════════════════════════════
 function normalizeBars(raw) {
   if (!Array.isArray(raw)) return [];
   return raw.map(x => ({
@@ -277,7 +320,9 @@ function aggregateBars(bars, minutes) {
     .map(({ _count, ...x }) => x);
 }
 
-// ── INDICATORS ──────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// INDICATORS
+// ═══════════════════════════════════════════════════════════
 function emaSeries(v, l) {
   if (!Array.isArray(v) || v.length < l) return [];
   const o = new Array(v.length).fill(NaN);
@@ -291,10 +336,15 @@ function emaSeries(v, l) {
   return o;
 }
 function emaLast(v, l) { const s = emaSeries(v, l); return s[s.length - 1]; }
+
 function trueRangeSeries(b) {
   const o = [];
   for (let i = 1; i < (b?.length || 0); i++)
-    o.push(Math.max(b[i].high - b[i].low, Math.abs(b[i].high - b[i - 1].close), Math.abs(b[i].low - b[i - 1].close)));
+    o.push(Math.max(
+      b[i].high - b[i].low,
+      Math.abs(b[i].high - b[i - 1].close),
+      Math.abs(b[i].low - b[i - 1].close)
+    ));
   return o;
 }
 function atrLast(b, l = 14) {
@@ -352,7 +402,9 @@ function williamsRLast(b, l = 14) {
   const s = b.slice(-l), h = highestHigh(s), lo = lowestLow(s), c = last(s).close;
   return h === lo ? -50 : -100 * (h - c) / (h - lo);
 }
-function rocLast(v, l = 12) { return !v || v.length <= l ? NaN : pctChange(v[v.length - 1 - l], last(v)); }
+function rocLast(v, l = 12) {
+  return !v || v.length <= l ? NaN : pctChange(v[v.length - 1 - l], last(v));
+}
 function bollingerLast(v, l = 20, m = 2) {
   if (!v || v.length < l) return { middle: NaN, upper: NaN, lower: NaN, widthPct: NaN };
   const s = v.slice(-l), mid = average(s), d = standardDeviation(s), u = mid + m * d, lo = mid - m * d;
@@ -500,7 +552,11 @@ function liquidityContext(b, l = TECH.liquidityLookback) {
   const c = last(b);
   const p = b.slice(-(l + 1), -1);
   const h = highestHigh(p), lo = lowestLow(p);
-  return { bullishSweep: c.low < lo && c.close > lo, bearishSweep: c.high > h && c.close < h, priorHigh: h, priorLow: lo };
+  return {
+    bullishSweep: c.low < lo && c.close > lo,
+    bearishSweep: c.high > h && c.close < h,
+    priorHigh: h, priorLow: lo
+  };
 }
 function fvgContext(b) {
   if (!b || b.length < 3) return { bullish: false, bearish: false, bullGapLow: NaN, bullGapHigh: NaN, bearGapLow: NaN, bearGapHigh: NaN };
@@ -586,7 +642,9 @@ function momentumContext(b) {
   };
 }
 
-// ── CANDLE PATTERNS ─────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// CANDLE PATTERNS
+// ═══════════════════════════════════════════════════════════
 function body(b) { return Math.abs(b.close - b.open); }
 function range(b) { return Math.max(b.high - b.low, Number.EPSILON); }
 function upperWick(b) { return b.high - Math.max(b.open, b.close); }
@@ -672,7 +730,12 @@ function detectOrderBlocks(b, atr) {
   }
   const nearBull = bullishOB && Math.abs(lastBar.close - bullishOB.price) < atr * 0.8;
   const nearBear = bearishOB && Math.abs(lastBar.close - bearishOB.price) < atr * 0.8;
-  return { bullishOB: nearBull ? bullishOB : null, bearishOB: nearBear ? bearishOB : null, rawBullishOB: bullishOB, rawBearishOB: bearishOB };
+  return {
+    bullishOB: nearBull ? bullishOB : null,
+    bearishOB: nearBear ? bearishOB : null,
+    rawBullishOB: bullishOB,
+    rawBearishOB: bearishOB
+  };
 }
 
 function detectSupplyDemand(b, atr, lookback = 30) {
@@ -691,7 +754,9 @@ function detectSupplyDemand(b, atr, lookback = 30) {
   return { demandZone, supplyZone };
 }
 
-// ── TECHNICAL INTELLIGENCE ──────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// TECHNICAL INTELLIGENCE
+// ═══════════════════════════════════════════════════════════
 function buildTechnicalIntelligence(b) {
   if (!Array.isArray(b) || b.length < CORE_MIN_HISTORY) return null;
   const c = b.map(x => x.close);
@@ -797,7 +862,6 @@ function computeConfluence(t, mtf) {
   if (t.momentum?.macd?.histogram > 0 && dir === 'BULL') add('macd_bull', 1, 'BULL');
   if (t.momentum?.macd?.histogram < 0 && dir === 'BEAR') add('macd_bear', 1, 'BEAR');
   if (t.volume?.spike) add('volume_spike', 1, dir === 'BULL' ? 'BULL' : dir === 'BEAR' ? 'BEAR' : null);
-
   if (Number.isFinite(t.supportResistance?.support) && Number.isFinite(t.price)) {
     const nearSupport = Math.abs(t.price - t.supportResistance.support) < t.volatility.atr * 0.5;
     const nearResistance = Math.abs(t.price - t.supportResistance.resistance) < t.volatility.atr * 0.5;
@@ -851,6 +915,7 @@ function compactTechnical(t) {
   };
 }
 
+// ── V2.2: Trade helpers مع Dynamic Partial ─────────────────
 function tradePriceR(t, p) {
   const d = Math.abs(t.entryPrice - t.initialStopLoss);
   if (!Number.isFinite(d) || d <= 0) return 0;
@@ -870,6 +935,20 @@ function riskPctFromConfidence(c) {
   if (c >= DYNAMIC_RISK.medConfidence) return Math.min(DYNAMIC_RISK.medRiskPct, PAPER.maxCapitalRiskPct);
   if (c >= DYNAMIC_RISK.lowConfidence) return Math.min(DYNAMIC_RISK.lowRiskPct, PAPER.maxCapitalRiskPct);
   return 0;
+}
+
+// ── V2.2: Dynamic Partial Target based on Confluence ───────
+function partialTpTriggerFor(confluenceScore) {
+  return n(confluenceScore) >= RULES.confluenceHighThreshold
+    ? RULES.partialTpTriggerRHigh
+    : RULES.partialTpTriggerR;
+}
+
+// ── V2.2: Consecutive loss risk multiplier ─────────────────
+function riskMultiplierFromLosses(consecutiveLosses) {
+  const arr = PROTECTION.consecutiveLossMultiplier;
+  const idx = Math.min(n(consecutiveLosses), arr.length - 1);
+  return arr[idx] ?? 0.25;
 }
 // ═══════════════════════════════════════════════════════════
 // MONGODB SCHEMAS
@@ -895,7 +974,9 @@ const accountSchema = new mongoose.Schema({
   consecutiveLosses: { type: Number, default: 0 },
   lastLossAt: Date,
   lastDayKey: String,
-  lastWeekKey: String
+  lastWeekKey: String,
+  // ── V2.2: Symbol stats ──
+  symbolStats: { type: mongoose.Schema.Types.Mixed, default: {} }
 }, { timestamps: true });
 
 const tradeSchema = new mongoose.Schema({
@@ -907,6 +988,7 @@ const tradeSchema = new mongoose.Schema({
   stopLoss: Number,
   initialStopLoss: Number,
   partialTargetPrice: Number,
+  partialTpTriggerR: { type: Number, default: 2.0 },   // ← V2.2
   quantity: Number,
   initialQuantity: Number,
   riskAmount: Number,
@@ -924,7 +1006,7 @@ const tradeSchema = new mongoose.Schema({
   partialClosed: { type: Boolean, default: false },
   trailingLevelR: { type: Number, default: 0 },
   breakEvenActivated: { type: Boolean, default: false },
-  atrTrailLevel: { type: Number, default: 0 },     // ← FIX: NaN → 0
+  atrTrailLevel: { type: Number, default: 0 },
   maxFavorablePrice: Number,
   maxAdversePrice: Number,
   mfeR: Number,
@@ -944,7 +1026,7 @@ const journalSchema = new mongoose.Schema({
   message: String,
   data: mongoose.Schema.Types.Mixed,
   createdAt: { type: Date, default: Date.now }
-}, { collection: 'lomyforexjournalv21' });
+}, { collection: 'lomyforexjournalv22' });
 
 const newsCacheSchema = new mongoose.Schema({
   key: { type: String, unique: true },
@@ -952,10 +1034,10 @@ const newsCacheSchema = new mongoose.Schema({
   fetchedAt: Date
 }, { timestamps: true });
 
-const Account = mongoose.models.LomyForexAccountV21 || mongoose.model('LomyForexAccountV21', accountSchema);
-const Trade = mongoose.models.LomyForexTradeV21 || mongoose.model('LomyForexTradeV21', tradeSchema);
-const Journal = mongoose.models.LomyForexJournalV21 || mongoose.model('LomyForexJournalV21', journalSchema);
-const NewsCache = mongoose.models.LomyForexNewsCacheV21 || mongoose.model('LomyForexNewsCacheV21', newsCacheSchema);
+const Account = mongoose.models.LomyForexAccountV22 || mongoose.model('LomyForexAccountV22', accountSchema);
+const Trade = mongoose.models.LomyForexTradeV22 || mongoose.model('LomyForexTradeV22', tradeSchema);
+const Journal = mongoose.models.LomyForexJournalV22 || mongoose.model('LomyForexJournalV22', journalSchema);
+const NewsCache = mongoose.models.LomyForexNewsCacheV22 || mongoose.model('LomyForexNewsCacheV22', newsCacheSchema);
 
 async function saveAccount() {
   if (!account) return;
@@ -1044,7 +1126,8 @@ async function initMongo() {
       geminiEntryUsed: 0,
       geminiManageUsed: 0,
       dayStartBalance: PAPER.startingBalance,
-      weekStartBalance: PAPER.startingBalance
+      weekStartBalance: PAPER.startingBalance,
+      symbolStats: {}
     });
   }
   account.version = VERSION;
@@ -1060,7 +1143,7 @@ async function restoreOpenTrades() {
   const rows = await Trade.find({ status: 'OPEN' }).lean();
   state.openTrades.clear();
   for (const r of rows) {
-    if (r.partialClosed === true && r.settlementVersion !== 'V21') {
+    if (r.partialClosed === true && r.settlementVersion !== 'V22') {
       await markAccountKeyOnly(`${r.tradeId}:partial`);
     }
     const t = {
@@ -1071,6 +1154,7 @@ async function restoreOpenTrades() {
       atrTrailLevel: n(r.atrTrailLevel),
       partialClosed: r.partialClosed === true,
       breakEvenActivated: r.breakEvenActivated === true,
+      partialTpTriggerR: n(r.partialTpTriggerR, RULES.partialTpTriggerR),
       lastManagedBarTime: r.lastManagedBarTime || r.openedAt || null
     };
     state.openTrades.set(t.symbol, t);
@@ -1087,6 +1171,7 @@ async function saveTrade(t) {
       initialQuantity: t.initialQuantity,
       stopLoss: t.stopLoss,
       partialClosed: t.partialClosed,
+      partialTpTriggerR: t.partialTpTriggerR,
       trailingLevelR: t.trailingLevelR,
       breakEvenActivated: t.breakEvenActivated,
       atrTrailLevel: Number.isFinite(t.atrTrailLevel) ? t.atrTrailLevel : 0,
@@ -1138,7 +1223,7 @@ async function creditAccountOnce(key, amount) {
 async function reconcilePnl() {
   if (!state.mongoReady || !account) return;
   const rows = await Trade.find({
-    settlementVersion: 'V21',
+    settlementVersion: 'V22',
     $or: [{ status: 'OPEN', partialClosed: true }, { status: 'CLOSED' }]
   }).sort({ updatedAt: -1 }).limit(500).lean();
 
@@ -1148,6 +1233,25 @@ async function reconcilePnl() {
     if (t.status === 'CLOSED' && n(t.finalRemainingPnl) !== 0)
       await creditAccountOnce(`${t.tradeId}:final`, n(t.finalRemainingPnl));
   }
+}
+
+// ── V2.2: Symbol stats tracking ────────────────────────────
+async function updateSymbolStats(symbol, result, rValue) {
+  if (!account) return;
+  const stats = account.symbolStats || {};
+  const s = stats[symbol] || { wins: 0, losses: 0, be: 0, totalR: 0, totalTrades: 0, beStreak: 0, lastLossAt: null };
+  
+  s.totalTrades++;
+  s.totalR = n(s.totalR) + n(rValue);
+  
+  if (result === 'WIN') { s.wins++; s.beStreak = 0; }
+  else if (result === 'LOSS') { s.losses++; s.beStreak = 0; s.lastLossAt = new Date(); }
+  else if (result === 'BE') { s.be++; s.beStreak = (s.beStreak || 0) + 1; }
+  
+  stats[symbol] = s;
+  account.symbolStats = stats;
+  account.markModified('symbolStats');
+  await saveAccount();
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1623,6 +1727,7 @@ async function initTelegram() {
     await ctx.reply([
       `AI Entry Calls: ${state.aiEntryCalls}`,
       `AI Manage Calls: ${state.aiManageCalls}`,
+      `Retries Used: ${state.aiRetriesUsed}`,
       `BUY: ${state.aiBuyDecisions}`,
       `SELL: ${state.aiSellDecisions}`,
       `NO_TRADE: ${state.aiNoTradeDecisions}`,
@@ -1634,13 +1739,20 @@ async function initTelegram() {
       `Manage Used: ${n(account?.geminiManageUsed)}/${GEMINI_MANAGE_DAILY_CAP}`
     ].join('\n'));
   });
+  telegramBot.command('cooldowns', async ctx => {
+    await captureTelegramChat(ctx);
+    const x = [...state.symbolCooldowns.entries()];
+    await ctx.reply(x.length
+      ? x.map(([s, c]) => `${s}: ${c.reason} (${Math.ceil((c.until - Date.now())/60000)} min)`).join('\n')
+      : 'No symbols on cooldown.');
+  });
 
   await startTelegramPolling();
   console.log('[TELEGRAM] API ready');
 }
 
 // ═══════════════════════════════════════════════════════════
-// GEMINI FALLBACK CHAIN
+// GEMINI FALLBACK CHAIN (V2.2 محسّن)
 // ═══════════════════════════════════════════════════════════
 function retryAfterMs(e) {
   const h = Number(e?.response?.headers?.['retry-after']);
@@ -1658,6 +1770,11 @@ function isGeminiModelError(e) {
   const x = safeError(e).toLowerCase();
   return e?.response?.status === 404 || x.includes('not found') ||
     x.includes('not supported') || x.includes('invalid model');
+}
+function isGeminiTransientError(e) {
+  const x = safeError(e).toLowerCase();
+  return x.includes('high demand') || x.includes('timeout') ||
+    x.includes('temporary') || e?.code === 'ECONNABORTED';
 }
 function currentGeminiModel() {
   return GEMINI_MODELS[state.geminiActiveModelIndex] || GEMINI_MODELS[0];
@@ -1712,7 +1829,6 @@ async function queueGemini(task, kind) {
 
     try {
       const out = await task();
-      // ← العداد يزيد فقط بعد النجاح
       if (account) {
         account.geminiCallsUsed = total + 1;
         if (kind === 'entry') account.geminiEntryUsed = usedKind + 1;
@@ -1741,6 +1857,26 @@ function extractJson(text) {
   }
 }
 
+async function callGeminiOnce(prompt, kind) {
+  const model = currentGeminiModel();
+  return queueGemini(async () => {
+    const r = await http.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model.name)}:generateContent`,
+      {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 800 }
+      },
+      { headers: { 'x-goog-api-key': GEMINI_API_KEY }, timeout: AI.timeoutMs }
+    );
+    const text = r?.data?.candidates?.[0]?.content?.parts?.map(x => x.text || '').join('');
+    if (!text) throw new Error('Gemini returned empty response');
+    state.geminiReady = true;
+    state.lastAiError = null;
+    return extractJson(text);
+  }, kind);
+}
+
+// ── V2.2: retry once on transient errors ───────────────────
 async function callGemini(prompt, kind) {
   if (!GEMINI_API_KEY) {
     state.geminiReady = false;
@@ -1748,26 +1884,26 @@ async function callGemini(prompt, kind) {
   }
   let lastErr = null;
   for (let attempt = 0; attempt < GEMINI_MODELS.length; attempt++) {
-    const model = currentGeminiModel();
     try {
-      return await queueGemini(async () => {
-        const r = await http.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model.name)}:generateContent`,
-          {
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 500 }
-          },
-          { headers: { 'x-goog-api-key': GEMINI_API_KEY }, timeout: AI.timeoutMs }
-        );
-        const text = r?.data?.candidates?.[0]?.content?.parts?.map(x => x.text || '').join('');
-        if (!text) throw new Error('Gemini returned empty response');
-        state.geminiReady = true;
-        state.lastAiError = null;
-        return extractJson(text);
-      }, kind);
+      return await callGeminiOnce(prompt, kind);
     } catch (e) {
       lastErr = e;
       state.lastAiError = safeError(e);
+
+      // V2.2: Transient error → retry once بعد 3 ثواني
+      if (isGeminiTransientError(e)) {
+        console.warn(`[GEMINI RETRY] transient: ${safeError(e)}`);
+        state.aiRetriesUsed++;
+        await sleep(GEMINI_RETRY_ONCE_DELAY_MS);
+        try {
+          return await callGeminiOnce(prompt, kind);
+        } catch (e2) {
+          lastErr = e2;
+          state.lastAiError = safeError(e2);
+          if (!isGeminiQuotaError(e2) && !isGeminiModelError(e2)) throw e2;
+        }
+      }
+
       if (!isGeminiQuotaError(e) && !isGeminiModelError(e)) throw e;
     }
   }
@@ -1778,10 +1914,12 @@ async function callGemini(prompt, kind) {
   throw new Error('Gemini unavailable');
 }
 
+// ── V2.2: Memory system محسّن ──────────────────────────────
 async function getAiMemory(symbol) {
-  if (!state.mongoReady) return [];
+  if (!state.mongoReady) return { recentTrades: [], stats: {} };
   const rows = await Trade.find({ status: 'CLOSED' }).sort({ closedAt: -1 }).limit(AI.memoryClosedTrades).lean();
-  return rows.map(t => ({
+  
+  const recentTrades = rows.map(t => ({
     symbol: t.symbol,
     sameSymbol: t.symbol === symbol,
     direction: t.direction,
@@ -1794,24 +1932,63 @@ async function getAiMemory(symbol) {
     entryReason: String(t.entryReason || '').slice(0, 250),
     managementReason: String(t.managementReason || '').slice(0, 250)
   }));
+  
+  // V2.2: إحصائيات مجمّعة
+  const symbolStats = account?.symbolStats || {};
+  const s = symbolStats[symbol] || {};
+  const stats = {
+    symbol: symbol,
+    wins: n(s.wins),
+    losses: n(s.losses),
+    be: n(s.be),
+    totalTrades: n(s.totalTrades),
+    totalR: n(s.totalR),
+    winRate: s.totalTrades ? (n(s.wins) / n(s.totalTrades) * 100).toFixed(1) : null,
+    avgR: s.totalTrades ? (n(s.totalR) / n(s.totalTrades)).toFixed(2) : null
+  };
+  
+  return { recentTrades, stats };
 }
 
+// ── V2.2: Prompt محسّن مع Memory ───────────────────────────
 async function askEntryCommander({ symbol, mtf, session, strength, news, memory, confluence }) {
   state.aiEntryCalls++;
-  const prompt = `You are the entry commander for LOMY FOREX V2.1 (TEST MODE). PAPER TRADING ONLY.
-Decide BUY, SELL, or NO_TRADE using only supplied market evidence. Do not invent data.
-If BUY or SELL: confidence must be 55-100 and stopLoss must be a technical price based on structure, volatility, support/resistance, swing, liquidity, order block, or invalidation. Do not size the position.
-If evidence is weak/conflicting, current news risk is unsafe, or there is no clean technical stop, return NO_TRADE.
-Return JSON only: {"decision":"BUY|SELL|NO_TRADE","confidence":0,"stopLoss":null,"reason":"short precise reason"}
+  const prompt = `You are the ENTRY COMMANDER for LOMY FOREX V2.2. PAPER TRADING ONLY.
+
+DECISION RULES (STRICT):
+1. Return BUY, SELL, or NO_TRADE.
+2. Confidence must be 60-100 for any entry (min 60).
+3. stopLoss MUST be a technical price based on:
+   - Recent swing high/low
+   - Order block boundary
+   - Support/resistance level
+   - Liquidity zone
+   - FVG edge
+   NOT an arbitrary percentage.
+4. REJECT (NO_TRADE) if any of these are true:
+   - M15 and H1 conflict on direction
+   - Price is in the middle of a range (no clear S/R nearby)
+   - Recent trades on this symbol show 2+ consecutive losses or BE
+   - MFE expectation < 1R based on recent volatility
+   - Confluence score < 6
+   - Spread or volatility risk too high
+5. Position sizing is handled by the bot. Do NOT specify quantity.
+
+PRIORITIZE QUALITY OVER QUANTITY. It's better to return NO_TRADE than to enter a mediocre setup.
+
+Return JSON only:
+{"decision":"BUY|SELL|NO_TRADE","confidence":0,"stopLoss":null,"reason":"short precise reason"}
+
 DATA:${JSON.stringify({
     symbol, session, strength, news,
     confluence: { score: confluence.total, breakdown: confluence.breakdown },
+    symbolStats: memory.stats,
+    recentTrades: memory.recentTrades.slice(0, 10),
     mtf: {
       m15: compactTechnical(mtf.m15),
       h1: compactTechnical(mtf.h1),
       h4: compactTechnical(mtf.h4)
-    },
-    recentClosedTrades: memory
+    }
   })}`;
 
   const r = await callGemini(prompt, 'entry');
@@ -1832,11 +2009,18 @@ DATA:${JSON.stringify({
 
 async function askTradeManager({ trade, technical, memory, currentPrice }) {
   state.aiManageCalls++;
-  const prompt = `You manage an EXISTING PAPER forex trade. Mechanical risk management is controlled by the bot.
-You may ONLY decide HOLD or CLOSE.
-You may not change stop loss, take profit, trailing stop, position size, or partial-close rules.
-CLOSE only when supplied evidence materially invalidates the trade thesis.
-Return JSON only: {"decision":"HOLD|CLOSE","confidence":0,"reason":"short precise reason"}
+  const prompt = `You manage an EXISTING PAPER forex trade for LOMY FOREX V2.2.
+
+STRICT RULES:
+- You may ONLY decide HOLD or CLOSE.
+- You may NOT change stop loss, take profit, trailing stop, position size, or partial-close rules.
+- Mechanical risk management (BE, partial, trailing) is handled by the bot.
+- CLOSE only when supplied evidence materially invalidates the trade thesis.
+- Prefer HOLD unless there's a strong reason.
+
+Return JSON only:
+{"decision":"HOLD|CLOSE","confidence":0,"reason":"short precise reason"}
+
 DATA:${JSON.stringify({
     symbol: trade.symbol,
     direction: trade.direction,
@@ -1849,7 +2033,7 @@ DATA:${JSON.stringify({
     confidence: trade.confidence,
     entryReason: trade.entryReason,
     technical: compactTechnical(technical),
-    recentMemory: memory
+    recentTrades: memory.recentTrades?.slice(0, 5) || []
   })}`;
 
   const r = await callGemini(prompt, 'manage');
@@ -1923,6 +2107,7 @@ async function validateEntryRisk({ symbol, direction, confidence, technicalStop,
   if (!account) return { approved: false, reason: 'Paper account unavailable' };
   if (state.openTrades.size >= PAPER.maxOpenTrades) return { approved: false, reason: 'Maximum open trades reached' };
   if (state.openTrades.has(symbol)) return { approved: false, reason: 'Symbol already has an open trade' };
+  if (isSymbolCoolingDown(symbol)) return { approved: false, reason: `Symbol cooldown: ${symbolCooldownReason(symbol)}` };
   if (PROTECTION.correlationFilterEnabled && isCorrelated(symbol))
     return { approved: false, reason: 'Correlated pair already open' };
   if (isProtectionTriggered()) return { approved: false, reason: protectionReason() };
@@ -1955,9 +2140,9 @@ async function validateEntryRisk({ symbol, direction, confidence, technicalStop,
   if (riskPct <= 0 || riskPct > PAPER.maxCapitalRiskPct)
     return { approved: false, reason: 'Invalid risk percentage' };
 
-  if (n(account.consecutiveLosses) >= PROTECTION.consecutiveLossReduce) {
-    riskPct = riskPct * 0.5;
-  }
+  // ── V2.2: Consecutive loss multiplier ──
+  const lossMultiplier = riskMultiplierFromLosses(n(account.consecutiveLosses));
+  riskPct = riskPct * lossMultiplier;
 
   const riskAmount = n(account.balance) * riskPct / 100;
   if (currentPortfolioRiskUsd() + riskAmount > portfolioRiskCapUsd() + 1e-9)
@@ -1970,16 +2155,21 @@ async function validateEntryRisk({ symbol, direction, confidence, technicalStop,
     return { approved: false, reason: `Sizing failed: ${safeError(e)}` };
   }
 
+  // ── V2.2: Dynamic partial TP target ──
+  const partialR = partialTpTriggerFor(confluence?.total || 0);
+
   return {
     approved: true,
     entryPrice, stopLoss,
     riskDistance: stopDistance,
     riskPct, riskAmount,
+    lossMultiplier,
     quantity: sizing.quantity,
     initialQuantity: sizing.quantity,
+    partialTpTriggerR: partialR,
     partialTargetPrice: direction === 'BUY'
-      ? entryPrice + stopDistance * RULES.partialTpTriggerR
-      : entryPrice - stopDistance * RULES.partialTpTriggerR,
+      ? entryPrice + stopDistance * partialR
+      : entryPrice - stopDistance * partialR,
     rewardRisk: RULES.riskReward,
     spreadKnown: quote.spreadKnown,
     confluenceScore: confluence?.total || 0
@@ -2001,6 +2191,7 @@ async function openPaperTrade({ symbol, direction, confidence, reason, aiDecisio
     stopLoss: risk.stopLoss,
     initialStopLoss: risk.stopLoss,
     partialTargetPrice: risk.partialTargetPrice,
+    partialTpTriggerR: risk.partialTpTriggerR,     // ← V2.2
     quantity: risk.quantity,
     initialQuantity: risk.initialQuantity,
     riskAmount: risk.riskAmount,
@@ -2015,12 +2206,12 @@ async function openPaperTrade({ symbol, direction, confidence, reason, aiDecisio
     partialClosed: false,
     trailingLevelR: 0,
     breakEvenActivated: false,
-    atrTrailLevel: 0,                 // ← FIX: كان NaN
+    atrTrailLevel: 0,
     maxFavorablePrice: risk.entryPrice,
     maxAdversePrice: risk.entryPrice,
     mfeR: 0, maeR: 0,
     lastManagedBarTime: new Date(parseTime(technical.barTime) || Date.now()),
-    settlementVersion: 'V21',
+    settlementVersion: 'V22',
     finalRemainingPnl: 0,
     aiEntryDecision: aiDecision,
     technicalSnapshot: compactTechnical(technical),
@@ -2040,7 +2231,9 @@ async function openPaperTrade({ symbol, direction, confidence, reason, aiDecisio
     stopLoss: risk.stopLoss,
     riskPct: risk.riskPct,
     riskAmount: risk.riskAmount,
+    lossMultiplier: risk.lossMultiplier,           // ← V2.2
     quantity: risk.quantity,
+    partialTpTriggerR: risk.partialTpTriggerR,     // ← V2.2
     partialTargetPrice: risk.partialTargetPrice,
     spreadKnown: risk.spreadKnown,
     message: reason
@@ -2051,11 +2244,11 @@ async function openPaperTrade({ symbol, direction, confidence, reason, aiDecisio
     `${symbol} ${direction}`,
     `Entry: ${fmtPrice(risk.entryPrice, symbol)}`,
     `SL: ${fmtPrice(risk.stopLoss, symbol)}`,
-    `+2R: ${fmtPrice(risk.partialTargetPrice, symbol)}`,
+    `+${risk.partialTpTriggerR}R: ${fmtPrice(risk.partialTargetPrice, symbol)}`,
     `Risk: ${risk.riskPct.toFixed(2)}% (${fmtMoney(risk.riskAmount)})`,
     `Confidence: ${confidence.toFixed(0)}%`,
     `Confluence: ${confluence?.total || 0}`,
-    'Plan: BE +0.60R | close 50% +2R | trail remaining 50%'
+    `Plan: BE +0.50R | close 50% +${risk.partialTpTriggerR}R | trail remaining 50%`
   ].join('\n'));
 
   return trade;
@@ -2080,10 +2273,11 @@ function updateExcursionsFromBar(t, b) {
   t.maeR = Math.min(n(t.maeR), tradePriceR(t, t.maxAdversePrice));
 }
 
-async function recordTradeResult(pnl) {
+async function recordTradeResult(pnl, resultR) {
   if (!account) return;
   account.dailyPnl = n(account.dailyPnl) + pnl;
   account.weeklyPnl = n(account.weeklyPnl) + pnl;
+  
   if (pnl < 0) {
     account.consecutiveLosses = n(account.consecutiveLosses) + 1;
     account.lastLossAt = new Date();
@@ -2114,19 +2308,36 @@ async function closeTradeAtPrice(t, price, reason) {
   t.quantity = 0;
   t.totalPnl = totalPnl;
   t.finalRemainingPnl = remainingPnl;
-  t.settlementVersion = 'V21';
+  t.settlementVersion = 'V22';
   t.managementReason = String(reason).slice(0, 800);
   t.resultR = totalPnl / Math.max(Number.EPSILON, n(t.riskAmount));
 
   await saveTrade(t);
   state.openTrades.delete(t.symbol);
   await creditAccountOnce(`${t.tradeId}:final`, remainingPnl);
-  await recordTradeResult(totalPnl);
+  await recordTradeResult(totalPnl, t.resultR);
+
+  // ── V2.2: Symbol stats + Cooldown ──
+  let resultType = 'BE';
+  if (t.resultR > 0.1) resultType = 'WIN';
+  else if (t.resultR < -0.1) resultType = 'LOSS';
+  
+  await updateSymbolStats(t.symbol, resultType, t.resultR);
+  
+  if (resultType === 'LOSS') {
+    setSymbolCooldown(t.symbol, PROTECTION.symbolLossCooldownMs, `Loss of ${t.resultR.toFixed(2)}R`);
+  } else if (resultType === 'BE') {
+    const stats = account.symbolStats?.[t.symbol];
+    if (stats && stats.beStreak >= PROTECTION.symbolBeStreakThreshold) {
+      setSymbolCooldown(t.symbol, PROTECTION.symbolBeStreakCooldownMs, `${stats.beStreak} consecutive BE`);
+    }
+  }
 
   await journal('TRADE_CLOSED', {
     symbol: t.symbol, tradeId: t.tradeId, direction: t.direction,
     exitPrice: price, remainingPnl, partialPnl: n(t.realizedPartialPnl),
     totalPnl, resultR: t.resultR, mfeR: t.mfeR, maeR: t.maeR,
+    resultType,                                    // ← V2.2
     message: reason
   });
 
@@ -2155,7 +2366,7 @@ async function partialCloseAtPrice(t, price) {
   t.quantity = Math.max(0, n(t.quantity) - q);
   t.realizedPartialPnl = n(t.realizedPartialPnl) + pnl;
   t.partialClosed = true;
-  t.settlementVersion = 'V21';
+  t.settlementVersion = 'V22';
 
   improveStop(t, stopPriceAtR(t, RULES.trailingStartStopR));
   t.trailingLevelR = RULES.trailingStartStopR;
@@ -2163,19 +2374,20 @@ async function partialCloseAtPrice(t, price) {
 
   await saveTrade(t);
   await creditAccountOnce(`${t.tradeId}:partial`, pnl);
-  await recordTradeResult(pnl);
+  await recordTradeResult(pnl, 0);
 
   await journal('PARTIAL_CLOSE', {
     symbol: t.symbol, tradeId: t.tradeId,
     closeQuantity: q, exitPrice: price, partialPnl: pnl,
     remainingQuantity: t.quantity, newStop: t.stopLoss,
-    message: 'Closed 50% at +2R; remaining 50% protected at +1R from next bar'
+    partialTpTriggerR: t.partialTpTriggerR,       // ← V2.2
+    message: `Closed 50% at +${t.partialTpTriggerR}R; remaining 50% protected at +1R`
   });
 
   await sendTelegram([
     'LOMY PARTIAL CLOSE',
     `${t.symbol} ${t.direction}`,
-    'Reached +2R | Closed 50%',
+    `Reached +${t.partialTpTriggerR}R | Closed 50%`,
     `Partial PnL: ${fmtMoney(pnl)}`,
     `Remaining: ${n(t.quantity).toFixed(4)}`,
     `New SL: ${fmtPrice(t.stopLoss, t.symbol)}`
@@ -2223,34 +2435,39 @@ async function manageMechanicalBar(t, b) {
   const favorable = t.direction === 'BUY' ? b.high : b.low;
   const maxR = tradePriceR(t, favorable);
 
+  // ── V2.2: BE trigger عند 0.5R ──
   if (!t.breakEvenActivated && maxR >= RULES.breakEvenTriggerR) {
     improveStop(t, t.entryPrice);
     t.breakEvenActivated = true;
     await journal('BREAK_EVEN', {
       symbol: t.symbol, tradeId: t.tradeId,
       currentR: maxR, newStop: t.stopLoss,
-      message: 'Break-even armed; new stop applies from next 15m bar'
+      message: `Break-even armed at ${RULES.breakEvenTriggerR}R; new stop applies from next 15m bar`
     });
   }
 
-  if (!t.partialClosed && maxR >= RULES.partialTpTriggerR) {
+  // ── V2.2: Dynamic Partial TP target ──
+  const partialTrigger = n(t.partialTpTriggerR, RULES.partialTpTriggerR);
+  if (!t.partialClosed && maxR >= partialTrigger) {
     await partialCloseAtPrice(t, t.partialTargetPrice);
   }
   if (t.status !== 'OPEN') return false;
 
-  if (t.partialClosed && maxR > RULES.partialTpTriggerR) {
-    const steps = Math.floor((maxR - RULES.partialTpTriggerR) / RULES.trailingStepR);
+  // R-based trailing
+  if (t.partialClosed && maxR > partialTrigger) {
+    const steps = Math.floor((maxR - partialTrigger) / RULES.trailingStepR);
     const desiredR = RULES.trailingStartStopR + steps * RULES.trailingStepR;
     if (desiredR > n(t.trailingLevelR) && improveStop(t, stopPriceAtR(t, desiredR))) {
       t.trailingLevelR = desiredR;
       await journal('TRAILING_STOP', {
         symbol: t.symbol, tradeId: t.tradeId,
         currentR: maxR, trailingLevelR: desiredR, newStop: t.stopLoss,
-        message: `Trailing stop moved to +${desiredR.toFixed(2)}R; applies from next 15m bar`
+        message: `Trailing stop moved to +${desiredR.toFixed(2)}R`
       });
     }
   }
 
+  // ATR trailing
   if (t.partialClosed && t.status === 'OPEN') {
     const atr = atrLast([b], TECH.atrLen);
     const prevStop = t.stopLoss;
@@ -2258,7 +2475,7 @@ async function manageMechanicalBar(t, b) {
       await journal('ATR_TRAILING', {
         symbol: t.symbol, tradeId: t.tradeId,
         atr, newStop: t.stopLoss,
-        message: 'ATR trailing stop moved; applies from next 15m bar'
+        message: 'ATR trailing stop moved'
       });
     }
   }
@@ -2320,7 +2537,13 @@ async function processCandidate(c) {
     return false;
   }
 
-  // ← Session filter (معطّل في TEST MODE)
+  if (isSymbolCoolingDown(symbol)) {
+    state.skippedSignals++;
+    pair.lastEvaluatedBarTime = barTime;
+    await journal('SYMBOL_COOLDOWN', { symbol, message: symbolCooldownReason(symbol) });
+    return false;
+  }
+
   if (PROTECTION.sessionFilterEnabled && !isSessionAllowed()) {
     state.skippedSignals++;
     pair.lastEvaluatedBarTime = barTime;
@@ -2361,12 +2584,13 @@ async function processCandidate(c) {
 
   let decision;
   try {
+    const memory = await getAiMemory(symbol);
     decision = await askEntryCommander({
       symbol, mtf,
       session: getMarketSession(),
       strength: pairStrengthContext(symbol),
       news,
-      memory: await getAiMemory(symbol),
+      memory,
       confluence
     });
     state.lastEntryAiAt = Date.now();
@@ -2527,7 +2751,7 @@ async function scanMarket() {
         continue;
       }
 
-      if (isProtectionTriggered()) {
+      if (isProtectionTriggered() || isSymbolCoolingDown(symbol)) {
         state.skippedSignals++;
         pair.lastEvaluatedBarTime = r.latest.openTime;
         continue;
@@ -2542,7 +2766,6 @@ async function scanMarket() {
         state.skippedSignals++;
         pair.lastEvaluatedBarTime = r.latest.openTime;
 
-        // ← Sampling: 1 من كل 10
         if (state.scannedBars % PROTECTION.journalSamplingRate === 0) {
           const t = mtf.m15;
           if (t) {
@@ -2610,6 +2833,13 @@ function startLoops() {
 // ═══════════════════════════════════════════════════════════
 function buildStatus() {
   const model = currentGeminiModel();
+  const cooldowns = {};
+  for (const [s, c] of state.symbolCooldowns) {
+    cooldowns[s] = {
+      reason: c.reason,
+      remainingMin: Math.ceil((c.until - Date.now()) / 60000)
+    };
+  }
   return {
     version: VERSION, mode: MODE, liveTrading: LIVE_TRADING,
     uptimeSeconds: Math.floor((Date.now() - state.startedAt.getTime()) / 1000),
@@ -2631,7 +2861,8 @@ function buildStatus() {
       portfolioRiskCapUsd: portfolioRiskCapUsd(),
       dailyPnl: n(account?.dailyPnl),
       weeklyPnl: n(account?.weeklyPnl),
-      consecutiveLosses: n(account?.consecutiveLosses)
+      consecutiveLosses: n(account?.consecutiveLosses),
+      symbolStats: account?.symbolStats || {}
     },
     protection: {
       dailyLossLimitPct: PROTECTION.dailyLossLimitPct,
@@ -2643,6 +2874,7 @@ function buildStatus() {
       cooldownActive: isCooldownActive(),
       reason: protectionReason()
     },
+    cooldowns,
     usage: {
       twelveDay: account?.twelveUsageDay || null,
       twelveUsed: n(account?.twelveCreditsUsed),
@@ -2657,6 +2889,7 @@ function buildStatus() {
       geminiActiveModel: model.name,
       geminiModelIndex: state.geminiActiveModelIndex,
       geminiFallbackUsed: state.aiFallbackUsed,
+      geminiRetriesUsed: state.aiRetriesUsed,
       geminiBlockedUntil: state.geminiBlockedUntil ? new Date(state.geminiBlockedUntil) : null
     },
     trades: {
@@ -2674,6 +2907,7 @@ function buildStatus() {
       close: state.aiCloseDecisions,
       hold: state.aiHoldDecisions,
       fallbackUsed: state.aiFallbackUsed,
+      retriesUsed: state.aiRetriesUsed,
       lastError: state.lastAiError
     },
     market: {
@@ -2688,16 +2922,18 @@ function buildStatus() {
       lastError: state.lastNewsError,
       eventsLoaded: economicNews.length
     },
-    exits: {
-      breakEvenAtR: RULES.breakEvenTriggerR,
-      partialCloseAtR: RULES.partialTpTriggerR,
+    rules: {
+      breakEvenTriggerR: RULES.breakEvenTriggerR,
+      partialTpTriggerR: RULES.partialTpTriggerR,
+      partialTpTriggerRHigh: RULES.partialTpTriggerRHigh,
+      partialCloseThreshold: RULES.partialCloseThreshold,
       trailingStartStopR: RULES.trailingStartStopR,
       trailingStepR: RULES.trailingStepR,
       atrTrailStartR: RULES.atrTrailStartR,
-      atrTrailMult: RULES.atrTrailMult
-    },
-    confluence: { threshold: RULES.confluenceThreshold },
-    testMode: true
+      atrTrailMult: RULES.atrTrailMult,
+      confluenceThreshold: RULES.confluenceThreshold,
+      minEntryConfidence: RULES.minEntryConfidence
+    }
   };
 }
 
@@ -2720,7 +2956,8 @@ function startWebServer() {
       newsReady: state.newsReady,
       openTrades: state.openTrades.size,
       geminiActiveModel: currentGeminiModel().name,
-      protection: protectionReason()
+      protection: protectionReason(),
+      activeCooldowns: state.symbolCooldowns.size
     });
   });
 
@@ -2746,6 +2983,12 @@ function startWebServer() {
     }
   });
 
+  app.post('/api/cooldowns/clear', (req, res) => {
+    const n = state.symbolCooldowns.size;
+    state.symbolCooldowns.clear();
+    res.json({ ok: true, cleared: n });
+  });
+
   app.listen(PORT, '0.0.0.0', () => console.log(`[WEB] listening on ${PORT}`));
 }
 
@@ -2757,8 +3000,12 @@ function validateStartupConfig() {
   if (LIVE_TRADING !== false) throw new Error('LIVE_TRADING must remain false');
   if (PAPER.maxCapitalRiskPct > 1) throw new Error('Max capital risk cannot exceed 1%');
   if (PAPER.portfolioRiskCapPct > 4) throw new Error('Portfolio risk cap cannot exceed 4%');
-  if (RULES.riskReward !== 2 || RULES.partialTpTriggerR !== 2 || RULES.breakEvenTriggerR !== 0.6)
-    throw new Error('Frozen exit rules changed');
+  if (RULES.riskReward !== 2) throw new Error('Risk reward changed');
+  if (RULES.breakEvenTriggerR !== 0.5) throw new Error('BE trigger must be 0.5');
+  if (RULES.partialTpTriggerR !== 2 || RULES.partialTpTriggerRHigh !== 2.5)
+    throw new Error('Partial TP rules changed');
+  if (RULES.confluenceThreshold !== 6) throw new Error('Confluence threshold must be 6');
+  if (RULES.minEntryConfidence !== 60) throw new Error('Min entry confidence must be 60');
   if (!TWELVE_DATA_API_KEY) throw new Error('TWELVE_DATA_API_KEY is missing');
   if (!MONGODB_URI) throw new Error('MONGODB_URI is missing');
   if (!GEMINI_API_KEY)
@@ -2792,8 +3039,9 @@ async function boot() {
   console.log(`GEMINI_CHAIN=${GEMINI_MODELS.map(m => m.name).join(' → ')}`);
   console.log(`CONFLUENCE_THRESHOLD=${RULES.confluenceThreshold}`);
   console.log(`MIN_ENTRY_CONFIDENCE=${RULES.minEntryConfidence}`);
-  console.log(`CORRELATION_FILTER=${PROTECTION.correlationFilterEnabled}`);
-  console.log(`SESSION_FILTER=${PROTECTION.sessionFilterEnabled}`);
+  console.log(`BE_TRIGGER=${RULES.breakEvenTriggerR}R`);
+  console.log(`PARTIAL_TP=${RULES.partialTpTriggerR}R / HIGH=${RULES.partialTpTriggerRHigh}R`);
+  console.log(`GEMINI_GAP=${GEMINI_ENTRY_MIN_GAP_MS/60000} min`);
   console.log('========================================');
 
   validateStartupConfig();
@@ -2815,13 +3063,17 @@ async function boot() {
     startingBalance: PAPER.startingBalance,
     confluenceThreshold: RULES.confluenceThreshold,
     minEntryConfidence: RULES.minEntryConfidence,
-    correlationFilterEnabled: PROTECTION.correlationFilterEnabled,
-    sessionFilterEnabled: PROTECTION.sessionFilterEnabled,
-    geminiChain: GEMINI_MODELS.map(m => m.name),
-    testMode: true
+    beTriggerR: RULES.breakEvenTriggerR,
+    partialTpTriggerR: RULES.partialTpTriggerR,
+    partialTpTriggerRHigh: RULES.partialTpTriggerRHigh,
+    geminiEntryGapMin: GEMINI_ENTRY_MIN_GAP_MS / 60000,
+    geminiTimeoutMs: AI.timeoutMs,
+    symbolLossCooldownMs: PROTECTION.symbolLossCooldownMs,
+    symbolBeStreakCooldownMs: PROTECTION.symbolBeStreakCooldownMs,
+    geminiChain: GEMINI_MODELS.map(m => m.name)
   });
 
-  console.log('[BOOT] LOMY FOREX V2.1 TEST MODE READY');
+  console.log('[BOOT] LOMY FOREX V2.2 READY');
 }
 
 if (require.main === module) {
